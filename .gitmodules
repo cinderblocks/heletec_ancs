@@ -1,0 +1,9 @@
+[submodule "heltec"]
+	path = components/heltec
+	url = https://github.com/HelTecAutomation/Heltec_ESP32.git
+[submodule "arduino"]
+	path = arduino
+	url = ./components/arduino
+[submodule "components/arduino"]
+	path = components/arduino
+	url = http://github.com/espressif/arduino-esp32.git

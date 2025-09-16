@@ -39,7 +39,6 @@ void Heltec_ESP32::begin()
     ESP_LOGI(TAG, "Serial initialized.");
 
     mDisplay.init();
-    mDisplay.flipScreenVertically();
     mDisplay.drawXbm(0, 0, 128, 64, Bitmaps::Gnu_128x64);
     mDisplay.display();
     ESP_LOGI(TAG, "OLED initialized.");
@@ -56,7 +55,7 @@ void Heltec_ESP32::loop()
         if (!it->second.showed && it->second.isComplete) {
             showNotification(it->second);
             it->second.showed = true;
-            delay(10000);
+            delay(15000);
         }
     }
     if (Notifications.isCallingNotification()) {
@@ -84,14 +83,16 @@ void Heltec_ESP32::pairing(String const& passcode) {
 
 void Heltec_ESP32::showNotification(notification_def const& notification)
 {
+    char timebuf[9];
+    strftime(timebuf, sizeof(timebuf), "%R",std::localtime(&notification.time));
     mDisplay.clear();
     drawHeader();
     mDisplay.setFont(ArialMT_Plain_10);
-    mDisplay.drawString(0, 2, AppList.getDisplayName(notification.type));
+    mDisplay.drawString(0, 0, AppList.getDisplayName(notification.type));
+    mDisplay.drawString(0, 10, timebuf);
     mDisplay.setFont(ArialMT_Plain_16);
-    mDisplay.drawString(0, 16, notification.title);
-    mDisplay.setFont(ArialMT_Plain_10);
-    mDisplay.drawString(0, 32, notification.message);
+    mDisplay.drawString(0, 24, notification.title);
+    mDisplay.drawString(0, 40, notification.message);
     mDisplay.display();
 }
 
@@ -108,8 +109,8 @@ void Heltec_ESP32::standby()
             mDisplay.drawString(0, 40, "Standby.");
             break;
         case BLE_PAIRING:
-            mDisplay.drawString(0, 18, "Pairing...");
-            mDisplay.drawString(0, 34, "Passcode " + mMessage);
+            mDisplay.drawString(0, 20, "Pairing...");
+            mDisplay.drawString(0, 36, "Passcode " + mMessage);
             break;
         case BLE_DISCONNECTED:
             mDisplay.drawString(0, 40, "Disconnected.");
@@ -121,17 +122,17 @@ void Heltec_ESP32::standby()
 
 void Heltec_ESP32::drawHeader()
 {
-    mDisplay.drawIco16x16(95, 0, reinterpret_cast<const char*>(Bitmaps::Battery_100));
+    mDisplay.drawIco16x16(112, 0, reinterpret_cast<const char*>(Bitmaps::Battery_100));
     switch (mBleState) {
         case BLE_CONNECTED:
-            mDisplay.drawIco16x16(112,0, reinterpret_cast<const char *>(Bitmaps::BluetoothRound));
+            mDisplay.drawIco16x16(95,0, reinterpret_cast<const char *>(Bitmaps::BluetoothRound));
             break;
         case BLE_SERVER_CONNECTED:
         case BLE_PAIRING:
-            mDisplay.drawIco16x16(112,0, reinterpret_cast<const char *>(Bitmaps::Mqtt));
+            mDisplay.drawIco16x16(95,0, reinterpret_cast<const char *>(Bitmaps::Mqtt));
             break;
         case BLE_DISCONNECTED:
-            mDisplay.drawIco16x16(112,0, reinterpret_cast<const char *>(Bitmaps::Bluetooth));
+            mDisplay.drawIco16x16(95,0, reinterpret_cast<const char *>(Bitmaps::Bluetooth));
             break;
     }
 }

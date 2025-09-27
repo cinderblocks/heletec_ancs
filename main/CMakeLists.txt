@@ -1,13 +1,16 @@
 # -*- cmake -*-
 
 set(SOURCE_FILES
-    heltec.cxx
     ancsservice.cxx
-    notificationservice.cxx
     applist.cxx
+    fonts.cxx
+    gps.cxx
+    heltec.cxx
+    main.cxx
+    notificationservice.cxx
     security.cxx
     task.cxx
-    main.cxx
+    tft.cxx
 )
 
 set(REQUIRES

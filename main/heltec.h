@@ -19,7 +19,7 @@
 #define HELTEC_H_
 
 #include <Arduino.h>
-#include <HT_SSD1306Wire.h>
+#include "tft.h"
 
 struct notification_def;
 
@@ -35,35 +35,66 @@ typedef void (*PairButtonCallback)();
 
 class Heltec_ESP32
 {
+    friend class NotificationService;
+
 public:
+    static constexpr uint8_t ADC_CTRL = 2;
+    static constexpr uint8_t VEXT_CTRL = 3;
+
+    // TFT
+    static constexpr uint8_t ST7735_CS = 38;
+    static constexpr uint8_t ST7735_REST = 39;
+    static constexpr uint8_t ST7735_RS = 40;
+    static constexpr uint8_t ST7735_SCLK = 41;
+    static constexpr uint8_t ST7735_MOSI = 42;
+    static constexpr uint8_t ST7735_LED = 21;
+
+    // Misc
     static constexpr uint8_t BUTTON = 0;
-    static constexpr uint8_t LED = 35;
-    static constexpr uint8_t Vext = 36;
-    static constexpr uint8_t SDA_OLED = 17;
-    static constexpr uint8_t SCL_OLED = 18;
-    static constexpr uint8_t RST_OLED = 21;
-    static constexpr uint8_t RST_LoRa = 12;
-    static constexpr uint8_t DIO0 = 26;
-    static constexpr uint8_t ADC_CTRL = 37;
+    static constexpr uint8_t FACTORY_LED = 18;
     static constexpr uint8_t VBAT_READ = 1;
+    static constexpr uint8_t BUZZER = 45;
+
+    // LoRa
+    static constexpr uint8_t NSS = 8;
+    static constexpr uint8_t CLK = 9;
+    static constexpr uint8_t MOSI = 10;
+    static constexpr uint8_t MISO = 11;
+    static constexpr uint8_t RESET = 12;
+    static constexpr uint8_t BUSY = 13;
+    static constexpr uint8_t DIO_1 = 14;
+
+    static constexpr uint16_t HEADER_COLOR = 0x3190;
 
     Heltec_ESP32();
     virtual ~Heltec_ESP32();
     void begin();
-    void loop();
 
-    void setBLEConnectionState(conn_state_def state);
     void pairing(String const& passcode);
-    float getBatteryVoltage();
+    void setBLEConnectionState(conn_state_def state);
+    void showTime(String const& timestamp);
+    void showBatteryLevel(uint8_t percent);
+    void showGpsState(bool connected);
+    void glow(bool on);
+
+    uint8_t getBatteryLevel();
+
+protected:
+    TaskHandle_t mDrawTask = nullptr;
 
 private:
+    static void startDrawing(void* pvParameters);
     void showNotification(notification_def const& notification);
-    void drawHeader();
+
+    void blank();
+    void drawIcon(uint16_t x, uint16_t y, uint8_t const* xbm);
+    void showBLEState(conn_state_def state);
     void standby();
 
-    SSD1306Wire mDisplay;
+    TFT mDisplay;
     conn_state_def mBleState;
-    String mMessage;
+    bool mGpsState;
+    String mMessage = "";
 };
 
 extern Heltec_ESP32 Heltec;

@@ -60,10 +60,10 @@ void ANCSService::startServer(String const& appName)
     BLEDevice::setSecurityCallbacks(&Security);
 
     _hidDevice = new BLEHIDDevice(pServer);
-    _hidDevice->manufacturer()->setValue("HatefulBlue");
+    _hidDevice->manufacturer()->setValue("SpitefulBlue");
     _hidDevice->outputReport(0x01);
     _hidDevice->inputReport(0x02);
-    _hidDevice->pnp(1,2,3,4);
+    _hidDevice->pnp(1,2,3,5);
     _hidDevice->hidInfo(0x00, 0x01);
     _hidDevice->startServices();
     _hidDevice->setBatteryLevel(100);
@@ -161,7 +161,7 @@ void ANCSService::startClient(void *data)
         BLEUUID(static_cast<uint16_t>(0x2902)))->writeValue(v, 2, true);
     while (true)
     {
-        delay(1000);
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
     }
 EndTask:
     ESP_LOGI(TAG, "Ending ClientTask");
@@ -197,6 +197,14 @@ void ANCSService::setClientCallback(ANCSServiceClientCallback *clientCallback)
     _clientCallback = clientCallback;
 }
 
+void ANCSService::setBatteryLevel(uint8_t level)
+{
+    if (_hidDevice != nullptr) {
+        _hidDevice->setBatteryLevel(level);
+    }
+}
+
+
 ////// Callbacks ///////
 
 #if defined(CONFIG_BLUEDROID_ENABLED)
@@ -217,8 +225,7 @@ void ANCSService::ServerCallback::onConnect(BLEServer *pServer, ble_gap_conn_des
     }
     if (ancsService->_clientTaskHandle == nullptr)
     {
-        ::xTaskCreatePinnedToCore(static_cast<TaskFunction_t>(&ANCSService::startClient),
-            "ClientTask", 10000,
+        xTaskCreatePinnedToCore(&ANCSService::startClient, "ClientTask", 10000,
             new ClientParameter(peerAddress, ancsService), 5,
             &ancsService->_clientTaskHandle, 0);
     }

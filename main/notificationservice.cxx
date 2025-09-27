@@ -17,7 +17,8 @@
 
 #include "notificationservice.h"
 
-#include <ancs.h>
+#include "ancs.h"
+#include "heltec.h"
 #include <BLERemoteCharacteristic.h>
 
 static const char* TAG = "Notifications";
@@ -66,6 +67,7 @@ void NotificationService::DataSourceNotifyCallback(BLERemoteCharacteristic *pCha
             }
             if (!notification->title.isEmpty() && !notification->message.isEmpty()) {
                 notification->isComplete = true;
+                ::xTaskNotifyGive(Heltec.mDrawTask);
             }
         }
     }
@@ -78,6 +80,7 @@ void NotificationService::DataSourceNotifyCallback(BLERemoteCharacteristic *pCha
             notification.type = applicationType;
             notification.key = messageId;
             Notifications.addNotification(notification, notification.isCall());
+            ESP_LOGI(TAG, "Message from %s added", message.c_str());
         } else {
             ESP_LOGI(TAG, "Message from %s suppressed", message.c_str());
         }

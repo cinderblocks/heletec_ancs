@@ -19,6 +19,7 @@
 #include "applist.h"
 #include "heltec.h"
 #include "ancsservice.h"
+#include "gps.h"
 #include "notificationservice.h"
 #include "task.h"
 
@@ -32,6 +33,7 @@ RTC_DATA_ATTR static int boot_count = 0;
 
 ANCSService* ancsService;
 NotificationDescription* notificationReceiver;
+GPS* gps;
 
 class MainServerCallback final : public ANCSServiceServerCallback {
 public:
@@ -63,6 +65,9 @@ private:
 };
 
 class NotificationDescription final : public Task {
+public:
+    NotificationDescription(String const& name, uint16_t stack_size) : Task(name, stack_size) { }
+private:
     void run(void *data) override {
         while(true) {
             uint32_t pendingNotificationId = Notifications.getNextPendingNotification();
@@ -75,6 +80,17 @@ class NotificationDescription final : public Task {
     }
 };
 
+static uint8_t last_battery_level = 0;
+static void BatteryTimerCallback(TimerHandle_t xTimer)
+{
+    uint8_t level = Heltec.getBatteryLevel();
+    if (level != last_battery_level) {
+        last_battery_level = level;
+        Heltec.showBatteryLevel(level);
+        ancsService->setBatteryLevel(level);
+    }
+}
+
 extern "C" void app_main(void)
 {
     ESP_LOGI(TAG, "Boot count: %d", boot_count++);
@@ -85,15 +101,16 @@ extern "C" void app_main(void)
     ancsService = new ANCSService(
         &NotificationService::NotificationSourceNotifyCallback,
         &NotificationService::DataSourceNotifyCallback);
-    ancsService->startServer("HatefulBlue");
-    notificationReceiver = new NotificationDescription();
-    notificationReceiver->setStackSize(50000);
-    notificationReceiver->setName("NotificationReceiver");
+    ancsService->startServer("SpitefulBlue");
+    notificationReceiver = new NotificationDescription("NotificationReceiver", 50000);
     notificationReceiver->start();
     ancsService->setServerCallback(new MainServerCallback(&Heltec));
+    gps = new GPS("GPS", 10000);
+    gps->start();
 
     while(true)
     {
-        Heltec.loop();
+        BatteryTimerCallback(nullptr);
+        delay(5000);
     }
 }

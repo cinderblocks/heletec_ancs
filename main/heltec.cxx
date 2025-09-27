@@ -23,7 +23,7 @@
 static const char* TAG = "heltec";
 
 Heltec_ESP32::Heltec_ESP32()
-:   mDisplay(0x3c, 500000, SDA_OLED, SCL_OLED, GEOMETRY_128_64, RST_OLED)
+:   mDisplay(ST7735_CS, ST7735_REST, ST7735_RS, ST7735_SCLK, ST7735_MOSI, ST7735_LED, VEXT_CTRL)
 ,   mBleState(BLE_DISCONNECTED)
 { }
 
@@ -32,116 +32,183 @@ Heltec_ESP32::~Heltec_ESP32() = default;
 
 void Heltec_ESP32::begin()
 {
-    //pinMode(LED, OUTPUT);
-    Serial.begin(115200);
-    Serial.flush();
-    delay(50);
-    ESP_LOGI(TAG, "Serial initialized.");
-
     mDisplay.init();
-    mDisplay.drawXbm(0, 0, 128, 64, Bitmaps::Gnu_128x64);
-    mDisplay.display();
-    ESP_LOGI(TAG, "OLED initialized.");
+    blank();
+    mDisplay.drawXbm(16, 10, 128,64, Bitmaps::Gnu_128x64, TFT::Color::GREEN);
+    ESP_LOGI(TAG, "TFT initialized.");
 
-    pinMode(ADC_CTRL, OUTPUT);
-    digitalWrite(ADC_CTRL, LOW);
     pinMode(VBAT_READ, INPUT);
+    pinMode(FACTORY_LED, OUTPUT);
+
+    xTaskCreatePinnedToCore(&Heltec_ESP32::startDrawing,
+        "DrawTask", 10000, this, 3, &mDrawTask, 0);
 }
 
-void Heltec_ESP32::loop()
+/* static */
+void Heltec_ESP32::startDrawing(void* pvParameters)
 {
-    for (auto it = Notifications.getNotificationList().begin(); it != Notifications.getNotificationList().end(); ++it) {
-        if (Notifications.isCallingNotification()) { break; }
-        if (!it->second.showed && it->second.isComplete) {
-            showNotification(it->second);
-            it->second.showed = true;
-            delay(15000);
-        }
-    }
-    if (Notifications.isCallingNotification()) {
-        notification_def notification = Notifications.getCallingNotification();
-        if (notification.isComplete) {
-            showNotification(notification);
-            delay(1000);
-        }
-    } else {
-        standby();
-    }
+    ESP_LOGI(TAG, "Starting Draw task");
+    Heltec_ESP32 *h = static_cast<Heltec_ESP32*>(pvParameters);
 
-    delay(100);
+    h->mDisplay.fillRectangle(0, 0, h->mDisplay.width(), 20, HEADER_COLOR);
+    h->showBLEState(h->mBleState);
+
+    h->standby();
+
+    while (true)
+    {
+        BaseType_t result = xTaskNotifyWait(0x00, 0x00, nullptr, portMAX_DELAY);
+        if (result == pdPASS)
+        {
+            for (auto it = Notifications.getNotificationList().begin(); it != Notifications.getNotificationList().end(); ++it) {
+                if (Notifications.isCallingNotification()) { break; }
+                if (!it->second.showed && it->second.isComplete) {
+                    h->showNotification(it->second);
+                    it->second.showed = true;
+                    h->glow(true);
+                    vTaskDelay(15000 / portTICK_PERIOD_MS);
+                    h->glow(false);
+
+                }
+            }
+            if (Notifications.isCallingNotification()) {
+                notification_def notification = Notifications.getCallingNotification();
+                if (notification.isComplete) {
+                    h->showNotification(notification);
+                    h->glow(true);
+                    vTaskDelay(1000 / portTICK_PERIOD_MS);
+                    h->glow(false);
+                }
+            }
+            h->standby();
+        }
+    }
+    ESP_LOGI(TAG, "Ending Draw task");
+    h->mDrawTask = nullptr;
+    vTaskDelete(nullptr);
+}
+
+void Heltec_ESP32::pairing(String const& passcode)
+{
+    mMessage = passcode;
+    setBLEConnectionState(BLE_PAIRING);
 }
 
 void Heltec_ESP32::setBLEConnectionState(conn_state_def state)
 {
     mBleState = state;
-}
-
-void Heltec_ESP32::pairing(String const& passcode) {
-    mMessage = passcode;
-    setBLEConnectionState(BLE_PAIRING);
+    showBLEState(state);
+    ::xTaskNotifyGive(mDrawTask);
 }
 
 void Heltec_ESP32::showNotification(notification_def const& notification)
 {
     char timebuf[9];
     strftime(timebuf, sizeof(timebuf), "%R",std::localtime(&notification.time));
-    mDisplay.clear();
-    drawHeader();
-    mDisplay.setFont(ArialMT_Plain_10);
-    mDisplay.drawString(0, 0, AppList.getDisplayName(notification.type));
-    mDisplay.drawString(0, 10, timebuf);
-    mDisplay.setFont(ArialMT_Plain_16);
-    mDisplay.drawString(0, 24, notification.title);
-    mDisplay.drawString(0, 40, notification.message);
-    mDisplay.display();
+    blank();
+    mDisplay.fillRectangle(0, 20, mDisplay.width(), mDisplay.height() - 20, TFT::Color::WHITE);
+    mDisplay.drawStr(0, 21, AppList.getDisplayName(notification.type),
+        Font_7x10, TFT::Color::BLACK, TFT::Color::WHITE);
+    mDisplay.drawStr(mDisplay.width() - 38, 21, timebuf,
+        Font_7x10, TFT::Color::BLACK, TFT::Color::WHITE);
+    mDisplay.drawStr(0, 44, notification.title, Font_11x18, TFT::Color::BLACK, TFT::Color::WHITE);
+    mDisplay.drawStr(0, 62, notification.message, Font_11x18, TFT::Color::BLACK, TFT::Color::WHITE);
+}
+
+uint8_t Heltec_ESP32::getBatteryLevel()
+{
+    pinMode(ADC_CTRL, INPUT_PULLUP);
+    delay(100); // wait for GPIO stabilization
+    uint16_t analogValue = analogRead(VBAT_READ);
+    pinMode(ADC_CTRL, INPUT_PULLDOWN);
+
+    const float voltage = analogValue * 0.0037f;
+    uint8_t percent = constrain(((analogValue - 680.f) / 343.f) * 100, 0, 100);
+    return percent;
 }
 
 void Heltec_ESP32::standby()
 {
-    mDisplay.clear();
-    drawHeader();
-    mDisplay.setFont(ArialMT_Plain_16);
+    blank();
     switch (mBleState) {
         case BLE_SERVER_CONNECTED:
-            mDisplay.drawString(0, 40, "Connected.");
+            mDisplay.drawStr(0, 62, "Connected", Font_11x18, TFT::Color::WHITE);
             break;
         case BLE_CONNECTED:
-            mDisplay.drawString(0, 40, "Standby.");
+            mDisplay.drawStr(0, 62, "Standby", Font_11x18, TFT::Color::WHITE);
             break;
         case BLE_PAIRING:
-            mDisplay.drawString(0, 20, "Pairing...");
-            mDisplay.drawString(0, 36, "Passcode " + mMessage);
+            mDisplay.drawStr(0, 36, "Pairing", Font_11x18, TFT::Color::WHITE);
+            mDisplay.drawStr(0, 62, "Passcode " + mMessage, Font_16x26, TFT::Color::WHITE);
             break;
         case BLE_DISCONNECTED:
-            mDisplay.drawString(0, 40, "Disconnected.");
-            break;
-    }
-
-    mDisplay.display();
-}
-
-void Heltec_ESP32::drawHeader()
-{
-    mDisplay.drawIco16x16(112, 0, reinterpret_cast<const char*>(Bitmaps::Battery_100));
-    switch (mBleState) {
-        case BLE_CONNECTED:
-            mDisplay.drawIco16x16(95,0, reinterpret_cast<const char *>(Bitmaps::BluetoothRound));
-            break;
-        case BLE_SERVER_CONNECTED:
-        case BLE_PAIRING:
-            mDisplay.drawIco16x16(95,0, reinterpret_cast<const char *>(Bitmaps::Mqtt));
-            break;
-        case BLE_DISCONNECTED:
-            mDisplay.drawIco16x16(95,0, reinterpret_cast<const char *>(Bitmaps::Bluetooth));
+            mDisplay.drawStr(0, 62, "Disconnected", Font_11x18, TFT::Color::WHITE);
             break;
     }
 }
 
-float Heltec_ESP32::getBatteryVoltage()
+void Heltec_ESP32::blank()
 {
-    const uint16_t analogValue = analogRead(VBAT_READ);
-    const float voltage = analogValue * 0.00403532794741887;
-    return voltage;
+    mDisplay.fillRectangle(0, 20, mDisplay.width(), mDisplay.height() - 20, TFT::Color::BLACK);
+}
+
+void Heltec_ESP32::drawIcon(const uint16_t x, const uint16_t y, const uint8_t* xbm)
+{
+    mDisplay.drawXbm(x, y, 16, 16, xbm, TFT::Color::WHITE, HEADER_COLOR);
+}
+
+void Heltec_ESP32::showTime(String const& timestamp)
+{
+    mDisplay.drawStr(0, 3, timestamp, Font_7x10, TFT::Color::WHITE, HEADER_COLOR);
+}
+
+void Heltec_ESP32::showBLEState(conn_state_def state)
+{
+    switch (state) {
+        case BLE_CONNECTED:
+            drawIcon(mDisplay.width()-33, 1, Bitmaps::BluetoothRound);
+            break;
+        case BLE_SERVER_CONNECTED:
+        case BLE_PAIRING:
+            drawIcon(mDisplay.width()-33, 1, Bitmaps::Mqtt);
+            break;
+        case BLE_DISCONNECTED:
+            drawIcon(mDisplay.width()-33, 1, Bitmaps::Bluetooth);
+            break;
+    }
+}
+
+void Heltec_ESP32::showBatteryLevel(uint8_t percent)
+{
+    if (percent > 75) {
+        drawIcon(mDisplay.width()-16, 1, Bitmaps::Battery_100);
+    } else if (percent > 50) {
+        drawIcon(mDisplay.width()-16, 1, Bitmaps::Battery_66);
+    } else if (percent > 25) {
+        drawIcon(mDisplay.width()-16, 1, Bitmaps::Battery_33);
+    } else {
+        drawIcon(mDisplay.width()-16, 1, Bitmaps::Battery_0);
+    }
+}
+
+void Heltec_ESP32::showGpsState(bool connected)
+{
+    if (connected == mGpsState) { return ; }
+
+    mGpsState = connected;
+    if (connected)
+    {
+        drawIcon(mDisplay.width()-50, 1, Bitmaps::GPS);
+    }
+    else
+    {
+        mDisplay.fillRectangle(mDisplay.width()-50, 1, 16, 16, HEADER_COLOR);
+    }
+}
+
+void Heltec_ESP32::glow(bool on)
+{
+    digitalWrite(FACTORY_LED, on ? HIGH : LOW);
 }
 
 /* extern */

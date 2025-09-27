@@ -48,6 +48,7 @@ class ANCSService
         void retrieveNotificationData(uint32_t notifyUUID) const;
         void setServerCallback(ANCSServiceServerCallback *serverCallback);
         void setClientCallback(ANCSServiceClientCallback *clientCallback);
+        void setBatteryLevel(uint8_t level);
 
     private:
         // ANCS

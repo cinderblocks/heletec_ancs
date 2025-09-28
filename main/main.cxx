@@ -72,14 +72,12 @@ private:
         uint32_t pendingId;
         while(true)
         {
-            if (xQueueReceive(Notifications.getPendingQueue(), &pendingId, portMAX_DELAY) == pdTRUE)
+            uint32_t pendingNotificationId = Notifications.getNextPendingNotification();
+            if (pendingNotificationId != 0)
             {
-                Ble.retrieveNotificationData(pendingId);
+                Ble.retrieveNotificationData(pendingNotificationId);
             }
-            else
-            {
-                ESP_LOGW(TAG, "Failed to receive notification");
-            }
+            delay(500);
         }
     }
 };

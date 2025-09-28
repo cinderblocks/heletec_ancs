@@ -107,21 +107,24 @@ void NotificationService::NotificationSourceNotifyCallback(BLERemoteCharacterist
     }
     else if (pData[0] == ANCS::EventIDNotificationAdded)
     {
-        if (xQueueSendToFront(Notifications.getPendingQueue(), &messageId, portMAX_DELAY) != pdTRUE)
-        {
-            ESP_LOGW(TAG, "Failed to add notification %d", messageId);
-        }
+        Notifications.addPendingNotification(messageId);
     }
 }
 
-NotificationService::NotificationService()
+void NotificationService::addPendingNotification(uint32_t uuid)
 {
-    pendingNotifications = xQueueCreate(8, sizeof(uint32_t));
+    pendingNotification.push(uuid);
 }
 
-NotificationService::~NotificationService()
+uint32_t NotificationService::getNextPendingNotification()
 {
-    vQueueDelete(pendingNotifications);
+    if (!pendingNotification.empty())
+    {
+        const uint32_t uuid = pendingNotification.top();
+        pendingNotification.pop();
+        return uuid;
+    }
+    return 0;
 }
 
 void NotificationService::addNotification(notification_def const& notification, bool isCalling)

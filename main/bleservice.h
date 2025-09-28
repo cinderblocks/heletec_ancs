@@ -15,8 +15,8 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#ifndef BLE_SERVICES_H
-#define BLE_SERVICES_H
+#ifndef BLE_SERVICE_H
+#define BLE_SERVICE_H
 
 #include <BLEDevice.h>
 
@@ -105,4 +105,4 @@ class BleService
 
 extern BleService Ble;
 
-#endif /* BLE_SERVICES_H */
+#endif /* BLE_SERVICE_H */

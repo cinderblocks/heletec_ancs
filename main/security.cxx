@@ -17,7 +17,7 @@
 
 #include "security.h"
 
-#include "heltec.h"
+#include "hardware.h"
 #include <BLEDevice.h>
 #include <esp_log.h>
 

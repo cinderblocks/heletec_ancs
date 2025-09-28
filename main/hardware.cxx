@@ -15,22 +15,22 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include "heltec.h"
+#include "hardware.h"
 
 #include "bitmaps.h"
+#include "bleservice.h"
 #include "notificationservice.h"
 
-static const char* TAG = "heltec";
+static const char* TAG = "hardware";
 
-Heltec_ESP32::Heltec_ESP32()
+Hardware::Hardware()
 :   mDisplay(ST7735_CS, ST7735_REST, ST7735_RS, ST7735_SCLK, ST7735_MOSI, ST7735_LED, VEXT_CTRL)
-,   mBleState(BLE_DISCONNECTED)
 { }
 
 /* virtual */
-Heltec_ESP32::~Heltec_ESP32() = default;
+Hardware::~Hardware() = default;
 
-void Heltec_ESP32::begin()
+void Hardware::begin()
 {
     mDisplay.init();
     blank();
@@ -40,15 +40,25 @@ void Heltec_ESP32::begin()
     pinMode(VBAT_READ, INPUT);
     pinMode(FACTORY_LED, OUTPUT);
 
-    xTaskCreatePinnedToCore(&Heltec_ESP32::startDrawing,
+    mBatteryTimer = xTimerCreate("Battery", pdMS_TO_TICKS(60000), pdTRUE, nullptr, batteryTimerCallback);
+    if (mBatteryTimer == nullptr)
+    {
+        ESP_LOGW(TAG, "Failed to create BatteryTimer");
+    }
+    else if (xTimerStart(mBatteryTimer, 0) != pdTRUE)
+    {
+        ESP_LOGW(TAG, "Failed to start BatteryTimer");
+    }
+
+    xTaskCreatePinnedToCore(&Hardware::startDrawing,
         "DrawTask", 10000, this, 3, &mDrawTask, 0);
 }
 
 /* static */
-void Heltec_ESP32::startDrawing(void* pvParameters)
+void Hardware::startDrawing(void* pvParameters)
 {
     ESP_LOGI(TAG, "Starting Draw task");
-    Heltec_ESP32 *h = static_cast<Heltec_ESP32*>(pvParameters);
+    Hardware *h = static_cast<Hardware*>(pvParameters);
 
     h->mDisplay.fillRectangle(0, 0, h->mDisplay.width(), 20, HEADER_COLOR);
     h->showBLEState(h->mBleState);
@@ -88,20 +98,20 @@ void Heltec_ESP32::startDrawing(void* pvParameters)
     vTaskDelete(nullptr);
 }
 
-void Heltec_ESP32::pairing(String const& passcode)
+void Hardware::pairing(String const& passcode)
 {
     mMessage = passcode;
     setBLEConnectionState(BLE_PAIRING);
 }
 
-void Heltec_ESP32::setBLEConnectionState(conn_state_def state)
+void Hardware::setBLEConnectionState(conn_state_def state)
 {
     mBleState = state;
     showBLEState(state);
     ::xTaskNotifyGive(mDrawTask);
 }
 
-void Heltec_ESP32::showNotification(notification_def const& notification)
+void Hardware::showNotification(notification_def const& notification)
 {
     char timebuf[9];
     strftime(timebuf, sizeof(timebuf), "%R",std::localtime(&notification.time));
@@ -115,19 +125,18 @@ void Heltec_ESP32::showNotification(notification_def const& notification)
     mDisplay.drawStr(0, 62, notification.message, Font_11x18, TFT::Color::BLACK, TFT::Color::WHITE);
 }
 
-uint8_t Heltec_ESP32::getBatteryLevel()
+uint8_t Hardware::getBatteryLevel()
 {
     pinMode(ADC_CTRL, INPUT_PULLUP);
     delay(100); // wait for GPIO stabilization
     uint16_t analogValue = analogRead(VBAT_READ);
     pinMode(ADC_CTRL, INPUT_PULLDOWN);
 
-    const float voltage = analogValue * 0.0037f;
-    uint8_t percent = constrain(((analogValue - 680.f) / 343.f) * 100, 0, 100);
-    return percent;
+    //const float voltage = analogValue * 0.0037f;
+    return constrain(((analogValue - 680.f) / 343.f) * 100, 0, 100);
 }
 
-void Heltec_ESP32::standby()
+void Hardware::standby()
 {
     blank();
     switch (mBleState) {
@@ -147,22 +156,22 @@ void Heltec_ESP32::standby()
     }
 }
 
-void Heltec_ESP32::blank()
+void Hardware::blank()
 {
     mDisplay.fillRectangle(0, 20, mDisplay.width(), mDisplay.height() - 20, TFT::Color::BLACK);
 }
 
-void Heltec_ESP32::drawIcon(const uint16_t x, const uint16_t y, const uint8_t* xbm)
+void Hardware::drawIcon(const uint16_t x, const uint16_t y, const uint8_t* xbm)
 {
     mDisplay.drawXbm(x, y, 16, 16, xbm, TFT::Color::WHITE, HEADER_COLOR);
 }
 
-void Heltec_ESP32::showTime(String const& timestamp)
+void Hardware::showTime(String const& timestamp)
 {
-    mDisplay.drawStr(0, 3, timestamp, Font_7x10, TFT::Color::WHITE, HEADER_COLOR);
+    mDisplay.drawStr(0, 6, timestamp, Font_7x10, TFT::Color::WHITE, HEADER_COLOR);
 }
 
-void Heltec_ESP32::showBLEState(conn_state_def state)
+void Hardware::showBLEState(conn_state_def state)
 {
     switch (state) {
         case BLE_CONNECTED:
@@ -178,7 +187,7 @@ void Heltec_ESP32::showBLEState(conn_state_def state)
     }
 }
 
-void Heltec_ESP32::showBatteryLevel(uint8_t percent)
+void Hardware::showBatteryLevel(uint8_t percent)
 {
     if (percent > 75) {
         drawIcon(mDisplay.width()-16, 1, Bitmaps::Battery_100);
@@ -191,7 +200,7 @@ void Heltec_ESP32::showBatteryLevel(uint8_t percent)
     }
 }
 
-void Heltec_ESP32::showGpsState(bool connected)
+void Hardware::showGpsState(bool connected)
 {
     if (connected == mGpsState) { return ; }
 
@@ -206,10 +215,22 @@ void Heltec_ESP32::showGpsState(bool connected)
     }
 }
 
-void Heltec_ESP32::glow(bool on)
+void Hardware::glow(bool on)
 {
     digitalWrite(FACTORY_LED, on ? HIGH : LOW);
 }
 
+/* static */
+void Hardware::batteryTimerCallback(TimerHandle_t xTimer)
+{
+    uint8_t level = Heltec.getBatteryLevel();
+    if (level != Heltec.mBatteryLevel)
+    {
+        Heltec.mBatteryLevel = level;
+        Heltec.showBatteryLevel(level);
+        Ble.setBatteryLevel(level);
+    }
+}
+
 /* extern */
-Heltec_ESP32 Heltec;
+Hardware Heltec;

@@ -17,7 +17,7 @@
 
 #include "gps.h"
 
-#include "heltec.h"
+#include "hardware.h"
 
 static const char* TAG = "gps";
 

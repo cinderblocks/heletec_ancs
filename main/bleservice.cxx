@@ -15,9 +15,10 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include "ancsservice.h"
+#include "bleservice.h"
 
 #include "ancs.h"
+#include "notificationservice.h"
 #include "security.h"
 #include <BLE2902.h>
 #include <BLEHIDDevice.h>
@@ -31,13 +32,13 @@ static const auto DATA_SOURCE_CHR_UUID = BLEUUID("22EAC6E9-24D6-4BB5-BE44-B36ACE
 
 //static const auto ANS_SERVICE_UUID = BLEUUID(static_cast<uint16_t>(0x1811));
 
-ANCSService::ANCSService(const NotificationCallback notificationSourceCallback, const NotificationCallback dataSourceCallback)
+BleService::BleService(const NotificationCallback notificationSourceCallback, const NotificationCallback dataSourceCallback)
 :   _notificationSourceCallback(notificationSourceCallback)
 ,   _dataSourceCallback(dataSourceCallback)
 { }
 
 /* virtual */
-ANCSService::~ANCSService()
+BleService::~BleService()
 {
     if (_hidDevice != nullptr) {
         delete _hidDevice;
@@ -46,7 +47,7 @@ ANCSService::~ANCSService()
 }
 
 
-void ANCSService::startServer(String const& appName)
+void BleService::startServer(String const& appName)
 {
     // Initialize device
     BLEDevice::init(appName);
@@ -60,10 +61,10 @@ void ANCSService::startServer(String const& appName)
     BLEDevice::setSecurityCallbacks(&Security);
 
     _hidDevice = new BLEHIDDevice(pServer);
-    _hidDevice->manufacturer()->setValue("SpitefulBlue");
+    _hidDevice->manufacturer()->setValue("Sjofn LLC");
     _hidDevice->outputReport(0x01);
     _hidDevice->inputReport(0x02);
-    _hidDevice->pnp(1,2,3,5);
+    _hidDevice->pnp(0x00, 0x00C3 ,0xffff, 0x0001);
     _hidDevice->hidInfo(0x00, 0x01);
     _hidDevice->startServices();
     _hidDevice->setBatteryLevel(100);
@@ -97,7 +98,7 @@ void ANCSService::startServer(String const& appName)
 }
 
 /* static */
-void ANCSService::startClient(void *data)
+void BleService::startClient(void *data)
 {
     if (data == nullptr) { return; }
     ESP_LOGI(TAG, "Starting client");
@@ -121,7 +122,7 @@ void ANCSService::startClient(void *data)
 #endif
 
     BLEClient *pClient = BLEDevice::createClient();
-    pClient->setClientCallbacks(new ClientCallback(clientParam->ancsService));
+    pClient->setClientCallbacks(new ClientCallback(clientParam->bleService));
     pClient->connect(clientParam->bleAddress);
 
     BLERemoteService *pAncsService = pClient->getService(ANCS_SERVICE_UUID);
@@ -130,34 +131,34 @@ void ANCSService::startClient(void *data)
         ESP_LOGW(TAG, "Failed to find ANCS service on peer");
         goto EndTask;
     }
-    clientParam->ancsService->_notificationSourceCharacteristic =
+    clientParam->bleService->_notificationSourceCharacteristic =
         pAncsService->getCharacteristic(NOTIFICATION_SOURCE_CHR_UUID);
-    if (clientParam->ancsService->_notificationSourceCharacteristic == nullptr)
+    if (clientParam->bleService->_notificationSourceCharacteristic == nullptr)
     {
         ESP_LOGW(TAG, "Failed to find notification source characteristic");
         goto EndTask;
     }
-    clientParam->ancsService->_controlPointCharacteristic =
+    clientParam->bleService->_controlPointCharacteristic =
         pAncsService->getCharacteristic(CONTROL_POINT_CHR_UUID);
-    if (clientParam->ancsService->_controlPointCharacteristic == nullptr)
+    if (clientParam->bleService->_controlPointCharacteristic == nullptr)
     {
         ESP_LOGW(TAG, "Failed to find our control point characteristic");
         goto EndTask;
     }
-    clientParam->ancsService->_dataSourceCharacteristic =
+    clientParam->bleService->_dataSourceCharacteristic =
         pAncsService->getCharacteristic(DATA_SOURCE_CHR_UUID);
-    if (clientParam->ancsService->_dataSourceCharacteristic == nullptr)
+    if (clientParam->bleService->_dataSourceCharacteristic == nullptr)
     {
         ESP_LOGW(TAG, "Failed to find datasource characteristic");
         goto EndTask;
     }
-    clientParam->ancsService->_notificationSourceCharacteristic->registerForNotify(
-        clientParam->ancsService->_notificationSourceCallback);
-    clientParam->ancsService->_notificationSourceCharacteristic->getDescriptor(
+    clientParam->bleService->_notificationSourceCharacteristic->registerForNotify(
+        clientParam->bleService->_notificationSourceCallback);
+    clientParam->bleService->_notificationSourceCharacteristic->getDescriptor(
         BLEUUID(static_cast<uint16_t>(0x2902)))->writeValue(v, 2, true);
-    clientParam->ancsService->_dataSourceCharacteristic->registerForNotify(
-        clientParam->ancsService->_dataSourceCallback);
-    clientParam->ancsService->_dataSourceCharacteristic->getDescriptor(
+    clientParam->bleService->_dataSourceCharacteristic->registerForNotify(
+        clientParam->bleService->_dataSourceCallback);
+    clientParam->bleService->_dataSourceCharacteristic->getDescriptor(
         BLEUUID(static_cast<uint16_t>(0x2902)))->writeValue(v, 2, true);
     while (true)
     {
@@ -165,12 +166,12 @@ void ANCSService::startClient(void *data)
     }
 EndTask:
     ESP_LOGI(TAG, "Ending ClientTask");
-    clientParam->ancsService->_clientTaskHandle = nullptr;
+    clientParam->bleService->_clientTaskHandle = nullptr;
     delete clientParam;
     vTaskDelete(nullptr);
 }
 
-void ANCSService::retrieveNotificationData(uint32_t notifyUUID) const
+void BleService::retrieveNotificationData(uint32_t notifyUUID) const
 {
         uint8_t uuid[4];
         uuid[0] = notifyUUID;
@@ -187,17 +188,17 @@ void ANCSService::retrieveNotificationData(uint32_t notifyUUID) const
         _controlPointCharacteristic->writeValue(vDate, 6, true);
 }
 
-void ANCSService::setServerCallback(ANCSServiceServerCallback *serverCallback)
+void BleService::setServerCallback(ANCSServiceServerCallback *serverCallback)
 {
     _serverCallback = serverCallback;
 }
 
-void ANCSService::setClientCallback(ANCSServiceClientCallback *clientCallback)
+void BleService::setClientCallback(ANCSServiceClientCallback *clientCallback)
 {
     _clientCallback = clientCallback;
 }
 
-void ANCSService::setBatteryLevel(uint8_t level)
+void BleService::setBatteryLevel(uint8_t level)
 {
     if (_hidDevice != nullptr) {
         _hidDevice->setBatteryLevel(level);
@@ -208,9 +209,9 @@ void ANCSService::setBatteryLevel(uint8_t level)
 ////// Callbacks ///////
 
 #if defined(CONFIG_BLUEDROID_ENABLED)
-void ANCSService::ServerCallback::onConnect(BLEServer *pServer, esp_ble_gatts_cb_param_t *desc)
+void BleService::ServerCallback::onConnect(BLEServer *pServer, esp_ble_gatts_cb_param_t *desc)
 #elif defined(CONFIG_NIMBLE_ENABLED)
-void ANCSService::ServerCallback::onConnect(BLEServer *pServer, ble_gap_conn_desc *desc)
+void BleService::ServerCallback::onConnect(BLEServer *pServer, ble_gap_conn_desc *desc)
 #endif
 {
 #if defined(CONFIG_BLUEDROID_ENABLED)
@@ -225,13 +226,13 @@ void ANCSService::ServerCallback::onConnect(BLEServer *pServer, ble_gap_conn_des
     }
     if (ancsService->_clientTaskHandle == nullptr)
     {
-        xTaskCreatePinnedToCore(&ANCSService::startClient, "ClientTask", 10000,
+        xTaskCreatePinnedToCore(&BleService::startClient, "ClientTask", 10000,
             new ClientParameter(peerAddress, ancsService), 5,
             &ancsService->_clientTaskHandle, 0);
     }
 }
 
-void ANCSService::ServerCallback::onDisconnect(BLEServer *pServer)
+void BleService::ServerCallback::onDisconnect(BLEServer *pServer)
 {
     if (ancsService->_clientTaskHandle != nullptr)
     {
@@ -246,7 +247,7 @@ void ANCSService::ServerCallback::onDisconnect(BLEServer *pServer)
     BLEDevice::startAdvertising();
 }
 
-void ANCSService::ClientCallback::onConnect(BLEClient *pClient)
+void BleService::ClientCallback::onConnect(BLEClient *pClient)
 {
     if (pClient != nullptr) {
         ESP_LOGI(TAG, "Device client connected %s", pClient->getPeerAddress().toString().c_str());
@@ -257,7 +258,7 @@ void ANCSService::ClientCallback::onConnect(BLEClient *pClient)
     }
 }
 
-void ANCSService::ClientCallback::onDisconnect(BLEClient *pClient)
+void BleService::ClientCallback::onDisconnect(BLEClient *pClient)
 {
     if (pClient != nullptr) {
         ESP_LOGI(TAG, "Device Client disconnected %s", pClient->getPeerAddress().toString().c_str() );
@@ -268,3 +269,6 @@ void ANCSService::ClientCallback::onDisconnect(BLEClient *pClient)
     }
     BLEDevice::startAdvertising();
 }
+
+/* extern */
+BleService Ble = BleService(&NotificationService::NotificationSourceNotifyCallback, &NotificationService::DataSourceNotifyCallback);

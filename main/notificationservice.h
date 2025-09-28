@@ -22,7 +22,6 @@
 
 #include <Arduino.h>
 #include <map>
-#include <stack>
 #include <ctime>
 
 class BLERemoteCharacteristic;
@@ -42,9 +41,11 @@ struct notification_def
 
 class NotificationService
 {
+    friend class NotificationDescription;
 public:
-    void addPendingNotification(uint32_t uuid);
-    uint32_t getNextPendingNotification();
+    NotificationService();
+    ~NotificationService();
+
     void addNotification(notification_def const& notification, bool isCalling);
     void removeNotification(uint32_t uuid);
     void removeCallNotification();
@@ -57,10 +58,13 @@ public:
     static void DataSourceNotifyCallback(BLERemoteCharacteristic *pCharacteristic, uint8_t *pData, size_t length, bool isNotify);
     static void NotificationSourceNotifyCallback(BLERemoteCharacteristic *pCharacteristic, uint8_t *pData, size_t length,bool isNotify);
 
+protected:
+    QueueHandle_t getPendingQueue() const { return pendingNotifications; }
+
 private:
     static constexpr int notificationListSize = 8;
+    QueueHandle_t pendingNotifications;
     std::map<uint32_t, notification_def> notificationList;
-    std::stack<uint32_t> pendingNotification;
     notification_def callingNotification;
 };
 

@@ -17,8 +17,8 @@
 
 #include "sdkconfig.h"
 #include "applist.h"
-#include "heltec.h"
-#include "ancsservice.h"
+#include "hardware.h"
+#include "bleservice.h"
 #include "gps.h"
 #include "notificationservice.h"
 #include "task.h"
@@ -31,13 +31,12 @@ class NotificationDescription;
 static const char* TAG = "main";
 RTC_DATA_ATTR static int boot_count = 0;
 
-ANCSService* ancsService;
 NotificationDescription* notificationReceiver;
 GPS* gps;
 
 class MainServerCallback final : public ANCSServiceServerCallback {
 public:
-    explicit MainServerCallback(Heltec_ESP32 *ht) : _ht(ht) { }
+    explicit MainServerCallback(Hardware *ht) : _ht(ht) { }
     ~MainServerCallback() = default;
     void onConnect() override {
         _ht->setBLEConnectionState(BLE_CONNECTED);
@@ -46,12 +45,12 @@ public:
         _ht->setBLEConnectionState(BLE_DISCONNECTED);
     }
 private:
-    Heltec_ESP32* _ht;
+    Hardware* _ht;
 };
 
 class MainClientCallback final : public ANCSServiceClientCallback {
 public:
-    explicit MainClientCallback(Heltec_ESP32  *ht) : _ht(ht) { }
+    explicit MainClientCallback(Hardware  *ht) : _ht(ht) { }
     ~MainClientCallback() = default;
     void onConnect() override {
         ESP_LOGI(TAG, "Client Connected");
@@ -61,35 +60,29 @@ public:
         _ht->setBLEConnectionState(BLE_DISCONNECTED);
     }
 private:
-    Heltec_ESP32* _ht;
+    Hardware* _ht;
 };
 
 class NotificationDescription final : public Task {
 public:
     NotificationDescription(String const& name, uint16_t stack_size) : Task(name, stack_size) { }
 private:
-    void run(void *data) override {
-        while(true) {
-            uint32_t pendingNotificationId = Notifications.getNextPendingNotification();
-            if (pendingNotificationId != 0)
+    void run(void *data) override
+    {
+        uint32_t pendingId;
+        while(true)
+        {
+            if (xQueueReceive(Notifications.getPendingQueue(), &pendingId, portMAX_DELAY) == pdTRUE)
             {
-                ancsService->retrieveNotificationData(pendingNotificationId);
+                Ble.retrieveNotificationData(pendingId);
             }
-            delay(500);
+            else
+            {
+                ESP_LOGW(TAG, "Failed to receive notification");
+            }
         }
     }
 };
-
-static uint8_t last_battery_level = 0;
-static void BatteryTimerCallback(TimerHandle_t xTimer)
-{
-    uint8_t level = Heltec.getBatteryLevel();
-    if (level != last_battery_level) {
-        last_battery_level = level;
-        Heltec.showBatteryLevel(level);
-        ancsService->setBatteryLevel(level);
-    }
-}
 
 extern "C" void app_main(void)
 {
@@ -97,20 +90,17 @@ extern "C" void app_main(void)
 
     initArduino();
     Heltec.begin();
+    Ble.startServer("SpitefulBlue");
 
-    ancsService = new ANCSService(
-        &NotificationService::NotificationSourceNotifyCallback,
-        &NotificationService::DataSourceNotifyCallback);
-    ancsService->startServer("SpitefulBlue");
     notificationReceiver = new NotificationDescription("NotificationReceiver", 50000);
     notificationReceiver->start();
-    ancsService->setServerCallback(new MainServerCallback(&Heltec));
+    Ble.setServerCallback(new MainServerCallback(&Heltec));
     gps = new GPS("GPS", 10000);
     gps->start();
 
     while(true)
     {
-        BatteryTimerCallback(nullptr);
         delay(5000);
     }
 }
+

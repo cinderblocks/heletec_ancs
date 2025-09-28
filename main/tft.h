@@ -154,6 +154,15 @@ private:
 	uint16_t _height;
 	uint16_t _x_start;
 	uint16_t _y_start;
+
+public:
+	class ScopedSelect {
+	public:
+		ScopedSelect(int8_t pin);
+		~ScopedSelect();
+	private:
+		int8_t _pin;
+	};
 };
 
 #endif // TFT_H_

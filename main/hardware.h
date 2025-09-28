@@ -33,7 +33,7 @@ typedef enum
 
 typedef void (*PairButtonCallback)();
 
-class Heltec_ESP32
+class Hardware
 {
     friend class NotificationService;
 
@@ -66,14 +66,13 @@ public:
 
     static constexpr uint16_t HEADER_COLOR = 0x3190;
 
-    Heltec_ESP32();
-    virtual ~Heltec_ESP32();
+    Hardware();
+    virtual ~Hardware();
     void begin();
 
     void pairing(String const& passcode);
     void setBLEConnectionState(conn_state_def state);
     void showTime(String const& timestamp);
-    void showBatteryLevel(uint8_t percent);
     void showGpsState(bool connected);
     void glow(bool on);
 
@@ -84,19 +83,23 @@ protected:
 
 private:
     static void startDrawing(void* pvParameters);
+    static void batteryTimerCallback(TimerHandle_t xTimer);
     void showNotification(notification_def const& notification);
 
     void blank();
     void drawIcon(uint16_t x, uint16_t y, uint8_t const* xbm);
     void showBLEState(conn_state_def state);
+    void showBatteryLevel(uint8_t percent);
     void standby();
 
     TFT mDisplay;
-    conn_state_def mBleState;
-    bool mGpsState;
+    conn_state_def mBleState = BLE_DISCONNECTED;
+    bool mGpsState = false;
+    uint8_t mBatteryLevel = 0;
     String mMessage = "";
+    TimerHandle_t mBatteryTimer = nullptr;
 };
 
-extern Heltec_ESP32 Heltec;
+extern Hardware Heltec;
 
 #endif // HELTEC_H_

@@ -1,11 +1,11 @@
 # -*- cmake -*-
 
 set(SOURCE_FILES
-    ancsservice.cxx
     applist.cxx
+    bleservice.cxx
     fonts.cxx
     gps.cxx
-    heltec.cxx
+    hardware.cxx
     main.cxx
     notificationservice.cxx
     security.cxx

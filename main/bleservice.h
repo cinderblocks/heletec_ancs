@@ -15,8 +15,8 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#ifndef ANCS_SERVICE_H_
-#define ANCS_SERVICE_H_
+#ifndef BLE_SERVICES_H
+#define BLE_SERVICES_H
 
 #include <BLEDevice.h>
 
@@ -39,11 +39,11 @@ class ANCSServiceClientCallback
         virtual void onDisconnect() = 0;
 };
 
-class ANCSService
+class BleService
 {
     public:
-        ANCSService(NotificationCallback notificationSourceCallback, NotificationCallback dataSourceCallback);
-        virtual ~ANCSService();
+        BleService(NotificationCallback notificationSourceCallback, NotificationCallback dataSourceCallback);
+        virtual ~BleService();
         void startServer(String const& appName);
         void retrieveNotificationData(uint32_t notifyUUID) const;
         void setServerCallback(ANCSServiceServerCallback *serverCallback);
@@ -71,7 +71,7 @@ class ANCSService
         {
             friend class ANCSService;
             public:
-                explicit ServerCallback(ANCSService *ancsService) : ancsService(ancsService) { }
+                explicit ServerCallback(BleService *ancsService) : ancsService(ancsService) { }
 #if defined(CONFIG_BLUEDROID_ENABLED)
                 void onConnect(BLEServer *pServer, esp_ble_gatts_cb_param_t *desc) override;
 #elif defined(CONFIG_NIMBLE_ENABLED)
@@ -80,27 +80,29 @@ class ANCSService
                 void onDisconnect(BLEServer *pServer) override;
 
             private:
-                ANCSService *ancsService;
+                BleService *ancsService;
         };
 
         class ClientCallback final : public BLEClientCallbacks
         {
-            friend class ANCSService;
+            friend class BleService;
             public:
-                explicit ClientCallback(ANCSService *ancsService) : ancsService(ancsService) { }
+                explicit ClientCallback(BleService *ancsService) : ancsService(ancsService) { }
                 void onConnect(BLEClient *pClient) override;
                 void onDisconnect(BLEClient *pClient) override;
             private:
-                ANCSService *ancsService;
+                BleService *ancsService;
         };
 
         struct ClientParameter
         {
             BLEAddress bleAddress;
-            ANCSService *ancsService;
-            ClientParameter(BLEAddress const& _bleAddress, ANCSService *_ancsserive)
-            : bleAddress(_bleAddress), ancsService(_ancsserive) { };
+            BleService *bleService;
+            ClientParameter(BLEAddress const& bleaddress, BleService *bleservice)
+            : bleAddress(bleaddress), bleService(bleservice) { };
         };
 };
 
-#endif /* ANCS_SERVICE_H_ */
+extern BleService Ble;
+
+#endif /* BLE_SERVICES_H */

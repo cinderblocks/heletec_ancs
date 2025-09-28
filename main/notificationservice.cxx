@@ -18,7 +18,7 @@
 #include "notificationservice.h"
 
 #include "ancs.h"
-#include "heltec.h"
+#include "hardware.h"
 #include <BLERemoteCharacteristic.h>
 
 static const char* TAG = "Notifications";
@@ -107,24 +107,21 @@ void NotificationService::NotificationSourceNotifyCallback(BLERemoteCharacterist
     }
     else if (pData[0] == ANCS::EventIDNotificationAdded)
     {
-        Notifications.addPendingNotification(messageId);
+        if (xQueueSendToFront(Notifications.getPendingQueue(), &messageId, portMAX_DELAY) != pdTRUE)
+        {
+            ESP_LOGW(TAG, "Failed to add notification %d", messageId);
+        }
     }
 }
 
-void NotificationService::addPendingNotification(uint32_t uuid)
+NotificationService::NotificationService()
 {
-    pendingNotification.push(uuid);
+    pendingNotifications = xQueueCreate(8, sizeof(uint32_t));
 }
 
-uint32_t NotificationService::getNextPendingNotification()
+NotificationService::~NotificationService()
 {
-    if (!pendingNotification.empty())
-    {
-        const uint32_t uuid = pendingNotification.top();
-        pendingNotification.pop();
-        return uuid;
-    }
-    return 0;
+    vQueueDelete(pendingNotifications);
 }
 
 void NotificationService::addNotification(notification_def const& notification, bool isCalling)

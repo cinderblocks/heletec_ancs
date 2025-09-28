@@ -30,23 +30,21 @@ static const char* TAG = "tft";
 
 TFT::TFT(int8_t cs_pin, int8_t rest_pin, int8_t dc_pin, int8_t sclk_pin,
     int8_t mosi_pin, int8_t led_k_pin, int8_t vtft_ctrl_pin)
-{
-    _cs_pin = cs_pin;
-    _rest_pin = rest_pin;
-    _dc_pin = dc_pin;
-    _sclk_pin = sclk_pin;
-    _mosi_pin = mosi_pin;
-    _led_k_pin = led_k_pin;
-    _vtft_ctrl_pin = vtft_ctrl_pin;
-    _width = ST7735_WIDTH;
-    _height = ST7735_HEIGHT;
-    _x_start = ST7735_XSTART;
-    _y_start = ST7735_YSTART;
-}
+:   _cs_pin(cs_pin)
+,   _rest_pin(rest_pin)
+,   _dc_pin(dc_pin)
+,   _sclk_pin(sclk_pin)
+,   _mosi_pin(mosi_pin)
+,   _led_k_pin(led_k_pin)
+,   _vtft_ctrl_pin(vtft_ctrl_pin)
+,   _width(ST7735_WIDTH)
+,   _height(ST7735_HEIGHT)
+,   _x_start(ST7735_XSTART)
+,   _y_start(ST7735_YSTART)
+{ }
 
 TFT::~TFT()
-{
-}
+{ }
 
 void TFT::select(void)
 {
@@ -126,7 +124,7 @@ void TFT::init(void) {
     st7735_spi.begin(_sclk_pin, -1, _mosi_pin, _cs_pin);
     st7735_spi.beginTransaction(SPISettings(ST7735_FREQ, MSBFIRST, SPI_MODE0));
     reset();
-    select();
+    ScopedSelect select(_cs_pin);
     {
         writeCommand(SWRESET);
         delay(150);
@@ -240,7 +238,6 @@ void TFT::init(void) {
         writeCommand(DISPON);
         delay(100);
     }
-    unselect();
 }
 
 void TFT::drawPixel(uint16_t x, uint16_t y, uint16_t color)
@@ -249,19 +246,17 @@ void TFT::drawPixel(uint16_t x, uint16_t y, uint16_t color)
         return;
     }
 
-    select();
+    ScopedSelect select(_cs_pin);
 
     setAddressWindow(x, y, x + 1, y + 1);
     writeColor(color);
-
-    unselect();
 }
 
 void TFT::drawChar(uint16_t x, uint16_t y, char ch, FontDef font, uint16_t color, uint16_t bgcolor)
 {
     uint32_t i, b, j;
 
-    select();
+    ScopedSelect select(_cs_pin);
     setAddressWindow(x, y, x + font.width - 1, y + font.height - 1);
 
     for (i = 0; i < font.height; i++) {
@@ -274,7 +269,6 @@ void TFT::drawChar(uint16_t x, uint16_t y, char ch, FontDef font, uint16_t color
             }
         }
     }
-    unselect();
 }
 
 void TFT::drawStr(uint16_t x, uint16_t y, String const &str_data, FontDef font, uint16_t color, uint16_t bgcolor)
@@ -285,7 +279,7 @@ void TFT::drawStr(uint16_t x, uint16_t y, String const &str_data, FontDef font, 
 
 void TFT::drawStr(uint16_t x, uint16_t y, const char *str, FontDef font, uint16_t color, uint16_t bgcolor)
 {
-    select();
+    ScopedSelect select(_cs_pin);
 
     while (*str) {
         if (x + font.width >= _width) {
@@ -304,8 +298,6 @@ void TFT::drawStr(uint16_t x, uint16_t y, const char *str, FontDef font, uint16_
         x += font.width;
         str++;
     }
-
-    unselect();
 }
 
 void TFT::fillRectangle(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t color)
@@ -317,7 +309,9 @@ void TFT::fillRectangle(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t
     }
     if ((x + w - 1) >= _width) w = _width - x;
     if ((y + h - 1) >= _height) h = _height - y;
-    select();
+
+    ScopedSelect select(_cs_pin);
+
     setAddressWindow(x, y, x + w - 1, y + h - 1);
 
     for (y = h; y > 0; y--) {
@@ -325,7 +319,6 @@ void TFT::fillRectangle(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t
             writeColor(color);
         }
     }
-    unselect();
 }
 
 void TFT::fillScreen(uint16_t color)
@@ -341,10 +334,9 @@ void TFT::drawImage(uint16_t x, uint16_t y, uint16_t w, uint16_t h, const uint16
         return;
     };
 
-    select();
+    ScopedSelect select(_cs_pin);
     setAddressWindow(x, y, x + w - 1, y + h - 1);
     writeData((uint8_t *) data, sizeof(uint16_t) * w * h);
-    unselect();
 }
 
 void TFT::drawXbm(uint16_t x, uint16_t y, uint16_t w, uint16_t h, const uint8_t *xbm, uint16_t color, uint16_t bgcolor)
@@ -355,7 +347,8 @@ void TFT::drawXbm(uint16_t x, uint16_t y, uint16_t w, uint16_t h, const uint8_t 
         return;
     };
 
-    select();
+    ScopedSelect select(_cs_pin);
+
     setAddressWindow(x, y, x + w - 1, y + h - 1);
 
     int16_t widthInXbm = (w + 7) >> 3;
@@ -376,23 +369,31 @@ void TFT::drawXbm(uint16_t x, uint16_t y, uint16_t w, uint16_t h, const uint8_t 
             }
         }
     }
-
-    unselect();
 }
 
 
 void TFT::invertColors(bool invert)
 {
-    select();
+    ScopedSelect select(_cs_pin);
     writeCommand(invert ? INVON : INVOFF);
-    unselect();
 }
 
 void TFT::setGamma(GammaDef gamma)
 {
     uint8_t data[1] = { static_cast<uint8_t>(gamma) };
-    select();
+
+    ScopedSelect select(_cs_pin);
     writeCommand(GAMSET);
     writeData(data, sizeof(data));
-    unselect();
+}
+
+TFT::ScopedSelect::ScopedSelect(int8_t pin)
+:   _pin(pin)
+{
+    digitalWrite(_pin, LOW);
+}
+
+TFT::ScopedSelect::~ScopedSelect()
+{
+    digitalWrite(_pin, HIGH);
 }

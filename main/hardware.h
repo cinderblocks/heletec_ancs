@@ -87,7 +87,7 @@ private:
     void showNotification(notification_def const& notification);
 
     void blank();
-    void drawIcon(uint16_t x, uint16_t y, uint8_t const* xbm);
+    void drawIcon(uint16_t x, uint16_t y, uint8_t const* xbm, uint16_t color = TFT::Color::WHITE);
     void showBLEState(conn_state_def state);
     void showBatteryLevel(uint8_t percent);
     void standby();

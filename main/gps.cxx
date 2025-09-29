@@ -44,7 +44,9 @@ void GPS::run(void *data)
                 Heltec.showGpsState(true);
                 if (_gps.time.isValid())
                 {
-                    Heltec.showTime(String((String)_gps.time.hour() + ':' + (String)_gps.time.minute()));
+                    char timestamp[8];
+                    snprintf(timestamp, sizeof(timestamp), "%2u:%2u", _gps.time.hour(), _gps.time.minute());
+                    Heltec.showTime(timestamp);
                 }
                 if (_gps.location.isValid())
                 {
@@ -54,7 +56,7 @@ void GPS::run(void *data)
                 {
                     ESP_LOGI(TAG, "Alt %0.5f", _gps.altitude.miles());
                 }
-                delay(5000);
+                delay(10000);
                 while (_serial.read() > 0);
             }
         }

@@ -34,13 +34,13 @@ void Hardware::begin()
 {
     mDisplay.init();
     blank();
-    mDisplay.drawXbm(16, 10, 128,64, Bitmaps::Gnu_128x64, TFT::Color::GREEN);
+    mDisplay.drawXbm(16, 10, 128,64, Bitmaps::Gnu_128x64, TFT::Color::BLUE);
     ESP_LOGI(TAG, "TFT initialized.");
 
     pinMode(VBAT_READ, INPUT);
     pinMode(FACTORY_LED, OUTPUT);
 
-    mBatteryTimer = xTimerCreate("Battery", pdMS_TO_TICKS(60000), pdTRUE, nullptr, batteryTimerCallback);
+    mBatteryTimer = xTimerCreate("Battery", pdMS_TO_TICKS(30000), pdTRUE, nullptr, batteryTimerCallback);
     if (mBatteryTimer == nullptr)
     {
         ESP_LOGW(TAG, "Failed to create BatteryTimer");
@@ -113,13 +113,13 @@ void Hardware::setBLEConnectionState(conn_state_def state)
 
 void Hardware::showNotification(notification_def const& notification)
 {
-    char timebuf[9];
-    strftime(timebuf, sizeof(timebuf), "%R",std::localtime(&notification.time));
+    char timestamp[8];
+    strftime(timestamp, sizeof(timestamp), "%R",std::localtime(&notification.time));
     blank();
     mDisplay.fillRectangle(0, 20, mDisplay.width(), mDisplay.height() - 20, TFT::Color::WHITE);
     mDisplay.drawStr(0, 21, AppList.getDisplayName(notification.type),
         Font_7x10, TFT::Color::BLACK, TFT::Color::WHITE);
-    mDisplay.drawStr(mDisplay.width() - 38, 21, timebuf,
+    mDisplay.drawStr(mDisplay.width() - 38, 21, timestamp,
         Font_7x10, TFT::Color::BLACK, TFT::Color::WHITE);
     mDisplay.drawStr(0, 44, notification.title, Font_11x18, TFT::Color::BLACK, TFT::Color::WHITE);
     mDisplay.drawStr(0, 62, notification.message, Font_11x18, TFT::Color::BLACK, TFT::Color::WHITE);
@@ -148,7 +148,7 @@ void Hardware::standby()
             break;
         case BLE_PAIRING:
             mDisplay.drawStr(0, 36, "Pairing", Font_11x18, TFT::Color::WHITE);
-            mDisplay.drawStr(0, 62, "Passcode " + mMessage, Font_16x26, TFT::Color::WHITE);
+            mDisplay.drawStr(0, 60, mMessage, Font_11x18, TFT::Color::WHITE);
             break;
         case BLE_DISCONNECTED:
             mDisplay.drawStr(0, 62, "Disconnected", Font_11x18, TFT::Color::WHITE);
@@ -161,9 +161,9 @@ void Hardware::blank()
     mDisplay.fillRectangle(0, 20, mDisplay.width(), mDisplay.height() - 20, TFT::Color::BLACK);
 }
 
-void Hardware::drawIcon(const uint16_t x, const uint16_t y, const uint8_t* xbm)
+void Hardware::drawIcon(const uint16_t x, const uint16_t y, const uint8_t* xbm, uint16_t color)
 {
-    mDisplay.drawXbm(x, y, 16, 16, xbm, TFT::Color::WHITE, HEADER_COLOR);
+    mDisplay.drawXbm(x, y, 16, 16, xbm, color, HEADER_COLOR);
 }
 
 void Hardware::showTime(String const& timestamp)
@@ -196,7 +196,7 @@ void Hardware::showBatteryLevel(uint8_t percent)
     } else if (percent > 25) {
         drawIcon(mDisplay.width()-16, 1, Bitmaps::Battery_33);
     } else {
-        drawIcon(mDisplay.width()-16, 1, Bitmaps::Battery_0);
+        drawIcon(mDisplay.width()-16, 1, Bitmaps::Battery_0, TFT::Color::RED);
     }
 }
 

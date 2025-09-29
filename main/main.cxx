@@ -37,7 +37,7 @@ GPS* gps;
 class MainServerCallback final : public ANCSServiceServerCallback {
 public:
     explicit MainServerCallback(Hardware *ht) : _ht(ht) { }
-    ~MainServerCallback() = default;
+    virtual ~MainServerCallback() = default;
     void onConnect() override {
         _ht->setBLEConnectionState(BLE_CONNECTED);
     }
@@ -51,7 +51,7 @@ private:
 class MainClientCallback final : public ANCSServiceClientCallback {
 public:
     explicit MainClientCallback(Hardware  *ht) : _ht(ht) { }
-    ~MainClientCallback() = default;
+    virtual ~MainClientCallback() = default;
     void onConnect() override {
         ESP_LOGI(TAG, "Client Connected");
         _ht->setBLEConnectionState(BLE_CONNECTED);
@@ -69,7 +69,6 @@ public:
 private:
     void run(void *data) override
     {
-        uint32_t pendingId;
         while(true)
         {
             uint32_t pendingNotificationId = Notifications.getNextPendingNotification();

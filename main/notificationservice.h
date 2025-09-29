@@ -19,7 +19,7 @@
 #define NOTIFICATION_SERVICE_H_
 
 #include "applist.h"
-
+#include "task.h"
 #include <Arduino.h>
 #include <map>
 #include <stack>
@@ -64,6 +64,15 @@ private:
     notification_def callingNotification;
 };
 
+class NotificationDescription final : public Task
+{
+public:
+    NotificationDescription(String const& name, uint16_t stack_size);
+private:
+    void run(void *data) override;
+};
+
 extern NotificationService Notifications;
+extern NotificationDescription NotificationReceiver;
 
 #endif /* NOTIFICATION_SERVICE_H_ */

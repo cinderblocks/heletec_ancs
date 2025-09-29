@@ -18,6 +18,7 @@
 #include "notificationservice.h"
 
 #include "ancs.h"
+#include "bleservice.h"
 #include "hardware.h"
 #include <BLERemoteCharacteristic.h>
 
@@ -190,5 +191,24 @@ void NotificationService::removeNotification(uint32_t uuid)
     }
 }
 
+
+NotificationDescription::NotificationDescription(String const& name, uint16_t stack_size)
+:   Task(name, stack_size)
+{ }
+
+void NotificationDescription::run(void *data)
+{
+    while (true)
+    {
+        uint32_t pendingNotificationId = Notifications.getNextPendingNotification();
+        if (pendingNotificationId != 0)
+        {
+            Ble.retrieveNotificationData(pendingNotificationId);
+        }
+        delay(500);
+    }
+}
+
 /* extern */
 NotificationService Notifications;
+NotificationDescription NotificationReceiver("NotificationReceiver", 50000);

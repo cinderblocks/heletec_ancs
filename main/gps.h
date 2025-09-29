@@ -38,4 +38,6 @@ private:
     TaskHandle_t _gpsTask = nullptr;
 };
 
+extern GPS gps;
+
 #endif //HELTEC_ANCS_GPS_H

@@ -67,3 +67,6 @@ void GPS::run(void *data)
         delay(1000);
     }
 }
+
+/* extern */
+GPS gps("GPS", 10000);

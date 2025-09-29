@@ -26,13 +26,8 @@
 #include <esp_log.h>
 #include <cinttypes>
 
-class NotificationDescription;
-
 static const char* TAG = "main";
 RTC_DATA_ATTR static int boot_count = 0;
-
-NotificationDescription* notificationReceiver;
-GPS* gps;
 
 class MainServerCallback final : public ANCSServiceServerCallback {
 public:
@@ -63,24 +58,6 @@ private:
     Hardware* _ht;
 };
 
-class NotificationDescription final : public Task {
-public:
-    NotificationDescription(String const& name, uint16_t stack_size) : Task(name, stack_size) { }
-private:
-    void run(void *data) override
-    {
-        while(true)
-        {
-            uint32_t pendingNotificationId = Notifications.getNextPendingNotification();
-            if (pendingNotificationId != 0)
-            {
-                Ble.retrieveNotificationData(pendingNotificationId);
-            }
-            delay(500);
-        }
-    }
-};
-
 extern "C" void app_main(void)
 {
     ESP_LOGI(TAG, "Boot count: %d", boot_count++);
@@ -88,12 +65,9 @@ extern "C" void app_main(void)
     initArduino();
     Heltec.begin();
     Ble.startServer("SpitefulBlue");
-
-    notificationReceiver = new NotificationDescription("NotificationReceiver", 50000);
-    notificationReceiver->start();
+    NotificationReceiver.start();
     Ble.setServerCallback(new MainServerCallback(&Heltec));
-    gps = new GPS("GPS", 10000);
-    gps->start();
+    gps.start();
 
     while(true)
     {

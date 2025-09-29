@@ -122,7 +122,8 @@ void BleService::startClient(void *data)
 #endif
 
     BLEClient *pClient = BLEDevice::createClient();
-    pClient->setClientCallbacks(new ClientCallback(clientParam->bleService));
+    auto clientCallback = new ClientCallback(clientParam->bleService);
+    pClient->setClientCallbacks(clientCallback);
     pClient->connect(clientParam->bleAddress);
 
     BLERemoteService *pAncsService = pClient->getService(ANCS_SERVICE_UUID);
@@ -168,6 +169,7 @@ EndTask:
     ESP_LOGI(TAG, "Ending ClientTask");
     clientParam->bleService->_clientTaskHandle = nullptr;
     delete clientParam;
+    delete clientCallback;
     vTaskDelete(nullptr);
 }
 
@@ -268,6 +270,7 @@ void BleService::ClientCallback::onDisconnect(BLEClient *pClient)
         ancsService->_clientCallback->onDisconnect();
     }
     BLEDevice::startAdvertising();
+    delete this;
 }
 
 /* extern */

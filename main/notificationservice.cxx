@@ -22,7 +22,7 @@
 #include "hardware.h"
 #include <BLERemoteCharacteristic.h>
 
-static const char* TAG = "Notifications";
+static const char* TAG = "notify";
 
 /* static */
 void NotificationService::DataSourceNotifyCallback(BLERemoteCharacteristic *pCharacteristic, uint8_t *pData, size_t length, bool isNotify)

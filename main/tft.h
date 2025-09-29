@@ -68,7 +68,7 @@ public:
 	} MADCTL_ARG;
 
 	TFT(int8_t cs_pin, int8_t rest_pin, int8_t dc_pin, int8_t sclk_pin, int8_t mosi_pin, int8_t led_k_pin, int8_t vtft_ctrl_pin);
-	~TFT();
+	virtual ~TFT() = default;;
 	void init(void);
 	void drawPixel(uint16_t x, uint16_t y, uint16_t color);
 	void drawChar(uint16_t x, uint16_t y, char ch, FontDef font, uint16_t color, uint16_t bgcolor);

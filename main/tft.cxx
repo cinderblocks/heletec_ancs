@@ -43,9 +43,6 @@ TFT::TFT(int8_t cs_pin, int8_t rest_pin, int8_t dc_pin, int8_t sclk_pin,
 ,   _y_start(ST7735_YSTART)
 { }
 
-TFT::~TFT()
-{ }
-
 void TFT::select(void)
 {
     digitalWrite(_cs_pin, LOW);
@@ -332,7 +329,7 @@ void TFT::drawImage(uint16_t x, uint16_t y, uint16_t w, uint16_t h, const uint16
     {
         ESP_LOGW(TAG, "drawImage clipped X=%i Y=%i W=%i, H=%i", x, y, w, h);
         return;
-    };
+    }
 
     ScopedSelect select(_cs_pin);
     setAddressWindow(x, y, x + w - 1, y + h - 1);
@@ -345,21 +342,21 @@ void TFT::drawXbm(uint16_t x, uint16_t y, uint16_t w, uint16_t h, const uint8_t 
     {
         ESP_LOGW(TAG, "drawImage clipped X=%i Y=%i W=%i, H=%i", x, y, w, h);
         return;
-    };
+    }
 
     ScopedSelect select(_cs_pin);
 
     setAddressWindow(x, y, x + w - 1, y + h - 1);
 
-    int16_t widthInXbm = (w + 7) >> 3;
-    uint8_t data = 0;
+    uint16_t widthInXbm = (w + 7) >> 3;
+    uint8_t data = 0u;
 
-    for(int16_t y = 0; y < h; y++) {
-        for(int16_t x = 0; x < w; x++ ) {
-            if (x & 7) {
+    for(uint16_t yy = 0; yy < h; ++yy) {
+        for(uint16_t xx = 0; xx < w; ++xx ) {
+            if (xx & 7) {
                 data >>= 1; // Move a bit
             } else {  // Read new data every 8 bit
-                data = pgm_read_byte(xbm + (x >> 3) + y * widthInXbm);
+                data = pgm_read_byte(xbm + (xx >> 3) + yy * widthInXbm);
             }
             // if there is a bit draw it
             if (data & 0x01) {

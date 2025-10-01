@@ -20,9 +20,10 @@
 #include "hardware.h"
 
 static const char* TAG = "gps";
+static constexpr uint32_t INTERVAL = 5000;
 
 GPS::GPS(String const& name, uint16_t stack_size)
-:   Task(name, stack_size, 2)
+:   Task(name, stack_size, 1)
 { }
 
 void GPS::run(void *data)
@@ -40,13 +41,18 @@ void GPS::run(void *data)
             else
             {
                 _serial.read();
-                if (!_gps.time.second()) { continue; }
-                Heltec.showGpsState(true);
-                if (_gps.time.isValid())
+
+                if (_gps.time.isValid() && _gps.time.age() < INTERVAL)
                 {
+                    Heltec.showGpsState(true);
                     char timestamp[8];
-                    snprintf(timestamp, sizeof(timestamp), "%2u:%2u", _gps.time.hour(), _gps.time.minute());
+                    snprintf(timestamp, sizeof(timestamp), "%2u:%02u", _gps.time.hour(), _gps.time.minute());
                     Heltec.showTime(timestamp);
+                }
+                else
+                {
+                    ESP_LOGI(TAG, "GPS timeout");
+                    Heltec.showGpsState(false);
                 }
                 if (_gps.location.isValid())
                 {
@@ -56,15 +62,13 @@ void GPS::run(void *data)
                 {
                     ESP_LOGI(TAG, "Alt %0.5f", _gps.altitude.miles());
                 }
-                delay(10000);
                 while (_serial.read() > 0);
             }
         }
         else
         {
-            Heltec.showGpsState(false);
+            delay(INTERVAL);
         }
-        delay(1000);
     }
 }
 

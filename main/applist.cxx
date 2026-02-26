@@ -17,32 +17,44 @@
 
 #include "applist.h"
 
-std::map<String, application_def>::const_iterator allowedApplicationIterator;
-std::map<application_def, String>::const_iterator applicationNameIterator;
+// Define static constexpr arrays
+constexpr AppMapping ApplicationList::allowedApplications[];
+constexpr AppDisplayName ApplicationList::applicationNames[];
 
 bool ApplicationList::isAllowedApplication(String const& appName) const
 {
-    return allowedApplication.contains(appName);
+    for (size_t i = 0; i < allowedAppCount; i++)
+    {
+        if (appName == allowedApplications[i].bundleId)
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 application_def ApplicationList::getApplicationId(String const& appName) const
 {
-    allowedApplicationIterator = allowedApplication.find(appName);
-    if (allowedApplicationIterator != allowedApplication.cend())
+    for (size_t i = 0; i < allowedAppCount; i++)
     {
-        return allowedApplicationIterator->second;
+        if (appName == allowedApplications[i].bundleId)
+        {
+            return allowedApplications[i].appId;
+        }
     }
-    return application_def();
+    return APP_UNKNOWN;
 }
 
 String ApplicationList::getDisplayName(application_def appId) const
 {
-    applicationNameIterator = applicationName.find(appId);
-    if (applicationNameIterator != applicationName.cend())
+    for (size_t i = 0; i < appNameCount; i++)
     {
-        return applicationNameIterator->second;
+        if (applicationNames[i].appId == appId)
+        {
+            return String(applicationNames[i].displayName);
+        }
     }
-    return {};
+    return String();
 }
 
 /* extern */

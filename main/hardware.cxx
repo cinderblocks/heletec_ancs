@@ -62,7 +62,6 @@ void Hardware::startDrawing(void* pvParameters)
 
     h->mDisplay.fillRectangle(0, 0, h->mDisplay.width(), 20, HEADER_COLOR);
     h->showBLEState(h->mBleState);
-
     h->standby();
 
     while (true)
@@ -70,15 +69,16 @@ void Hardware::startDrawing(void* pvParameters)
         BaseType_t result = xTaskNotifyWait(0x00, 0x00, nullptr, portMAX_DELAY);
         if (result == pdPASS)
         {
-            for (auto it = Notifications.getNotificationList().begin(); it != Notifications.getNotificationList().end(); ++it) {
+            size_t count = Notifications.getNotificationCount();
+            for (size_t i = 0; i < count; i++) {
                 if (Notifications.isCallingNotification()) { break; }
-                if (!it->second.showed && it->second.isComplete) {
-                    h->showNotification(it->second);
-                    it->second.showed = true;
+                notification_def* notification = Notifications.getNotificationByIndex(i);
+                if (notification != nullptr && !notification->showed && notification->isComplete) {
+                    h->showNotification(*notification);
+                    notification->showed = true;
                     h->glow(true);
                     vTaskDelay(15000 / portTICK_PERIOD_MS);
                     h->glow(false);
-
                 }
             }
             if (Notifications.isCallingNotification()) {
@@ -86,11 +86,10 @@ void Hardware::startDrawing(void* pvParameters)
                 if (notification.isComplete) {
                     h->showNotification(notification);
                     h->glow(true);
-                    vTaskDelay(1000 / portTICK_PERIOD_MS);
+                    while (Notifications.isCallingNotification()) { vTaskDelay(1000 / portTICK_PERIOD_MS); }
                     h->glow(false);
                 }
             }
-            h->standby();
         }
     }
     ESP_LOGI(TAG, "Ending Draw task");
@@ -114,7 +113,9 @@ void Hardware::setBLEConnectionState(conn_state_def state)
 void Hardware::showNotification(notification_def const& notification)
 {
     char timestamp[8];
-    strftime(timestamp, sizeof(timestamp), "%R",std::localtime(&notification.time));
+    struct tm timeinfo;
+    localtime_r(&notification.time, &timeinfo);
+    strftime(timestamp, sizeof(timestamp), "%R", &timeinfo);
     blank();
     mDisplay.fillRectangle(0, 20, mDisplay.width(), mDisplay.height() - 20, TFT::Color::WHITE);
     mDisplay.drawStr(0, 21, AppList.getDisplayName(notification.type),

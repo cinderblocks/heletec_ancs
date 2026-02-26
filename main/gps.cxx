@@ -18,6 +18,7 @@
 #include "gps.h"
 
 #include "hardware.h"
+#include "util.h"
 
 static const char* TAG = "gps";
 static constexpr uint32_t INTERVAL = 5000;
@@ -46,7 +47,7 @@ void GPS::run(void *data)
                 {
                     Heltec.showGpsState(true);
                     char timestamp[8];
-                    snprintf(timestamp, sizeof(timestamp), "%2u:%02u", _gps.time.hour(), _gps.time.minute());
+                    snprintf(timestamp, sizeof(timestamp), "%2u:%02u", convert_to_tz(_gps.time.hour(), -5), _gps.time.minute());
                     Heltec.showTime(timestamp);
                 }
                 else

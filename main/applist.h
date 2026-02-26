@@ -19,7 +19,6 @@
 #define APP_LIST_H_
 
 #include <Arduino.h>
-#include <map>
 
 typedef enum
 {
@@ -37,6 +36,16 @@ typedef enum
     APP_TOWBOOK,
 } application_def;
 
+struct AppMapping {
+    const char* bundleId;
+    application_def appId;
+};
+
+struct AppDisplayName {
+    application_def appId;
+    const char* displayName;
+};
+
 class ApplicationList
 {
 public:
@@ -44,7 +53,7 @@ public:
     application_def getApplicationId(String const& appName) const;
     String getDisplayName(application_def appId) const;
 private:
-    const std::map<String, application_def> allowedApplication {
+    static constexpr AppMapping allowedApplications[] = {
         {"com.apple.MobileSMS", APP_SMS},
         {"com.apple.mobilephone", APP_PHONE},
         {"com.apple.facetime", APP_FACETIME},
@@ -58,7 +67,7 @@ private:
         {"com.towbook.mobile", APP_TOWBOOK},
     };
 
-    const std::map<application_def, String> applicationName {
+    static constexpr AppDisplayName applicationNames[] = {
         {APP_SMS, "iMessage"},
         {APP_PHONE, "Call"},
         {APP_FACETIME, "Facetime"},
@@ -71,6 +80,9 @@ private:
         {APP_GHRN, "GHRN"},
         {APP_TOWBOOK, "Towbook"},
     };
+
+    static constexpr size_t allowedAppCount = sizeof(allowedApplications) / sizeof(allowedApplications[0]);
+    static constexpr size_t appNameCount = sizeof(applicationNames) / sizeof(applicationNames[0]);
 };
 
 extern ApplicationList AppList;

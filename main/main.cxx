@@ -64,7 +64,7 @@ extern "C" void app_main(void)
 
     initArduino();
     Heltec.begin();
-    Ble.startServer("SpitefulBlue");
+    Ble.startServer("BitterBlue");
     NotificationReceiver.start();
     Ble.setServerCallback(new MainServerCallback(&Heltec));
     gps.start();

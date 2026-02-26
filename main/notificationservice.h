@@ -21,9 +21,9 @@
 #include "applist.h"
 #include "task.h"
 #include <Arduino.h>
-#include <map>
-#include <stack>
-#include <ctime>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include <time.h>
 
 class BLERemoteCharacteristic;
 
@@ -43,6 +43,9 @@ struct notification_def
 class NotificationService
 {
 public:
+    NotificationService();
+    ~NotificationService();
+    
     void addPendingNotification(uint32_t uuid);
     uint32_t getNextPendingNotification();
     void addNotification(notification_def const& notification, bool isCalling);
@@ -52,16 +55,22 @@ public:
     [[nodiscard]] bool isCallingNotification() const;
     notification_def& getCallingNotification();
     notification_def* getNotification(uint32_t uuid);
-    std::map<uint32_t, notification_def>& getNotificationList();
+    size_t getNotificationCount() const;
+    notification_def* getNotificationByIndex(size_t index);
 
     static void DataSourceNotifyCallback(BLERemoteCharacteristic *pCharacteristic, uint8_t *pData, size_t length, bool isNotify);
     static void NotificationSourceNotifyCallback(BLERemoteCharacteristic *pCharacteristic, uint8_t *pData, size_t length,bool isNotify);
 
 private:
-    static constexpr int notificationListSize = 8;
-    std::map<uint32_t, notification_def> notificationList;
-    std::stack<uint32_t> pendingNotification;
+    static constexpr size_t notificationListSize = 8;
+    static constexpr size_t pendingQueueSize = 16;
+    
+    notification_def notificationList[notificationListSize];
+    size_t notificationCount;
+    QueueHandle_t pendingNotificationQueue;
     notification_def callingNotification;
+    
+    int findNotificationIndex(uint32_t uuid) const;
 };
 
 class NotificationDescription final : public Task

@@ -32,10 +32,10 @@ static const char* LOG_TAG = "Task";
  * @param [in] priority The priority level of this task.
  * @return N/A.
  */
-Task::Task(String taskName, uint16_t stackSize, uint8_t priority)
+Task::Task(String const& taskName, uint16_t stackSize, uint8_t priority)
 :	m_handle(nullptr)
 ,	m_taskData(nullptr)
-,	m_taskName(std::move(taskName))
+,	m_taskName(taskName)
 ,	m_stackSize(stackSize)
 ,	m_priority(priority)
 ,	m_coreId(tskNO_AFFINITY)

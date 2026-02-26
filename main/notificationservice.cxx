@@ -24,6 +24,40 @@
 
 static const char* TAG = "notify";
 
+NotificationService::NotificationService()
+:   notificationCount(0)
+,   pendingNotificationQueue(nullptr)
+{
+    // Initialize notification list
+    for (size_t i = 0; i < notificationListSize; i++)
+    {
+        notificationList[i].key = 0;
+    }
+    
+    // Create FreeRTOS queue for pending notifications
+    pendingNotificationQueue = xQueueCreate(pendingQueueSize, sizeof(uint32_t));
+}
+
+NotificationService::~NotificationService()
+{
+    if (pendingNotificationQueue != nullptr)
+    {
+        vQueueDelete(pendingNotificationQueue);
+    }
+}
+
+int NotificationService::findNotificationIndex(uint32_t uuid) const
+{
+    for (size_t i = 0; i < notificationListSize; i++)
+    {
+        if (notificationList[i].key == uuid)
+        {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
 /* static */
 void NotificationService::DataSourceNotifyCallback(BLERemoteCharacteristic *pCharacteristic, uint8_t *pData, size_t length, bool isNotify)
 {
@@ -66,7 +100,7 @@ void NotificationService::DataSourceNotifyCallback(BLERemoteCharacteristic *pCha
                 default:
                     break;
             }
-            if (!notification->title.isEmpty() && !notification->message.isEmpty()) {
+            if (!notification->title.isEmpty() && !notification->message.isEmpty() && notification->time != 0) {
                 notification->isComplete = true;
                 ::xTaskNotifyGive(Heltec.mDrawTask);
             }
@@ -114,18 +148,20 @@ void NotificationService::NotificationSourceNotifyCallback(BLERemoteCharacterist
 
 void NotificationService::addPendingNotification(uint32_t uuid)
 {
-    pendingNotification.push(uuid);
+    if (pendingNotificationQueue != nullptr)
+    {
+        xQueueSend(pendingNotificationQueue, &uuid, 0);
+    }
 }
 
 uint32_t NotificationService::getNextPendingNotification()
 {
-    if (!pendingNotification.empty())
+    uint32_t uuid = 0;
+    if (pendingNotificationQueue != nullptr)
     {
-        const uint32_t uuid = pendingNotification.top();
-        pendingNotification.pop();
-        return uuid;
+        xQueueReceive(pendingNotificationQueue, &uuid, 0);
     }
-    return 0;
+    return uuid;
 }
 
 void NotificationService::addNotification(notification_def const& notification, bool isCalling)
@@ -136,24 +172,66 @@ void NotificationService::addNotification(notification_def const& notification, 
     }
     else
     {
-        if (notificationList.size() >= notificationListSize)
+        // Find empty slot or oldest notification
+        int targetIndex = -1;
+        
+        // First try to find empty slot (key == 0)
+        for (size_t i = 0; i < notificationListSize; i++)
         {
-            const auto it = notificationList.cbegin();
-            notificationList.erase(it);
+            if (notificationList[i].key == 0)
+            {
+                targetIndex = static_cast<int>(i);
+                break;
+            }
         }
-        notificationList.insert(std::pair(notification.key, notification));
+        
+        // If no empty slot, use first slot (oldest)
+        if (targetIndex == -1)
+        {
+            targetIndex = 0;
+        }
+        
+        notificationList[targetIndex] = notification;
+        notificationCount = 0;
+        for (size_t i = 0; i < notificationListSize; i++)
+        {
+            if (notificationList[i].key != 0)
+            {
+                notificationCount++;
+            }
+        }
     }
 }
 
-std::map<uint32_t, notification_def>& NotificationService::getNotificationList()
+size_t NotificationService::getNotificationCount() const
 {
-    return notificationList;
+    return notificationCount;
+}
+
+notification_def* NotificationService::getNotificationByIndex(size_t index)
+{
+    size_t currentIndex = 0;
+    for (size_t i = 0; i < notificationListSize; i++)
+    {
+        if (notificationList[i].key != 0)
+        {
+            if (currentIndex == index)
+            {
+                return &notificationList[i];
+            }
+            currentIndex++;
+        }
+    }
+    return nullptr;
 }
 
 bool NotificationService::exists(uint32_t uuid) const
 {
-    const auto it = notificationList.find(uuid);
-    return (it != notificationList.end()) | (callingNotification.key != 0);
+    if (callingNotification.key == uuid)
+    {
+        return true;
+    }
+    return findNotificationIndex(uuid) != -1;
 }
 
 notification_def* NotificationService::getNotification(uint32_t uuid)
@@ -162,8 +240,11 @@ notification_def* NotificationService::getNotification(uint32_t uuid)
     {
         return &callingNotification;
     }
-    if (const auto it = notificationList.find(uuid); it != notificationList.end()) {
-        return &it->second;
+    
+    int index = findNotificationIndex(uuid);
+    if (index != -1)
+    {
+        return &notificationList[index];
     }
     return nullptr;
 }
@@ -185,9 +266,17 @@ notification_def& NotificationService::getCallingNotification()
 
 void NotificationService::removeNotification(uint32_t uuid)
 {
-    if (const auto it = notificationList.find(uuid); it != notificationList.end())
+    int index = findNotificationIndex(uuid);
+    if (index != -1)
     {
-        notificationList.erase(it);
+        notificationList[index].key = 0;
+        notificationList[index].title = "";
+        notificationList[index].message = "";
+        notificationList[index].time = 0;
+        notificationList[index].type = APP_UNKNOWN;
+        notificationList[index].showed = false;
+        notificationList[index].isComplete = false;
+        notificationCount--;
     }
 }
 

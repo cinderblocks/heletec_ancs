@@ -24,7 +24,7 @@
 
 class Task {
 public:
-    explicit Task(String taskName = "Task", uint16_t stackSize = 10000, uint8_t priority = 5);
+    explicit Task(String const& taskName = "Task", uint16_t stackSize = 10000, uint8_t priority = 5);
     virtual ~Task();
     void setStackSize(uint16_t stackSize);
     void setPriority(uint8_t priority);

@@ -78,20 +78,6 @@ void BleService::startServer(String const& appName)
     pAdvertising->setScanResponse(true);
     pAdvertising->setMinPreferred(0x06); // 7.5ms
     pAdvertising->setMaxPreferred(0x10); // 15ms
-    BLEDevice::startAdvertising();
-
-    // Set security
-#if defined(CONFIG_BLUEDROID_ENABLED)
-    BLESecurity::setAuthenticationMode(ESP_LE_AUTH_REQ_SC_MITM_BOND);
-    BLESecurity::setCapability(ESP_IO_CAP_IO);
-    BLESecurity::setInitEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
-    BLESecurity::setRespEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
-#elif defined(CONFIG_NIMBLE_ENABLED)
-    BLESecurity::setAuthenticationMode(BLE_SM_PAIR_AUTHREQ_SC);
-    BLESecurity::setCapability(BLE_HS_IO_DISPLAY_ONLY);
-    BLESecurity::setInitEncryptionKey(BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID);
-    BLESecurity::setRespEncryptionKey(BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID);
-#endif
 
     //Start advertising
     pAdvertising->start();
@@ -110,12 +96,14 @@ void BleService::startClient(void *data)
 #endif //defined(CONFIG_BLUEDROID_ENABLED)
     BLEDevice::setSecurityCallbacks(&Security);
 #if defined(CONFIG_BLUEDROID_ENABLED)
-    BLESecurity::setAuthenticationMode(ESP_LE_AUTH_REQ_SC_MITM_BOND);
+    // Use bool overload - this is the one that sets m_securityEnabled=true
+    // The uint8_t overload does NOT set m_securityEnabled, so startSecurity() never runs
+    BLESecurity::setAuthenticationMode(true, true, true); // bonding=true, mitm=true, sc=true
     BLESecurity::setCapability(ESP_IO_CAP_IO);
     BLESecurity::setInitEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
     BLESecurity::setRespEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
 #elif defined(CONFIG_NIMBLE_ENABLED)
-    BLESecurity::setAuthenticationMode(BLE_SM_PAIR_AUTHREQ_SC);
+    BLESecurity::setAuthenticationMode(true, true, true);
     BLESecurity::setCapability(BLE_HS_IO_DISPLAY_ONLY);
     BLESecurity::setInitEncryptionKey(BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID);
     BLESecurity::setRespEncryptionKey(BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID);

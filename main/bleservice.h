@@ -101,6 +101,11 @@ class BleService
             ClientParameter(BLEAddress const& bleaddress, BleService *bleservice)
             : bleAddress(bleaddress), bleService(bleservice) { };
         };
+
+        // Must be declared after nested classes are defined above
+        ClientParameter *_currentClientParam = nullptr;
+        ClientCallback  *_clientCb = nullptr;   // created once in startServer, reused every connection
+        BLEClient       *_pClient  = nullptr;   // current GATTC client; disconnected in onDisconnect
 };
 
 extern BleService Ble;

@@ -32,23 +32,7 @@ RTC_DATA_ATTR static int boot_count = 0;
 class MainServerCallback final : public ANCSServiceServerCallback {
 public:
     explicit MainServerCallback(Hardware *ht) : _ht(ht) { }
-    virtual ~MainServerCallback() = default;
     void onConnect() override {
-        _ht->setBLEConnectionState(BLE_CONNECTED);
-    }
-    void onDisconnect() override {
-        _ht->setBLEConnectionState(BLE_DISCONNECTED);
-    }
-private:
-    Hardware* _ht;
-};
-
-class MainClientCallback final : public ANCSServiceClientCallback {
-public:
-    explicit MainClientCallback(Hardware  *ht) : _ht(ht) { }
-    virtual ~MainClientCallback() = default;
-    void onConnect() override {
-        ESP_LOGI(TAG, "Client Connected");
         _ht->setBLEConnectionState(BLE_CONNECTED);
     }
     void onDisconnect() override {
@@ -66,7 +50,8 @@ extern "C" void app_main(void)
     Heltec.begin();
     Ble.startServer("BitterBlue");
     NotificationReceiver.start();
-    Ble.setServerCallback(new MainServerCallback(&Heltec));
+    static MainServerCallback serverCallback(&Heltec);
+    Ble.setServerCallback(&serverCallback);
     gps.start();
 
     while(true)

@@ -58,6 +58,7 @@ void SecurityCallback::onAuthenticationComplete(ble_gap_conn_desc* cmpl)
     if (!cmpl.success)
     {
         ESP_LOGI(TAG, "Authentication failed = 0x%x");
+        Heltec.setBLEConnectionState(BLE_DISCONNECTED);
         return;
     }
 #elif defined(CONFIG_NIMBLE_ENABLED)
@@ -65,10 +66,13 @@ void SecurityCallback::onAuthenticationComplete(ble_gap_conn_desc* cmpl)
     {
         BLEDevice::getServer()->disconnect(cmpl->conn_handle);
         ESP_LOGI(TAG, "Encryption failed - Disconnecting client.");
+        Heltec.setBLEConnectionState(BLE_DISCONNECTED);
         return;
     }
 #endif
     ESP_LOGI(TAG, "Authentication successful");
+    // Clear the pairing display - device is now connected and ready
+    Heltec.setBLEConnectionState(BLE_CONNECTED);
 }
 
 /* extern */

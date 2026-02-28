@@ -44,6 +44,10 @@ BleService::~BleService()
         delete _hidDevice;
         _hidDevice = nullptr;
     }
+    if (_clientCb != nullptr) {
+        delete _clientCb;
+        _clientCb = nullptr;
+    }
 }
 
 
@@ -51,13 +55,13 @@ void BleService::startServer(String const& appName)
 {
     // Initialize device
     BLEDevice::init(appName);
-    BLEDevice::setPower(ESP_PWR_LVL_P9);
+    BLEDevice::setPower(ESP_PWR_LVL_P20);
     BLEServer *pServer = BLEDevice::createServer();
     pServer->setCallbacks(new ServerCallback(this));
+    pServer->advertiseOnDisconnect(true);
 #if defined(CONFIG_BLUEDROID_ENABLED)
     BLESecurity::setEncryptionLevel(ESP_BLE_SEC_ENCRYPT);
 #endif //defined(CONFIG_BLUEDROID_ENABLED)
-    pServer->advertiseOnDisconnect(true);
     BLEDevice::setSecurityCallbacks(&Security);
 
     _hidDevice = new BLEHIDDevice(pServer);
@@ -81,6 +85,9 @@ void BleService::startServer(String const& appName)
 
     //Start advertising
     pAdvertising->start();
+
+    // Create the client callback once - reused for every connection
+    _clientCb = new ClientCallback(this);
 }
 
 /* static */
@@ -110,8 +117,8 @@ void BleService::startClient(void *data)
 #endif
 
     BLEClient *pClient = BLEDevice::createClient();
-    auto clientCallback = new ClientCallback(clientParam->bleService);
-    pClient->setClientCallbacks(clientCallback);
+    clientParam->bleService->_pClient = pClient;
+    pClient->setClientCallbacks(clientParam->bleService->_clientCb);
     pClient->connect(clientParam->bleAddress);
 
     BLERemoteService *pAncsService = pClient->getService(ANCS_SERVICE_UUID);
@@ -155,9 +162,15 @@ void BleService::startClient(void *data)
     }
 EndTask:
     ESP_LOGI(TAG, "Ending ClientTask");
+    if (pClient->isConnected())
+    {
+        pClient->disconnect();
+    }
+    delete pClient;
+    clientParam->bleService->_pClient = nullptr;
     clientParam->bleService->_clientTaskHandle = nullptr;
+    clientParam->bleService->_currentClientParam = nullptr;
     delete clientParam;
-    delete clientCallback;
     vTaskDelete(nullptr);
 }
 
@@ -216,25 +229,43 @@ void BleService::ServerCallback::onConnect(BLEServer *pServer, ble_gap_conn_desc
     }
     if (ancsService->_clientTaskHandle == nullptr)
     {
+        ancsService->_currentClientParam = new ClientParameter(peerAddress, ancsService);
         xTaskCreatePinnedToCore(&BleService::startClient, "ClientTask", 10000,
-            new ClientParameter(peerAddress, ancsService), 5,
+            ancsService->_currentClientParam, 5,
             &ancsService->_clientTaskHandle, 0);
     }
 }
 
 void BleService::ServerCallback::onDisconnect(BLEServer *pServer)
 {
+    // Kill the client task first so it stops accessing BLE objects
     if (ancsService->_clientTaskHandle != nullptr)
     {
         ::vTaskDelete(ancsService->_clientTaskHandle);
         ancsService->_clientTaskHandle = nullptr;
+    }
+    // Free ClientParameter the killed task couldn't clean up
+    if (ancsService->_currentClientParam != nullptr)
+    {
+        delete ancsService->_currentClientParam;
+        ancsService->_currentClientParam = nullptr;
+    }
+    // Disconnect GATTC client if still connected — do NOT delete from BLE callback context
+    if (ancsService->_pClient != nullptr)
+    {
+        if (ancsService->_pClient->isConnected())
+        {
+            ancsService->_pClient->disconnect();
+        }
+        ancsService->_pClient = nullptr;
     }
     ESP_LOGI(TAG, "Device disconnected");
     if (ancsService->_serverCallback != nullptr)
     {
         ancsService->_serverCallback->onDisconnect();
     }
-    BLEDevice::startAdvertising();
+    // advertiseOnDisconnect(true) is set on the server - advertising restarts automatically
+    // after this callback returns. Do NOT call startAdvertising() here - it would race.
 }
 
 void BleService::ClientCallback::onConnect(BLEClient *pClient)
@@ -251,14 +282,12 @@ void BleService::ClientCallback::onConnect(BLEClient *pClient)
 void BleService::ClientCallback::onDisconnect(BLEClient *pClient)
 {
     if (pClient != nullptr) {
-        ESP_LOGI(TAG, "Device Client disconnected %s", pClient->getPeerAddress().toString().c_str() );
+        ESP_LOGI(TAG, "Device Client disconnected %s", pClient->getPeerAddress().toString().c_str());
     }
     if (ancsService->_clientCallback != nullptr)
     {
         ancsService->_clientCallback->onDisconnect();
     }
-    BLEDevice::startAdvertising();
-    delete this;
 }
 
 /* extern */

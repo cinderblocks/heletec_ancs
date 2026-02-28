@@ -90,6 +90,8 @@ void Hardware::startDrawing(void* pvParameters)
                     h->glow(false);
                 }
             }
+            // Always refresh body text to reflect current BLE state after processing
+            h->standby();
         }
     }
     ESP_LOGI(TAG, "Ending Draw task");

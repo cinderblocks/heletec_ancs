@@ -136,6 +136,23 @@ void BleService::startClient(void *data)
     pClient->setClientCallbacks(clientParam->bleService->_clientCb);
     pClient->connect(clientParam->bleAddress);
 
+    // Wait for authentication/bonding to complete before starting GATT service
+    // discovery.  With m_forceSecurity=true the stack starts security immediately
+    // on ESP_GATTC_CONNECT_EVT.  Without this wait, getService() races the pairing
+    // handshake: if the phone rejects a stale bond the link drops mid-discovery and
+    // getService() returns nullptr — misleadingly logged as "ANCS service not found"
+    // even though the service does exist.
+    // waitForAuthenticationComplete() blocks until ESP_GAP_BLE_AUTH_CMPL_EVT fires
+    // (success or failure) or the 10 s timeout expires.
+    BLESecurity::waitForAuthenticationComplete(10000);
+
+    if (!pClient->isConnected())
+    {
+        ESP_LOGW(TAG, "Client disconnected during authentication — not attempting service discovery");
+        goto EndTask;
+    }
+
+    {
     BLERemoteService *pAncsService = pClient->getService(ANCS_SERVICE_UUID);
     if (pAncsService == nullptr)
     {
@@ -171,6 +188,7 @@ void BleService::startClient(void *data)
         clientParam->bleService->_dataSourceCallback);
     clientParam->bleService->_dataSourceCharacteristic->getDescriptor(
         BLEUUID(static_cast<uint16_t>(0x2902)))->writeValue(v, 2, true);
+    } // end auth-guard block
 
     // Keep-alive loop.  Woken by xTaskNotify from either ServerCallback::onDisconnect
     // or ClientCallback::onDisconnect, whichever fires first.  100 ms poll catches any

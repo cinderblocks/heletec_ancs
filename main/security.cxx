@@ -57,7 +57,7 @@ void SecurityCallback::onAuthenticationComplete(ble_gap_conn_desc* cmpl)
 #if defined(CONFIG_BLUEDROID_ENABLED)
     if (!cmpl.success)
     {
-        ESP_LOGI(TAG, "Authentication failed = 0x%x");
+        ESP_LOGI(TAG, "Authentication failed, reason=0x%02x", cmpl.fail_reason);
         Heltec.setBLEConnectionState(BLE_DISCONNECTED);
         return;
     }

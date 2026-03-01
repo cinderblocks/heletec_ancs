@@ -52,6 +52,12 @@ void Hardware::begin()
 
     xTaskCreatePinnedToCore(&Hardware::startDrawing,
         "DrawTask", 10000, this, 3, &mDrawTask, 0);
+
+    // Show the real battery level immediately rather than waiting for the first
+    // 30-second timer tick.  mBatteryLevel starts at 0, so without this the icon
+    // would be absent (or wrong) until the timer fires and sees a non-zero change.
+    mBatteryLevel = getBatteryLevel();
+    showBatteryLevel(mBatteryLevel);
 }
 
 /* static */

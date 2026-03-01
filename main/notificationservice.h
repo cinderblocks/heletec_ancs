@@ -52,6 +52,8 @@ public:
     uint32_t waitForNextPendingNotification();
     void clearPendingNotifications();
     void addNotification(notification_def const& notification, bool isCalling);
+    void setNotificationAttribute(uint32_t uuid, uint8_t attributeId, String const& value);
+    bool removeIfCall(uint32_t uuid);
     void removeNotification(uint32_t uuid);
     void removeCallNotification();
     bool exists(uint32_t uuid) const;

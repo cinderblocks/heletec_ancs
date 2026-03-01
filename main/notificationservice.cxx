@@ -66,50 +66,27 @@ int NotificationService::findNotificationIndex(uint32_t uuid) const
 /* static */
 void NotificationService::DataSourceNotifyCallback(BLERemoteCharacteristic *pCharacteristic, uint8_t *pData, size_t length, bool isNotify)
 {
+    // Need at minimum: command(1) + uid(4) + attrId(1) = 6 bytes
+    if (length < 6) { return; }
+
+    // Correctly assemble little-endian 32-bit UID from bytes 1-4
+    uint32_t messageId = (uint32_t)pData[1]
+                       | ((uint32_t)pData[2] << 8)
+                       | ((uint32_t)pData[3] << 16)
+                       | ((uint32_t)pData[4] << 24);
+
+    // Attribute data starts at byte 8; message may be empty if length <= 8
     String message;
-
-    uint32_t messageId = pData[4];
-    messageId = messageId << 8 | pData[3];
-    messageId = messageId << 16 | pData[2];
-    messageId = messageId << 24 | pData[1];
-
-    for (int i = 8; i < length; i++)
+    for (size_t i = 8; i < length; i++)
     {
         message += static_cast<char>(pData[i]);
     }
+
     if (Notifications.exists(messageId))
     {
-        notification_def *notification = Notifications.getNotification(messageId);
-        if (notification != nullptr) {
-            switch (pData[5])
-            {
-                case ANCS::NotificationAttributeIDTitle:
-                {
-                    notification->title = message;
-                    Serial.println(message.c_str());
-                    break;
-                }
-                case ANCS::NotificationAttributeIDMessage:
-                {
-                    notification->message = message;
-                    Serial.println(message.c_str());
-                    break;
-                }
-                case ANCS::NotificationAttributeIDDate:
-                {
-                    tm t = {};
-                    strptime(message.c_str(), "%Y%m%dT%H%M%S", &t);
-                    notification->time = mktime(&t);
-                    break;
-                }
-                default:
-                    break;
-            }
-            if (!notification->title.isEmpty() && !notification->message.isEmpty() && notification->time != 0) {
-                notification->isComplete = true;
-                Heltec.notifyDraw(Hardware::DRAW_NOTIFY);
-            }
-        }
+        // Field writes are done inside setNotificationAttribute under the mutex
+        // so the draw task cannot observe a partially-updated struct.
+        Notifications.setNotificationAttribute(messageId, pData[5], message);
     }
     else if (pData[5] == ANCS::NotificationAttributeIDAppIdentifier)
     {
@@ -130,26 +107,103 @@ void NotificationService::DataSourceNotifyCallback(BLERemoteCharacteristic *pCha
 /* static */
 void NotificationService::NotificationSourceNotifyCallback(BLERemoteCharacteristic *pCharacteristic, uint8_t *pData, size_t length,bool isNotify)
 {
-    uint32_t messageId = pData[7];
-    messageId = messageId << 8 | pData[6];
-    messageId = messageId << 16 | pData[5];
-    messageId = messageId << 24 | pData[4];
+    // Need: eventId(1) + flags(1) + categoryId(1) + categoryCount(1) + uid(4) = 8 bytes
+    if (length < 8) { return; }
+
+    // Correctly assemble little-endian 32-bit UID from bytes 4-7
+    uint32_t messageId = (uint32_t)pData[4]
+                       | ((uint32_t)pData[5] << 8)
+                       | ((uint32_t)pData[6] << 16)
+                       | ((uint32_t)pData[7] << 24);
+
     if (pData[0] == ANCS::EventIDNotificationRemoved)
     {
-        notification_def *notification = Notifications.getNotification(messageId);
-        if (notification != nullptr)
+        // removeIfCall handles call notifications (clears callingNotification + notifies draw).
+        // For regular notifications, remove them from the list so the slot is freed and
+        // the notification isn't displayed after the phone has already dismissed it.
+        if (!Notifications.removeIfCall(messageId))
         {
-            if (notification->isCall())
-            {
-                Notifications.removeCallNotification();
-                Heltec.notifyDraw(Hardware::DRAW_NOTIFY);
-            }
+            Notifications.removeNotification(messageId);
         }
+    }
+    else if (pData[0] == ANCS::EventIDNotificationModified)
+    {
+        // The phone updated this notification (e.g. message text changed, group chat
+        // count incremented).  Re-queue the UUID so we fetch fresh attributes and
+        // redisplay the updated content, just like a brand-new notification.
+        Notifications.addPendingNotification(messageId);
     }
     else if (pData[0] == ANCS::EventIDNotificationAdded)
     {
         Notifications.addPendingNotification(messageId);
     }
+}
+
+void NotificationService::setNotificationAttribute(uint32_t uuid, uint8_t attributeId, String const& value)
+{
+    bool shouldNotify = false;
+
+    xSemaphoreTake(mMutex, portMAX_DELAY);
+    // Locate the notification — could be in the call slot or the regular list
+    notification_def *notification = nullptr;
+    if (callingNotification.key == uuid) {
+        notification = &callingNotification;
+    } else {
+        int index = findNotificationIndex(uuid);
+        if (index != -1) { notification = &notificationList[index]; }
+    }
+
+    if (notification != nullptr) {
+        switch (attributeId) {
+            case ANCS::NotificationAttributeIDTitle:
+                notification->title = value;
+                Serial.println(value.c_str());
+                break;
+            case ANCS::NotificationAttributeIDMessage:
+                notification->message = value;
+                Serial.println(value.c_str());
+                break;
+            case ANCS::NotificationAttributeIDDate: {
+                tm t = {};
+                strptime(value.c_str(), "%Y%m%dT%H%M%S", &t);
+                notification->time = mktime(&t);
+                break;
+            }
+            default:
+                break;
+        }
+        // Mark complete and schedule a draw wakeup once all three fields are present
+        if (!notification->isComplete &&
+            !notification->title.isEmpty() &&
+            !notification->message.isEmpty() &&
+            notification->time != 0)
+        {
+            notification->isComplete = true;
+            shouldNotify = true;
+        }
+    }
+    xSemaphoreGive(mMutex);
+
+    // Notify outside the mutex — xTaskNotify is safe without a lock
+    if (shouldNotify) {
+        Heltec.notifyDraw(Hardware::DRAW_NOTIFY);
+    }
+}
+
+bool NotificationService::removeIfCall(uint32_t uuid)
+{
+    bool wasCall = false;
+    xSemaphoreTake(mMutex, portMAX_DELAY);
+    if (callingNotification.key == uuid) {
+        callingNotification.key = 0;
+        wasCall = true;
+    }
+    xSemaphoreGive(mMutex);
+
+    if (wasCall) {
+        Heltec.notifyDraw(Hardware::DRAW_NOTIFY);
+    }
+    return wasCall;
 }
 
 void NotificationService::addPendingNotification(uint32_t uuid)

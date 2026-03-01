@@ -18,7 +18,7 @@
 #ifndef HELTEC_ANCS_UTIL_H
 #define HELTEC_ANCS_UTIL_H
 
-uint8_t convert_to_tz(uint8_t utc, int8_t tz_offset)
+inline uint8_t convert_to_tz(uint8_t utc, int8_t tz_offset)
 {
     int8_t local = (utc + tz_offset) % 24;
     return local < 0 ? local + 24 : local;

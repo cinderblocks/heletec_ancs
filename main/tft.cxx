@@ -251,6 +251,13 @@ void TFT::drawPixel(uint16_t x, uint16_t y, uint16_t color)
 
 void TFT::drawChar(uint16_t x, uint16_t y, char ch, FontDef font, uint16_t color, uint16_t bgcolor)
 {
+    // Skip characters outside the printable ASCII range [32, 127).
+    // Negative indices (control chars) or indices past the font table (extended
+    // ASCII / UTF-8 continuation bytes) both cause out-of-bounds memory reads.
+    if (ch < 32 || ch >= 127) {
+        return;
+    }
+
     uint32_t i, b, j;
 
     ScopedSelect select(_cs_pin);
@@ -276,8 +283,9 @@ void TFT::drawStr(uint16_t x, uint16_t y, String const &str_data, FontDef font, 
 
 void TFT::drawStr(uint16_t x, uint16_t y, const char *str, FontDef font, uint16_t color, uint16_t bgcolor)
 {
-    ScopedSelect select(_cs_pin);
-
+    // No ScopedSelect here — drawChar manages its own CS per character.
+    // Holding CS across multiple drawChar calls would be defeated anyway since
+    // each drawChar creates its own ScopedSelect that destructs (CS HIGH) on return.
     while (*str) {
         if (x + font.width >= _width) {
             x = 0;

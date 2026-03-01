@@ -50,14 +50,15 @@ void Hardware::begin()
         ESP_LOGW(TAG, "Failed to start BatteryTimer");
     }
 
+    // Read battery level NOW, before spawning the draw task.  On the dual-core
+    // ESP32-S3 the draw task can start on the other core immediately after
+    // xTaskCreatePinnedToCore returns.  If we called showBatteryLevel() here
+    // instead, both cores would be issuing SPI commands simultaneously.
+    // The draw task's init block will call showBatteryLevel(mBatteryLevel) for us.
+    mBatteryLevel = getBatteryLevel();
+
     xTaskCreatePinnedToCore(&Hardware::startDrawing,
         "DrawTask", 10000, this, 3, &mDrawTask, 0);
-
-    // Show the real battery level immediately rather than waiting for the first
-    // 30-second timer tick.  mBatteryLevel starts at 0, so without this the icon
-    // would be absent (or wrong) until the timer fires and sees a non-zero change.
-    mBatteryLevel = getBatteryLevel();
-    showBatteryLevel(mBatteryLevel);
 }
 
 /* static */
@@ -68,6 +69,7 @@ void Hardware::startDrawing(void* pvParameters)
 
     h->mDisplay.fillRectangle(0, 0, h->mDisplay.width(), 20, HEADER_COLOR);
     h->showBLEState(h->mBleState);
+    h->showBatteryLevel(h->mBatteryLevel); // mBatteryLevel was set in begin() before this task started
     h->standby();
 
     while (true)

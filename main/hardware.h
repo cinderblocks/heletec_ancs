@@ -19,6 +19,8 @@
 #define HELTEC_H_
 
 #include <Arduino.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/portmacro.h>
 #include "tft.h"
 
 struct notification_def;
@@ -70,6 +72,7 @@ public:
     static constexpr uint32_t DRAW_NOTIFY  = (1u << 0); // new notification ready
     static constexpr uint32_t DRAW_STATE   = (1u << 1); // BLE state changed
     static constexpr uint32_t DRAW_BATTERY = (1u << 2); // battery level check
+    static constexpr uint32_t DRAW_GPS     = (1u << 3); // GPS time/state changed
 
     Hardware();
     virtual ~Hardware();
@@ -104,7 +107,12 @@ private:
     bool mGpsState = false;
     bool mCallState = false;
     uint8_t mBatteryLevel = 0;
-    String mMessage = "";
+    // Fixed-size arrays instead of String to allow safe writes from non-draw tasks
+    // (BTC task writes mMessage; GPS task writes mTimestamp).  Both are protected
+    // by mHardwareLock when crossing task boundaries.
+    char mMessage[32]   = {};
+    char mTimestamp[8]  = {};
+    portMUX_TYPE mHardwareLock; // initialized in Hardware() via portMUX_INITIALIZE
     TimerHandle_t mBatteryTimer = nullptr;
 };
 

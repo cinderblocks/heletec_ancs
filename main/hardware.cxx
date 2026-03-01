@@ -25,7 +25,9 @@ static const char* TAG = "hardware";
 
 Hardware::Hardware()
 :   mDisplay(ST7735_CS, ST7735_REST, ST7735_RS, ST7735_SCLK, ST7735_MOSI, ST7735_LED, VEXT_CTRL)
-{ }
+{
+    portMUX_INITIALIZE(&mHardwareLock);
+}
 
 /* virtual */
 Hardware::~Hardware() = default;
@@ -89,6 +91,38 @@ void Hardware::startDrawing(void* pvParameters)
             }
         }
 
+        // Update BLE icon in header — safe here because we're in the draw task.
+        // setBLEConnectionState() no longer calls showBLEState() directly, eliminating
+        // the SPI race where the BTC task (BLE callbacks) and draw task both wrote SPI.
+        if (bits & DRAW_STATE)
+        {
+            h->showBLEState(h->mBleState);
+        }
+
+        // Update GPS time and icon in header — safe here because we're in the draw task.
+        // showTime() and showGpsState() no longer write SPI directly, eliminating the
+        // SPI race where the GPS task and draw task both wrote SPI simultaneously.
+        if (bits & DRAW_GPS)
+        {
+            char localTs[sizeof(h->mTimestamp)];
+            portENTER_CRITICAL(&h->mHardwareLock);
+            memcpy(localTs, h->mTimestamp, sizeof(localTs));
+            portEXIT_CRITICAL(&h->mHardwareLock);
+
+            if (localTs[0] != '\0')
+            {
+                h->mDisplay.drawStr(0, 6, localTs, Font_7x10, TFT::Color::WHITE, HEADER_COLOR);
+            }
+            if (h->mGpsState)
+            {
+                h->drawIcon(h->mDisplay.width()-50, 1, Bitmaps::GPS);
+            }
+            else
+            {
+                h->mDisplay.fillRectangle(h->mDisplay.width()-50, 1, 16, 16, HEADER_COLOR);
+            }
+        }
+
         if (bits & (DRAW_NOTIFY | DRAW_STATE))
         {
             // Update call icon in header bar first
@@ -118,14 +152,24 @@ void Hardware::startDrawing(void* pvParameters)
 
 void Hardware::pairing(String const& passcode)
 {
-    mMessage = passcode;
+    // mMessage is read by standby() in the draw task, so guard the write with the
+    // hardware spinlock to prevent a data race on the dual-core ESP32-S3.
+    portENTER_CRITICAL(&mHardwareLock);
+    strncpy(mMessage, passcode.c_str(), sizeof(mMessage) - 1);
+    mMessage[sizeof(mMessage) - 1] = '\0';
+    portEXIT_CRITICAL(&mHardwareLock);
     setBLEConnectionState(BLE_PAIRING);
 }
 
 void Hardware::setBLEConnectionState(conn_state_def state)
 {
+    // Only update the state variable here. Do NOT call showBLEState() directly —
+    // this function is called from BTC task callbacks (ServerCallback::onDisconnect,
+    // SecurityCallback::onAuthenticationComplete, etc.) which run on a different core
+    // from the draw task.  Calling showBLEState() here would race the draw task's
+    // SPI bus access on the dual-core ESP32-S3.  The DRAW_STATE bit tells the draw
+    // task to call showBLEState() at its next wakeup.
     mBleState = state;
-    showBLEState(state);
     notifyDraw(DRAW_STATE);
 }
 
@@ -174,10 +218,17 @@ void Hardware::standby()
         case BLE_CONNECTED:
             mDisplay.drawStr(0, 62, "Standby", Font_11x18, TFT::Color::WHITE);
             break;
-        case BLE_PAIRING:
+        case BLE_PAIRING: {
+            // mMessage is written from the BTC task (pairing()), so take a local
+            // copy under the spinlock before passing it to drawStr.
+            char localMsg[sizeof(mMessage)];
+            portENTER_CRITICAL(&mHardwareLock);
+            memcpy(localMsg, mMessage, sizeof(localMsg));
+            portEXIT_CRITICAL(&mHardwareLock);
             mDisplay.drawStr(0, 36, "Pairing", Font_11x18, TFT::Color::WHITE);
-            mDisplay.drawStr(0, 60, mMessage, Font_11x18, TFT::Color::WHITE);
+            mDisplay.drawStr(0, 60, localMsg, Font_11x18, TFT::Color::WHITE);
             break;
+        }
         case BLE_DISCONNECTED:
             mDisplay.drawStr(0, 62, "Disconnected", Font_11x18, TFT::Color::WHITE);
             break;
@@ -196,7 +247,13 @@ void Hardware::drawIcon(const uint16_t x, const uint16_t y, const uint8_t* xbm, 
 
 void Hardware::showTime(String const& timestamp)
 {
-    mDisplay.drawStr(0, 6, timestamp, Font_7x10, TFT::Color::WHITE, HEADER_COLOR);
+    // mTimestamp is read by the draw task under DRAW_GPS, so guard the write with
+    // the hardware spinlock to prevent a data race on the dual-core ESP32-S3.
+    portENTER_CRITICAL(&mHardwareLock);
+    strncpy(mTimestamp, timestamp.c_str(), sizeof(mTimestamp) - 1);
+    mTimestamp[sizeof(mTimestamp) - 1] = '\0';
+    portEXIT_CRITICAL(&mHardwareLock);
+    notifyDraw(DRAW_GPS);
 }
 
 void Hardware::showBLEState(conn_state_def state)
@@ -230,17 +287,11 @@ void Hardware::showBatteryLevel(uint8_t percent)
 
 void Hardware::showGpsState(bool connected)
 {
-    if (connected == mGpsState) { return ; }
-
+    if (connected == mGpsState) { return; }
+    // Only update state here; the draw task handles the actual icon update under
+    // DRAW_GPS, eliminating the SPI race with the GPS task on the other core.
     mGpsState = connected;
-    if (connected)
-    {
-        drawIcon(mDisplay.width()-50, 1, Bitmaps::GPS);
-    }
-    else
-    {
-        mDisplay.fillRectangle(mDisplay.width()-50, 1, 16, 16, HEADER_COLOR);
-    }
+    notifyDraw(DRAW_GPS);
 }
 
 void Hardware::showCallState(bool active)

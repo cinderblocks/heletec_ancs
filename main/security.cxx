@@ -19,6 +19,7 @@
 
 #include "hardware.h"
 #include <BLEDevice.h>
+#include <esp_gap_ble_api.h>
 #include <esp_log.h>
 
 static const char* TAG = "security";
@@ -57,7 +58,27 @@ void SecurityCallback::onAuthenticationComplete(ble_gap_conn_desc* cmpl)
 #if defined(CONFIG_BLUEDROID_ENABLED)
     if (!cmpl.success)
     {
-        ESP_LOGI(TAG, "Authentication failed, reason=0x%02x", cmpl.fail_reason);
+        if (cmpl.fail_reason == 0x66)
+        {
+            // The phone rejected our bond credentials — our stored bond is stale
+            // (e.g. the phone forgot us, or we were re-flashed).  The BT stack
+            // removes the bond from NVS automatically (logged as
+            // "btc_dm_ble_auth_cmpl_evt, remove bond in flash"), but call
+            // deleteBond explicitly as a belt-and-suspenders measure so the next
+            // connection attempt starts a clean pairing exchange.
+            ESP_LOGW(TAG, "Stale bond rejected by peer (0x66) — clearing local bond for %02x:%02x:%02x:%02x:%02x:%02x",
+                cmpl.bd_addr[0], cmpl.bd_addr[1], cmpl.bd_addr[2],
+                cmpl.bd_addr[3], cmpl.bd_addr[4], cmpl.bd_addr[5]);
+            esp_ble_remove_bond_device(cmpl.bd_addr);
+        }
+        else
+        {
+            ESP_LOGI(TAG, "Authentication failed, reason=0x%02x", cmpl.fail_reason);
+        }
+        // ServerCallback::onDisconnect will have already (or will shortly) call
+        // setBLEConnectionState(BLE_DISCONNECTED), but set it here too so the
+        // display updates correctly for auth failures that don't cause an immediate
+        // link-layer disconnect (e.g. wrong PIN on some platforms).
         Heltec.setBLEConnectionState(BLE_DISCONNECTED);
         return;
     }

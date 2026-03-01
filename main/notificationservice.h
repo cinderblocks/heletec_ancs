@@ -63,8 +63,8 @@ public:
     static void NotificationSourceNotifyCallback(BLERemoteCharacteristic *pCharacteristic, uint8_t *pData, size_t length,bool isNotify);
 
 private:
-    static constexpr size_t notificationListSize = 8;
-    static constexpr size_t pendingQueueSize = 16;
+    static constexpr size_t notificationListSize = 16;
+    static constexpr size_t pendingQueueSize = 64;
     
     notification_def notificationList[notificationListSize];
     size_t notificationCount;

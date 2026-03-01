@@ -48,6 +48,7 @@ public:
     
     void addPendingNotification(uint32_t uuid);
     uint32_t getNextPendingNotification();
+    void clearPendingNotifications();
     void addNotification(notification_def const& notification, bool isCalling);
     void removeNotification(uint32_t uuid);
     void removeCallNotification();

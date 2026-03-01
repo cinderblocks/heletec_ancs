@@ -154,6 +154,14 @@ void NotificationService::addPendingNotification(uint32_t uuid)
     }
 }
 
+void NotificationService::clearPendingNotifications()
+{
+    if (pendingNotificationQueue != nullptr)
+    {
+        xQueueReset(pendingNotificationQueue);
+    }
+}
+
 uint32_t NotificationService::getNextPendingNotification()
 {
     uint32_t uuid = 0;
@@ -289,10 +297,18 @@ void NotificationDescription::run(void *data)
 {
     while (true)
     {
-        uint32_t pendingNotificationId = Notifications.getNextPendingNotification();
-        if (pendingNotificationId != 0)
+        // Only attempt ANCS writes when we are actually connected and the
+        // control-point characteristic is live.  Ble.isConnected() returns false
+        // as soon as ServerCallback::onDisconnect fires, which is always BEFORE
+        // EndTask calls delete pClient.  This prevents the use-after-free of
+        // _controlPointCharacteristic that was trashing the BTC task state.
+        if (Ble.isConnected())
         {
-            Ble.retrieveNotificationData(pendingNotificationId);
+            uint32_t pendingNotificationId = Notifications.getNextPendingNotification();
+            if (pendingNotificationId != 0)
+            {
+                Ble.retrieveNotificationData(pendingNotificationId);
+            }
         }
         delay(500);
     }

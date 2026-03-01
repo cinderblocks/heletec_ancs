@@ -48,6 +48,10 @@ BleService::~BleService()
         delete _clientCb;
         _clientCb = nullptr;
     }
+    if (_gattcDoneSem != nullptr) {
+        vSemaphoreDelete(_gattcDoneSem);
+        _gattcDoneSem = nullptr;
+    }
 }
 
 
@@ -56,9 +60,20 @@ void BleService::startServer(String const& appName)
     // Initialize device
     BLEDevice::init(appName);
     BLEDevice::setPower(ESP_PWR_LVL_P20);
+
+    // Create the semaphore used to gate startAdvertising() until the GATTC app has been
+    // unregistered.  ClientCallback::onDisconnect gives it; the client task takes it.
+    if (_gattcDoneSem == nullptr) {
+        _gattcDoneSem = xSemaphoreCreateBinary();
+    }
     BLEServer *pServer = BLEDevice::createServer();
     pServer->setCallbacks(new ServerCallback(this));
-    pServer->advertiseOnDisconnect(true);
+    // Advertising restart is handled by the client task after proper GATTC cleanup.
+    // advertiseOnDisconnect(true) fires esp_ble_gap_start_advertising() directly
+    // from inside ESP_GATTS_DISCONNECT_EVT on the BTC task, but at that point
+    // ESP_GATTC_DISCONNECT_EVT has not yet fired, so the GATTC interface is still
+    // registered and the advertising call returns ESP_ERR_INVALID_STATE.
+    pServer->advertiseOnDisconnect(false);
 #if defined(CONFIG_BLUEDROID_ENABLED)
     BLESecurity::setEncryptionLevel(ESP_BLE_SEC_ENCRYPT);
 #endif //defined(CONFIG_BLUEDROID_ENABLED)
@@ -156,26 +171,105 @@ void BleService::startClient(void *data)
         clientParam->bleService->_dataSourceCallback);
     clientParam->bleService->_dataSourceCharacteristic->getDescriptor(
         BLEUUID(static_cast<uint16_t>(0x2902)))->writeValue(v, 2, true);
+
+    // Keep-alive loop.  Woken by xTaskNotify from either ServerCallback::onDisconnect
+    // or ClientCallback::onDisconnect, whichever fires first.  100 ms poll catches any
+    // disconnect that slips through without a notification (e.g. link-loss timeout).
     while (true)
     {
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
+        if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100)) != 0)
+            break;  // woken by a disconnect notification
+        if (!pClient->isConnected())
+            break;  // polled disconnect
     }
+
 EndTask:
     ESP_LOGI(TAG, "Ending ClientTask");
+
+    // Capture the service pointer now – we will free clientParam before advertising.
+    BleService *bleService = clientParam->bleService;
+
+    // If the peer was still connected when we fell out of the loop (e.g. goto EndTask
+    // from a setup failure), disconnect now.  This queues ESP_GATTC_DISCONNECT_EVT,
+    // which calls esp_ble_gattc_app_unregister() and then gives _gattcDoneSem via
+    // ClientCallback::onDisconnect.
     if (pClient->isConnected())
     {
         pClient->disconnect();
     }
-    delete pClient;
-    clientParam->bleService->_pClient = nullptr;
-    clientParam->bleService->_clientTaskHandle = nullptr;
-    clientParam->bleService->_currentClientParam = nullptr;
+
+    // Wait until ClientCallback::onDisconnect signals that esp_ble_gattc_app_unregister()
+    // has been posted to the BTC task queue.  This guarantees that when we post
+    // START_ADV to the BTC queue below, UNREGISTER_APP is already ahead of it, so
+    // esp_ble_gap_start_advertising() will not see ESP_ERR_INVALID_STATE on either core.
+    // 3 s timeout is a safety net; in practice the event arrives within tens of ms.
+    if (bleService->_gattcDoneSem != nullptr)
+    {
+        if (xSemaphoreTake(bleService->_gattcDoneSem, pdMS_TO_TICKS(3000)) != pdTRUE)
+        {
+            ESP_LOGW(TAG, "Timed out waiting for GATTC disconnect event");
+        }
+    }
+
+    // Now it is safe to delete the BLEClient (GATTC app is already unregistered).
+    // Null the characteristic pointers FIRST so that any concurrent call to
+    // retrieveNotificationData() that slipped past the _isConnected check (set
+    // in ServerCallback::onDisconnect, which fires before this point) will see
+    // nullptr and return immediately rather than accessing freed memory.
+    bleService->_notificationSourceCharacteristic = nullptr;
+    bleService->_controlPointCharacteristic = nullptr;
+    bleService->_dataSourceCharacteristic = nullptr;
+    if (bleService->_pClient != nullptr)
+    {
+        delete pClient;
+        bleService->_pClient = nullptr;
+    }
+
+    // Clear the task handle and param *before* startAdvertising() so a fast reconnect
+    // cannot create a second client task while we are still running.
+    bleService->_clientTaskHandle = nullptr;
+    bleService->_currentClientParam = nullptr;
     delete clientParam;
+    clientParam = nullptr;
+
+    // Restart advertising.  _restartAdvertising() calls reset() first so any stuck
+    // m_advConfiguring flag left by a previous interrupted config chain is cleared.
+    ESP_LOGI(TAG, "Restarting advertising after disconnect");
+    bleService->_restartAdvertising();
     vTaskDelete(nullptr);
+}
+
+void BleService::_restartAdvertising()
+{
+    // BLEAdvertising::start() silently returns true (only log_w) when m_advConfiguring
+    // is stuck as true — e.g. when an async config chain was interrupted by a fast
+    // reconnect during the initial advertising setup.  reset() is the only public API
+    // that forcefully clears both m_advConfiguring and m_advDataSet.
+    //
+    // reset() does NOT clear m_serviceUUIDs, so the UUIDs added in startServer() are
+    // reused by start() automatically via the full async config chain:
+    //   esp_ble_gap_config_adv_data → ADV_DATA_SET_COMPLETE
+    //   → esp_ble_gap_config_adv_data(scanResp) → SCAN_RSP_DATA_SET_COMPLETE
+    //   → esp_ble_gap_start_advertising
+    //
+    // This must be called AFTER _gattcDoneSem has been taken, which guarantees that
+    // esp_ble_gattc_app_unregister() is already in the BTC task queue ahead of our
+    // GAP commands, preventing ESP_ERR_INVALID_STATE on ESP_GAP_BLE_ADV_START_COMPLETE.
+    BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+    pAdvertising->reset();                                       // clears stuck state
+    pAdvertising->setAppearance(ESP_BLE_APPEARANCE_GENERIC_DISPLAY);
+    pAdvertising->setScanResponse(true);
+    pAdvertising->setMinPreferred(0x06);                         // re-apply after reset
+    pAdvertising->setMaxPreferred(0x10);
+    pAdvertising->start();
 }
 
 void BleService::retrieveNotificationData(uint32_t notifyUUID) const
 {
+        // Belt-and-suspenders: callers should already check isConnected(), but guard
+        // here too in case _controlPointCharacteristic was nulled by EndTask.
+        if (_controlPointCharacteristic == nullptr) { return; }
+
         uint8_t uuid[4];
         uuid[0] = notifyUUID;
         uuid[1] = notifyUUID >> 8;
@@ -223,6 +317,11 @@ void BleService::ServerCallback::onConnect(BLEServer *pServer, ble_gap_conn_desc
     auto peerAddress = BLEAddress(desc->peer_ota_addr);
 #endif
     ESP_LOGI(TAG, "Device connected %s", peerAddress.toString().c_str());
+    ancsService->_isConnected.store(true);
+    // Drain any stale semaphore signal left over from the previous disconnect cycle.
+    if (ancsService->_gattcDoneSem != nullptr) {
+        xSemaphoreTake(ancsService->_gattcDoneSem, 0);
+    }
     if (ancsService->_serverCallback != nullptr)
     {
         ancsService->_serverCallback->onConnect();
@@ -238,34 +337,45 @@ void BleService::ServerCallback::onConnect(BLEServer *pServer, ble_gap_conn_desc
 
 void BleService::ServerCallback::onDisconnect(BLEServer *pServer)
 {
-    // Kill the client task first so it stops accessing BLE objects
+    ESP_LOGI(TAG, "Device disconnected");
+
+    // Mark as disconnected FIRST so NotificationDescription::run() immediately stops
+    // calling retrieveNotificationData().  This is the primary guard against the
+    // use-after-free of _controlPointCharacteristic that was crashing the BTC task.
+    ancsService->_isConnected.store(false);
+
+    // Drain any notifications that were queued while connected so they are not
+    // processed on the next connection with stale UUIDs.
+    Notifications.clearPendingNotifications();
+
+    // Wake the client task so it exits its keep-alive loop.  The task will wait for
+    // ClientCallback::onDisconnect (which signals that esp_ble_gattc_app_unregister()
+    // is in the BTC queue) before calling startAdvertising().
+    //
+    // IMPORTANT: do NOT null _clientTaskHandle here.  Nulling prematurely would:
+    //   (a) allow onConnect to create a new task while the old one is still cleaning up,
+    //   (b) cause the else-branch below to call startAdvertising() while GATTC is still
+    //       registered, returning ESP_ERR_INVALID_STATE on the dual-core ESP32-S3.
+    // The task owns _clientTaskHandle and nulls it only after startAdvertising() returns.
     if (ancsService->_clientTaskHandle != nullptr)
     {
-        ::vTaskDelete(ancsService->_clientTaskHandle);
-        ancsService->_clientTaskHandle = nullptr;
+        xTaskNotify(ancsService->_clientTaskHandle, 1, eSetValueWithOverwrite);
     }
-    // Free ClientParameter the killed task couldn't clean up
-    if (ancsService->_currentClientParam != nullptr)
+    else if (ancsService->_pClient == nullptr)
     {
-        delete ancsService->_currentClientParam;
-        ancsService->_currentClientParam = nullptr;
+        // No task and no GATTC client — the GATTC app is already unregistered, so
+        // it is safe to restart advertising directly from this BTC task callback.
+        ESP_LOGI(TAG, "No client task - restarting advertising directly");
+        ancsService->_restartAdvertising();
     }
-    // Disconnect GATTC client if still connected — do NOT delete from BLE callback context
-    if (ancsService->_pClient != nullptr)
-    {
-        if (ancsService->_pClient->isConnected())
-        {
-            ancsService->_pClient->disconnect();
-        }
-        ancsService->_pClient = nullptr;
-    }
-    ESP_LOGI(TAG, "Device disconnected");
+    // else: _pClient != null but no task handle — the task exited the keep-alive loop
+    // via the polling path and is currently in EndTask cleaning up.  It will call
+    // startAdvertising() itself after taking _gattcDoneSem.
+
     if (ancsService->_serverCallback != nullptr)
     {
         ancsService->_serverCallback->onDisconnect();
     }
-    // advertiseOnDisconnect(true) is set on the server - advertising restarts automatically
-    // after this callback returns. Do NOT call startAdvertising() here - it would race.
 }
 
 void BleService::ClientCallback::onConnect(BLEClient *pClient)
@@ -284,6 +394,20 @@ void BleService::ClientCallback::onDisconnect(BLEClient *pClient)
     if (pClient != nullptr) {
         ESP_LOGI(TAG, "Device Client disconnected %s", pClient->getPeerAddress().toString().c_str());
     }
+
+    // This callback fires from inside ESP_GATTC_DISCONNECT_EVT, which means
+    // esp_ble_gattc_app_unregister() has already been posted to the BTC task queue.
+    // Signal the client task that it is now safe to call startAdvertising(): by the
+    // time the task posts START_ADV to the BTC queue, UNREGISTER_APP is already ahead
+    // of it in the queue, guaranteeing correct ordering on both single- and dual-core.
+    if (ancsService->_gattcDoneSem != nullptr) {
+        xSemaphoreGive(ancsService->_gattcDoneSem);
+    }
+    // Also wake the keep-alive loop in case ServerCallback::onDisconnect hasn't fired yet.
+    if (ancsService->_clientTaskHandle != nullptr) {
+        xTaskNotify(ancsService->_clientTaskHandle, 1, eSetValueWithOverwrite);
+    }
+
     if (ancsService->_clientCallback != nullptr)
     {
         ancsService->_clientCallback->onDisconnect();

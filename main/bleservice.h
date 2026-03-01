@@ -18,7 +18,9 @@
 #ifndef BLE_SERVICE_H
 #define BLE_SERVICE_H
 
+#include <atomic>
 #include <BLEDevice.h>
+#include <freertos/semphr.h>
 
 class BLEHIDDevice;
 
@@ -49,9 +51,9 @@ class BleService
         void setServerCallback(ANCSServiceServerCallback *serverCallback);
         void setClientCallback(ANCSServiceClientCallback *clientCallback);
         void setBatteryLevel(uint8_t level);
+        bool isConnected() const { return _isConnected.load(); }
 
-    private:
-        // ANCS
+    private:        // ANCS
         BLERemoteCharacteristic *_notificationSourceCharacteristic = nullptr;
         BLERemoteCharacteristic *_controlPointCharacteristic = nullptr;
         BLERemoteCharacteristic *_dataSourceCharacteristic = nullptr;
@@ -105,7 +107,22 @@ class BleService
         // Must be declared after nested classes are defined above
         ClientParameter *_currentClientParam = nullptr;
         ClientCallback  *_clientCb = nullptr;   // created once in startServer, reused every connection
-        BLEClient       *_pClient  = nullptr;   // current GATTC client; disconnected in onDisconnect
+        BLEClient       *_pClient  = nullptr;   // current GATTC client
+
+        // Semaphore given by ClientCallback::onDisconnect (fired from ESP_GATTC_DISCONNECT_EVT,
+        // after esp_ble_gattc_app_unregister() has been queued). The client task waits on this
+        // before calling startAdvertising() to guarantee correct BTC-task queue ordering.
+        SemaphoreHandle_t _gattcDoneSem = nullptr;
+
+        // Connection state flag: true from ServerCallback::onConnect, false from
+        // ServerCallback::onDisconnect.  Checked by NotificationDescription::run() to
+        // prevent accessing characteristic pointers after pClient has been deleted.
+        std::atomic<bool> _isConnected{false};
+
+        // Resets the BLEAdvertising object and starts advertising from scratch.
+        // Calling reset() before start() is the only reliable way to clear a stuck
+        // m_advConfiguring flag left by an interrupted async config chain.
+        void _restartAdvertising();
 };
 
 extern BleService Ble;

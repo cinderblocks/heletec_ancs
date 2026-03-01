@@ -75,24 +75,17 @@ void Hardware::startDrawing(void* pvParameters)
         BaseType_t result = xTaskNotifyWait(0x00, 0x00, nullptr, portMAX_DELAY);
         if (result == pdPASS)
         {
+            // Update call icon in header bar first
+            h->showCallState(Notifications.isCallingNotification());
+
             size_t count = Notifications.getNotificationCount();
             for (size_t i = 0; i < count; i++) {
-                if (Notifications.isCallingNotification()) { break; }
                 notification_def* notification = Notifications.getNotificationByIndex(i);
                 if (notification != nullptr && !notification->showed && notification->isComplete) {
                     h->showNotification(*notification);
                     notification->showed = true;
                     h->glow(true);
                     vTaskDelay(15000 / portTICK_PERIOD_MS);
-                    h->glow(false);
-                }
-            }
-            if (Notifications.isCallingNotification()) {
-                notification_def notification = Notifications.getCallingNotification();
-                if (notification.isComplete) {
-                    h->showNotification(notification);
-                    h->glow(true);
-                    while (Notifications.isCallingNotification()) { vTaskDelay(1000 / portTICK_PERIOD_MS); }
                     h->glow(false);
                 }
             }
@@ -221,6 +214,21 @@ void Hardware::showGpsState(bool connected)
     else
     {
         mDisplay.fillRectangle(mDisplay.width()-50, 1, 16, 16, HEADER_COLOR);
+    }
+}
+
+void Hardware::showCallState(bool active)
+{
+    if (active == mCallState) { return; }
+
+    mCallState = active;
+    if (active)
+    {
+        drawIcon(mDisplay.width()-67, 1, Bitmaps::PhoneCall, TFT::Color::GREEN);
+    }
+    else
+    {
+        mDisplay.fillRectangle(mDisplay.width()-67, 1, 16, 16, HEADER_COLOR);
     }
 }
 

@@ -74,6 +74,7 @@ public:
     void setBLEConnectionState(conn_state_def state);
     void showTime(String const& timestamp);
     void showGpsState(bool connected);
+    void showCallState(bool active);
     void glow(bool on);
 
     uint8_t getBatteryLevel();
@@ -95,6 +96,7 @@ private:
     TFT mDisplay;
     conn_state_def mBleState = BLE_DISCONNECTED;
     bool mGpsState = false;
+    bool mCallState = false;
     uint8_t mBatteryLevel = 0;
     String mMessage = "";
     TimerHandle_t mBatteryTimer = nullptr;

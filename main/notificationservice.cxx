@@ -137,6 +137,7 @@ void NotificationService::NotificationSourceNotifyCallback(BLERemoteCharacterist
             if (notification->isCall())
             {
                 Notifications.removeCallNotification();
+                ::xTaskNotifyGive(Heltec.mDrawTask);
             }
         }
     }

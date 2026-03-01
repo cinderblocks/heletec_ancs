@@ -23,6 +23,7 @@
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
+#include <freertos/semphr.h>
 #include <time.h>
 
 class BLERemoteCharacteristic;
@@ -48,6 +49,7 @@ public:
     
     void addPendingNotification(uint32_t uuid);
     uint32_t getNextPendingNotification();
+    uint32_t waitForNextPendingNotification();
     void clearPendingNotifications();
     void addNotification(notification_def const& notification, bool isCalling);
     void removeNotification(uint32_t uuid);
@@ -58,6 +60,7 @@ public:
     notification_def* getNotification(uint32_t uuid);
     size_t getNotificationCount() const;
     notification_def* getNotificationByIndex(size_t index);
+    bool takeNotificationByIndex(size_t index, notification_def& out);
 
     static void DataSourceNotifyCallback(BLERemoteCharacteristic *pCharacteristic, uint8_t *pData, size_t length, bool isNotify);
     static void NotificationSourceNotifyCallback(BLERemoteCharacteristic *pCharacteristic, uint8_t *pData, size_t length,bool isNotify);
@@ -70,6 +73,7 @@ private:
     size_t notificationCount;
     QueueHandle_t pendingNotificationQueue;
     notification_def callingNotification;
+    mutable SemaphoreHandle_t mMutex;
     
     int findNotificationIndex(uint32_t uuid) const;
 };

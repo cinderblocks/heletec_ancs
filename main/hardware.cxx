@@ -72,20 +72,36 @@ void Hardware::startDrawing(void* pvParameters)
 
     while (true)
     {
-        BaseType_t result = xTaskNotifyWait(0x00, 0x00, nullptr, portMAX_DELAY);
-        if (result == pdPASS)
+        uint32_t bits = 0;
+        xTaskNotifyWait(0xFFFFFFFFu, 0xFFFFFFFFu, &bits, portMAX_DELAY);
+
+        if (bits & DRAW_BATTERY)
+        {
+            // Safe to block here — we are in the draw task, not the timer service task.
+            uint8_t level = h->getBatteryLevel();
+            if (level != h->mBatteryLevel)
+            {
+                h->mBatteryLevel = level;
+                h->showBatteryLevel(level);
+                Ble.setBatteryLevel(level);
+            }
+        }
+
+        if (bits & (DRAW_NOTIFY | DRAW_STATE))
         {
             // Update call icon in header bar first
             h->showCallState(Notifications.isCallingNotification());
 
             size_t count = Notifications.getNotificationCount();
             for (size_t i = 0; i < count; i++) {
-                notification_def* notification = Notifications.getNotificationByIndex(i);
-                if (notification != nullptr && !notification->showed && notification->isComplete) {
-                    h->showNotification(*notification);
-                    notification->showed = true;
+                // takeNotificationByIndex atomically copies the notification and
+                // marks it as showed under the mutex, so the slot is safe to reuse
+                // immediately — no stale pointer is held across the 15 s delay.
+                notification_def notification;
+                if (Notifications.takeNotificationByIndex(i, notification)) {
+                    h->showNotification(notification);
                     h->glow(true);
-                    vTaskDelay(15000 / portTICK_PERIOD_MS);
+                    vTaskDelay(pdMS_TO_TICKS(15000));
                     h->glow(false);
                 }
             }
@@ -108,7 +124,15 @@ void Hardware::setBLEConnectionState(conn_state_def state)
 {
     mBleState = state;
     showBLEState(state);
-    ::xTaskNotifyGive(mDrawTask);
+    notifyDraw(DRAW_STATE);
+}
+
+void Hardware::notifyDraw(uint32_t events)
+{
+    if (mDrawTask != nullptr)
+    {
+        xTaskNotify(mDrawTask, events, eSetBits);
+    }
 }
 
 void Hardware::showNotification(notification_def const& notification)
@@ -240,13 +264,9 @@ void Hardware::glow(bool on)
 /* static */
 void Hardware::batteryTimerCallback(TimerHandle_t xTimer)
 {
-    uint8_t level = Heltec.getBatteryLevel();
-    if (level != Heltec.mBatteryLevel)
-    {
-        Heltec.mBatteryLevel = level;
-        Heltec.showBatteryLevel(level);
-        Ble.setBatteryLevel(level);
-    }
+    // Just set the battery bit — the actual ADC read (which needs a 100 ms GPIO
+    // stabilisation delay) happens in the draw task, not here in the timer service task.
+    Heltec.notifyDraw(DRAW_BATTERY);
 }
 
 /* extern */

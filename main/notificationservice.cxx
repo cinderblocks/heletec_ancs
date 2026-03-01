@@ -27,6 +27,7 @@ static const char* TAG = "notify";
 NotificationService::NotificationService()
 :   notificationCount(0)
 ,   pendingNotificationQueue(nullptr)
+,   mMutex(xSemaphoreCreateMutex())
 {
     // Initialize notification list
     for (size_t i = 0; i < notificationListSize; i++)
@@ -43,6 +44,10 @@ NotificationService::~NotificationService()
     if (pendingNotificationQueue != nullptr)
     {
         vQueueDelete(pendingNotificationQueue);
+    }
+    if (mMutex != nullptr)
+    {
+        vSemaphoreDelete(mMutex);
     }
 }
 
@@ -102,7 +107,7 @@ void NotificationService::DataSourceNotifyCallback(BLERemoteCharacteristic *pCha
             }
             if (!notification->title.isEmpty() && !notification->message.isEmpty() && notification->time != 0) {
                 notification->isComplete = true;
-                ::xTaskNotifyGive(Heltec.mDrawTask);
+                Heltec.notifyDraw(Hardware::DRAW_NOTIFY);
             }
         }
     }
@@ -137,7 +142,7 @@ void NotificationService::NotificationSourceNotifyCallback(BLERemoteCharacterist
             if (notification->isCall())
             {
                 Notifications.removeCallNotification();
-                ::xTaskNotifyGive(Heltec.mDrawTask);
+                Heltec.notifyDraw(Hardware::DRAW_NOTIFY);
             }
         }
     }
@@ -173,8 +178,19 @@ uint32_t NotificationService::getNextPendingNotification()
     return uuid;
 }
 
+uint32_t NotificationService::waitForNextPendingNotification()
+{
+    uint32_t uuid = 0;
+    if (pendingNotificationQueue != nullptr)
+    {
+        xQueueReceive(pendingNotificationQueue, &uuid, portMAX_DELAY);
+    }
+    return uuid;
+}
+
 void NotificationService::addNotification(notification_def const& notification, bool isCalling)
 {
+    xSemaphoreTake(mMutex, portMAX_DELAY);
     if (isCalling)
     {
         callingNotification = notification;
@@ -194,27 +210,27 @@ void NotificationService::addNotification(notification_def const& notification, 
             }
         }
         
-        // If no empty slot, use first slot (oldest)
+        // If no empty slot, use first slot (oldest) — count stays the same
         if (targetIndex == -1)
         {
             targetIndex = 0;
         }
-        
-        notificationList[targetIndex] = notification;
-        notificationCount = 0;
-        for (size_t i = 0; i < notificationListSize; i++)
+        else
         {
-            if (notificationList[i].key != 0)
-            {
-                notificationCount++;
-            }
+            notificationCount++;
         }
+
+        notificationList[targetIndex] = notification;
     }
+    xSemaphoreGive(mMutex);
 }
 
 size_t NotificationService::getNotificationCount() const
 {
-    return notificationCount;
+    xSemaphoreTake(mMutex, portMAX_DELAY);
+    size_t count = notificationCount;
+    xSemaphoreGive(mMutex);
+    return count;
 }
 
 notification_def* NotificationService::getNotificationByIndex(size_t index)
@@ -232,6 +248,32 @@ notification_def* NotificationService::getNotificationByIndex(size_t index)
         }
     }
     return nullptr;
+}
+
+bool NotificationService::takeNotificationByIndex(size_t index, notification_def& out)
+{
+    xSemaphoreTake(mMutex, portMAX_DELAY);
+    bool found = false;
+    size_t currentIndex = 0;
+    for (size_t i = 0; i < notificationListSize; i++)
+    {
+        if (notificationList[i].key != 0)
+        {
+            if (currentIndex == index)
+            {
+                if (!notificationList[i].showed && notificationList[i].isComplete)
+                {
+                    out = notificationList[i];
+                    notificationList[i].showed = true;
+                    found = true;
+                }
+                break;
+            }
+            currentIndex++;
+        }
+    }
+    xSemaphoreGive(mMutex);
+    return found;
 }
 
 bool NotificationService::exists(uint32_t uuid) const
@@ -260,12 +302,17 @@ notification_def* NotificationService::getNotification(uint32_t uuid)
 
 void NotificationService::removeCallNotification()
 {
+    xSemaphoreTake(mMutex, portMAX_DELAY);
     callingNotification.key = 0;
+    xSemaphoreGive(mMutex);
 }
 
 bool NotificationService::isCallingNotification() const
 {
-    return callingNotification.key != 0;
+    xSemaphoreTake(mMutex, portMAX_DELAY);
+    bool result = callingNotification.key != 0;
+    xSemaphoreGive(mMutex);
+    return result;
 }
 
 notification_def& NotificationService::getCallingNotification()
@@ -275,6 +322,7 @@ notification_def& NotificationService::getCallingNotification()
 
 void NotificationService::removeNotification(uint32_t uuid)
 {
+    xSemaphoreTake(mMutex, portMAX_DELAY);
     int index = findNotificationIndex(uuid);
     if (index != -1)
     {
@@ -287,6 +335,7 @@ void NotificationService::removeNotification(uint32_t uuid)
         notificationList[index].isComplete = false;
         notificationCount--;
     }
+    xSemaphoreGive(mMutex);
 }
 
 
@@ -298,20 +347,20 @@ void NotificationDescription::run(void *data)
 {
     while (true)
     {
+        // Block until a UUID is available — no polling delay needed.
+        // clearPendingNotifications() drains the queue on disconnect, so this
+        // unblocks immediately if the queue is reset while we are waiting.
+        uint32_t pendingNotificationId = Notifications.waitForNextPendingNotification();
+
         // Only attempt ANCS writes when we are actually connected and the
         // control-point characteristic is live.  Ble.isConnected() returns false
         // as soon as ServerCallback::onDisconnect fires, which is always BEFORE
         // EndTask calls delete pClient.  This prevents the use-after-free of
         // _controlPointCharacteristic that was trashing the BTC task state.
-        if (Ble.isConnected())
+        if (Ble.isConnected() && pendingNotificationId != 0)
         {
-            uint32_t pendingNotificationId = Notifications.getNextPendingNotification();
-            if (pendingNotificationId != 0)
-            {
-                Ble.retrieveNotificationData(pendingNotificationId);
-            }
+            Ble.retrieveNotificationData(pendingNotificationId);
         }
-        delay(500);
     }
 }
 

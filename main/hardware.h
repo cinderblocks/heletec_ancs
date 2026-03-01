@@ -66,12 +66,18 @@ public:
 
     static constexpr uint16_t HEADER_COLOR = 0x3190;
 
+    // Task-notification event bits for the draw task
+    static constexpr uint32_t DRAW_NOTIFY  = (1u << 0); // new notification ready
+    static constexpr uint32_t DRAW_STATE   = (1u << 1); // BLE state changed
+    static constexpr uint32_t DRAW_BATTERY = (1u << 2); // battery level check
+
     Hardware();
     virtual ~Hardware();
     void begin();
 
     void pairing(String const& passcode);
     void setBLEConnectionState(conn_state_def state);
+    void notifyDraw(uint32_t events);
     void showTime(String const& timestamp);
     void showGpsState(bool connected);
     void showCallState(bool active);

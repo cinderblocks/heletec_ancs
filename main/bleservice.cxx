@@ -136,7 +136,17 @@ void BleService::startClient(void *data)
     BLEClient *pClient = BLEDevice::createClient();
     clientParam->bleService->_pClient = pClient;
     pClient->setClientCallbacks(clientParam->bleService->_clientCb);
-    pClient->connect(clientParam->bleAddress);
+
+    // connect() returns true only when ESP_GATTC_OPEN_EVT succeeds — i.e. a real
+    // GATTC-level connection was established.  When it returns false (e.g. HCI timeout,
+    // rsn=0x100) there is no GATTC connection to clean up: ClientCallback::onDisconnect
+    // will never fire, so we must not wait on _gattcDoneSem.
+    bool const gattcConnected = pClient->connect(clientParam->bleAddress);
+    if (!gattcConnected)
+    {
+        ESP_LOGW(TAG, "connect() failed — skipping auth wait and service discovery");
+        goto EndTask;
+    }
 
     // Wait for authentication/bonding to complete before starting GATT service
     // discovery.  With m_forceSecurity=true the stack starts security immediately
@@ -218,12 +228,12 @@ EndTask:
         pClient->disconnect();
     }
 
-    // Wait until ClientCallback::onDisconnect signals that esp_ble_gattc_app_unregister()
-    // has been posted to the BTC task queue.  This guarantees that when we post
-    // START_ADV to the BTC queue below, UNREGISTER_APP is already ahead of it, so
-    // esp_ble_gap_start_advertising() will not see ESP_ERR_INVALID_STATE on either core.
-    // 3 s timeout is a safety net; in practice the event arrives within tens of ms.
-    if (bleService->_gattcDoneSem != nullptr)
+    // Wait for ClientCallback::onDisconnect to signal that esp_ble_gattc_app_unregister()
+    // has been posted to the BTC task queue — but ONLY if connect() actually established
+    // a GATTC-level connection.  When connect() returned false there was never a GATTC
+    // connection: ClientCallback::onDisconnect will never fire and ESP_GATTC_CLOSE_EVT
+    // will never arrive, so waiting here would always burn the full 3-second timeout.
+    if (gattcConnected && bleService->_gattcDoneSem != nullptr)
     {
         if (xSemaphoreTake(bleService->_gattcDoneSem, pdMS_TO_TICKS(3000)) != pdTRUE)
         {

@@ -60,13 +60,40 @@ void SecurityCallback::onAuthenticationComplete(ble_gap_conn_desc* cmpl)
     {
         if (cmpl.fail_reason == 0x66)
         {
-            // The phone rejected our bond credentials — stale bond (re-flash, or phone
-            // forgot us).  Clear the local NVS entry so the next connection starts a
-            // fresh numeric-comparison pairing rather than looping on the stale LTK.
-            ESP_LOGW(TAG, "Stale bond rejected by peer (0x66) — clearing local bond for %02x:%02x:%02x:%02x:%02x:%02x",
+            // The peer rejected our LTK — stale bond on our side (re-flash, NVS wipe, etc.).
+            //
+            // IMPORTANT: cmpl.bd_addr is the RPA (Resolvable Private Address) that iOS
+            // is using for this connection attempt.  iOS rotates its RPA on every
+            // reconnect, so cmpl.bd_addr is never the identity address that Bluedroid
+            // stored in NVS when we originally paired.  Calling
+            // esp_ble_remove_bond_device(cmpl.bd_addr) therefore always hits the
+            // "Device not found" error path and leaves the stale bond intact, causing
+            // the 0x66 rejection loop to repeat indefinitely.
+            //
+            // Fix: enumerate all stored bonds and wipe them all.  We cannot resolve
+            // the RPA to an identity address without the peer's IRK (which we only
+            // hold from a now-stale bond), so a full wipe is the only reliable option.
+            ESP_LOGW(TAG, "Stale bond rejected by peer (0x66) at RPA %02x:%02x:%02x:%02x:%02x:%02x — wiping all local bonds",
                 cmpl.bd_addr[0], cmpl.bd_addr[1], cmpl.bd_addr[2],
                 cmpl.bd_addr[3], cmpl.bd_addr[4], cmpl.bd_addr[5]);
-            esp_ble_remove_bond_device(cmpl.bd_addr);
+
+            int bondCount = esp_ble_get_bond_device_num();
+            if (bondCount > 0)
+            {
+                static constexpr int MAX_BONDS = 8; // Bluedroid NVS maximum
+                esp_ble_bond_dev_t devList[MAX_BONDS];
+                int count = (bondCount <= MAX_BONDS) ? bondCount : MAX_BONDS;
+                esp_ble_get_bond_device_list(&count, devList);
+                for (int i = 0; i < count; i++)
+                {
+                    esp_ble_remove_bond_device(devList[i].bd_addr);
+                }
+                ESP_LOGW(TAG, "Cleared %d stored bond(s) — next connection will require fresh pairing", count);
+            }
+            else
+            {
+                ESP_LOGW(TAG, "No local bonds found to clear (already wiped by BT stack)");
+            }
         }
         else
         {

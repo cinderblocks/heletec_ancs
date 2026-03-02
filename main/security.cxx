@@ -60,12 +60,9 @@ void SecurityCallback::onAuthenticationComplete(ble_gap_conn_desc* cmpl)
     {
         if (cmpl.fail_reason == 0x66)
         {
-            // The phone rejected our bond credentials — our stored bond is stale
-            // (e.g. the phone forgot us, or we were re-flashed).  The BT stack
-            // removes the bond from NVS automatically (logged as
-            // "btc_dm_ble_auth_cmpl_evt, remove bond in flash"), but call
-            // deleteBond explicitly as a belt-and-suspenders measure so the next
-            // connection attempt starts a clean pairing exchange.
+            // The phone rejected our bond credentials — stale bond (re-flash, or phone
+            // forgot us).  Clear the local NVS entry so the next connection starts a
+            // fresh numeric-comparison pairing rather than looping on the stale LTK.
             ESP_LOGW(TAG, "Stale bond rejected by peer (0x66) — clearing local bond for %02x:%02x:%02x:%02x:%02x:%02x",
                 cmpl.bd_addr[0], cmpl.bd_addr[1], cmpl.bd_addr[2],
                 cmpl.bd_addr[3], cmpl.bd_addr[4], cmpl.bd_addr[5]);

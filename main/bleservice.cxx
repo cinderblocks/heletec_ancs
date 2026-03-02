@@ -118,8 +118,10 @@ void BleService::startClient(void *data)
 #endif //defined(CONFIG_BLUEDROID_ENABLED)
     BLEDevice::setSecurityCallbacks(&Security);
 #if defined(CONFIG_BLUEDROID_ENABLED)
-    // Use bool overload - this is the one that sets m_securityEnabled=true
-    // The uint8_t overload does NOT set m_securityEnabled, so startSecurity() never runs
+    // Always use full MITM protection via numeric comparison.
+    // The user confirms the passkey shown on the device display.
+    // Use the bool overload — the uint8_t overload does NOT set m_securityEnabled,
+    // so startSecurity() never runs.
     BLESecurity::setAuthenticationMode(true, true, true); // bonding=true, mitm=true, sc=true
     BLESecurity::setCapability(ESP_IO_CAP_IO);
     BLESecurity::setInitEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);

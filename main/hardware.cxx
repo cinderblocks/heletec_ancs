@@ -77,7 +77,14 @@ void Hardware::startDrawing(void* pvParameters)
     while (true)
     {
         uint32_t bits = 0;
-        xTaskNotifyWait(0xFFFFFFFFu, 0xFFFFFFFFu, &bits, portMAX_DELAY);
+        // ulBitsToClearOnEntry = 0: do NOT clear pending bits before reading.
+        // With 0xFFFFFFFFu here (the former value) any bits posted while the task
+        // was busy — e.g. DRAW_GPS fired during the 15 s notification vTaskDelay —
+        // were zeroed before xTaskNotifyWait could return them, silently dropping
+        // every GPS display update that arrived during a notification.
+        // ulBitsToClearOnExit = 0xFFFFFFFFu: clear all bits after reading so the
+        // next call starts clean.
+        xTaskNotifyWait(0u, 0xFFFFFFFFu, &bits, portMAX_DELAY);
 
         if (bits & DRAW_BATTERY)
         {
@@ -105,15 +112,17 @@ void Hardware::startDrawing(void* pvParameters)
         if (bits & DRAW_GPS)
         {
             char localTs[sizeof(h->mTimestamp)];
+            bool gpsState;
             portENTER_CRITICAL(&h->mHardwareLock);
             memcpy(localTs, h->mTimestamp, sizeof(localTs));
+            gpsState = h->mGpsState;
             portEXIT_CRITICAL(&h->mHardwareLock);
 
             if (localTs[0] != '\0')
             {
                 h->mDisplay.drawStr(0, 6, localTs, Font_7x10, TFT::Color::WHITE, HEADER_COLOR);
             }
-            if (h->mGpsState)
+            if (gpsState)
             {
                 h->drawIcon(h->mDisplay.width()-50, 1, Bitmaps::GPS);
             }
@@ -287,11 +296,12 @@ void Hardware::showBatteryLevel(uint8_t percent)
 
 void Hardware::showGpsState(bool connected)
 {
-    if (connected == mGpsState) { return; }
-    // Only update state here; the draw task handles the actual icon update under
-    // DRAW_GPS, eliminating the SPI race with the GPS task on the other core.
-    mGpsState = connected;
-    notifyDraw(DRAW_GPS);
+    portENTER_CRITICAL(&mHardwareLock);
+    bool changed = (connected != mGpsState);
+    if (changed) { mGpsState = connected; }
+    portEXIT_CRITICAL(&mHardwareLock);
+
+    if (changed) { notifyDraw(DRAW_GPS); }
 }
 
 void Hardware::showCallState(bool active)

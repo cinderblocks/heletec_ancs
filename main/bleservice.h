@@ -52,6 +52,13 @@ class BleService
         void setClientCallback(ANCSServiceClientCallback *clientCallback);
         void setBatteryLevel(uint8_t level);
         bool isConnected() const { return _isConnected.load(); }
+        // Called by SecurityCallback on every 0x66 auth failure.
+        // Once AUTH_FAIL_PAIRING_THRESHOLD consecutive failures occur, posts
+        // pairing instructions to the display so the user knows to go to
+        // iOS Settings > Bluetooth and tap the device name.
+        // Returns true when the instructions have been posted.
+        bool noteAuthFail();
+        void resetAuthStreak() { _authFailStreak.store(0); }
 
     private:        // ANCS
         BLERemoteCharacteristic *_notificationSourceCharacteristic = nullptr;
@@ -118,6 +125,11 @@ class BleService
         // ServerCallback::onDisconnect.  Checked by NotificationDescription::run() to
         // prevent accessing characteristic pointers after pClient has been deleted.
         std::atomic<bool> _isConnected{false};
+        // Counts consecutive 0x66 auth failures.  After AUTH_FAIL_PAIRING_THRESHOLD
+        // consecutive failures, noteAuthFail() shows "iOS Settings" on the display.
+        // Reset to 0 by resetAuthStreak() on successful authentication.
+        std::atomic<int>  _authFailStreak{0};
+        static constexpr int AUTH_FAIL_PAIRING_THRESHOLD = 2;
 
         // Resets the BLEAdvertising object and starts advertising from scratch.
         // Calling reset() before start() is the only reliable way to clear a stuck

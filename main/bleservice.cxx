@@ -18,6 +18,7 @@
 #include "bleservice.h"
 
 #include "ancs.h"
+#include "hardware.h"
 #include "notificationservice.h"
 #include "security.h"
 #include <BLE2902.h>
@@ -442,6 +443,35 @@ void BleService::ClientCallback::onDisconnect(BLEClient *pClient)
     {
         ancsService->_clientCallback->onDisconnect();
     }
+}
+
+bool BleService::noteAuthFail()
+{
+    int streak = _authFailStreak.fetch_add(1) + 1;
+    ESP_LOGW(TAG, "Auth fail streak: %d / %d", streak, AUTH_FAIL_PAIRING_THRESHOLD);
+
+    if (streak >= AUTH_FAIL_PAIRING_THRESHOLD)
+    {
+        // What's happening:
+        //   Attempt 1 — iOS presented a stale LTK (we had no matching bond after a
+        //               re-flash / NVS wipe).  Bluedroid rejected it; iOS cleared its
+        //               stale bond and immediately tried a fresh connection.
+        //   Attempt 2+ — iOS now has NO stored bond and is attempting fresh SMP
+        //               pairing. Because ANCS is a background system service, iOS
+        //               sends a Pairing Request with MITM=0 (no dialog). Our device
+        //               requires MITM=1 (ESP_IO_CAP_IO), so Bluedroid returns
+        //               SMP_ERR_AUTH_REQ → 0x66 → same error, infinite loop.
+        //
+        // Resolution: the user must go to iOS Settings > Bluetooth and tap our
+        // device name. With the Bluetooth settings page in the foreground, iOS
+        // WILL send MITM=1 and display the numeric comparison dialog.
+        // Once the user confirms the passkey on both devices, the fresh MITM bond
+        // is stored and ANCS reconnects automatically from then on.
+        ESP_LOGW(TAG, "MITM pairing requires user action: go to iOS Settings > Bluetooth");
+        Heltec.pairing("iOS Settings");
+        return true;
+    }
+    return false;
 }
 
 /* extern */

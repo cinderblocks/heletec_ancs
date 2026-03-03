@@ -17,6 +17,7 @@
 
 #include "security.h"
 
+#include "bleservice.h"
 #include "hardware.h"
 #include <BLEDevice.h>
 #include <esp_gap_ble_api.h>
@@ -60,19 +61,6 @@ void SecurityCallback::onAuthenticationComplete(ble_gap_conn_desc* cmpl)
     {
         if (cmpl.fail_reason == 0x66)
         {
-            // The peer rejected our LTK — stale bond on our side (re-flash, NVS wipe, etc.).
-            //
-            // IMPORTANT: cmpl.bd_addr is the RPA (Resolvable Private Address) that iOS
-            // is using for this connection attempt.  iOS rotates its RPA on every
-            // reconnect, so cmpl.bd_addr is never the identity address that Bluedroid
-            // stored in NVS when we originally paired.  Calling
-            // esp_ble_remove_bond_device(cmpl.bd_addr) therefore always hits the
-            // "Device not found" error path and leaves the stale bond intact, causing
-            // the 0x66 rejection loop to repeat indefinitely.
-            //
-            // Fix: enumerate all stored bonds and wipe them all.  We cannot resolve
-            // the RPA to an identity address without the peer's IRK (which we only
-            // hold from a now-stale bond), so a full wipe is the only reliable option.
             ESP_LOGW(TAG, "Stale bond rejected by peer (0x66) at RPA %02x:%02x:%02x:%02x:%02x:%02x — wiping all local bonds",
                 cmpl.bd_addr[0], cmpl.bd_addr[1], cmpl.bd_addr[2],
                 cmpl.bd_addr[3], cmpl.bd_addr[4], cmpl.bd_addr[5]);
@@ -80,7 +68,7 @@ void SecurityCallback::onAuthenticationComplete(ble_gap_conn_desc* cmpl)
             int bondCount = esp_ble_get_bond_device_num();
             if (bondCount > 0)
             {
-                static constexpr int MAX_BONDS = 8; // Bluedroid NVS maximum
+                static constexpr int MAX_BONDS = 8;
                 esp_ble_bond_dev_t devList[MAX_BONDS];
                 int count = (bondCount <= MAX_BONDS) ? bondCount : MAX_BONDS;
                 esp_ble_get_bond_device_list(&count, devList);
@@ -88,22 +76,35 @@ void SecurityCallback::onAuthenticationComplete(ble_gap_conn_desc* cmpl)
                 {
                     esp_ble_remove_bond_device(devList[i].bd_addr);
                 }
-                ESP_LOGW(TAG, "Cleared %d stored bond(s) — next connection will require fresh pairing", count);
+                ESP_LOGW(TAG, "Cleared %d stored bond(s)", count);
             }
             else
             {
-                ESP_LOGW(TAG, "No local bonds found to clear (already wiped by BT stack)");
+                ESP_LOGW(TAG, "No local bonds found (already wiped by BT stack)");
             }
+
+            // noteAuthFail() tracks consecutive failures.  On the first failure
+            // iOS had a stale LTK; it clears it and retries.  On the second+
+            // failure iOS has no bond but sends MITM=0 (background service can't
+            // show a dialog) which our MITM=1 requirement rejects — the loop
+            // cannot self-resolve.  Once the threshold is reached, the display
+            // shows "iOS Settings" so the user knows to open Settings > Bluetooth
+            // and tap the device name; with the BT settings page foregrounded,
+            // iOS will send MITM=1 and the passkey dialog will appear.
+            if (!Ble.noteAuthFail())
+            {
+                // Below threshold — still in the stale-LTK-clearing phase,
+                // just show Disconnected and keep advertising normally.
+                Heltec.setBLEConnectionState(BLE_DISCONNECTED);
+            }
+            // If noteAuthFail() returned true the display already shows the
+            // pairing instructions (state = BLE_PAIRING); don't overwrite it.
         }
         else
         {
             ESP_LOGI(TAG, "Authentication failed, reason=0x%02x", cmpl.fail_reason);
+            Heltec.setBLEConnectionState(BLE_DISCONNECTED);
         }
-        // ServerCallback::onDisconnect will have already (or will shortly) call
-        // setBLEConnectionState(BLE_DISCONNECTED), but set it here too so the
-        // display updates correctly for auth failures that don't cause an immediate
-        // link-layer disconnect (e.g. wrong PIN on some platforms).
-        Heltec.setBLEConnectionState(BLE_DISCONNECTED);
         return;
     }
 #elif defined(CONFIG_NIMBLE_ENABLED)
@@ -116,6 +117,7 @@ void SecurityCallback::onAuthenticationComplete(ble_gap_conn_desc* cmpl)
     }
 #endif
     ESP_LOGI(TAG, "Authentication successful");
+    Ble.resetAuthStreak();
     // Clear the pairing display - device is now connected and ready
     Heltec.setBLEConnectionState(BLE_CONNECTED);
 }

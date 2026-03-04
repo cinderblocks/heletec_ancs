@@ -556,27 +556,43 @@ void BleService::ServerCallback::onAuthenticationComplete(NimBLEConnInfo &connIn
 {
     if (!connInfo.isEncrypted())
     {
-        ESP_LOGW(TAG, "Encryption failed — disconnecting (conn_handle=%d)", connInfo.getConnHandle());
+        ESP_LOGW(TAG, "Encryption failed (conn_handle=%d)", connInfo.getConnHandle());
+        Heltec.setBLEConnectionState(BLE_DISCONNECTED);
 
-        // Only wipe stored bonds after CONSECUTIVE failures reach the threshold.
-        // Wiping on every single failure is the root cause of "can't reconnect after
-        // going out of range": a transient SMP hiccup on the first reconnect nukes the
-        // ESP32 bond while iOS still holds its LTK → every subsequent reconnect gets
-        // rejected at the LL layer (iOS sends HCI 0x13 = Remote User Terminated).
+        if (ancsService->_bondsJustCleared.load())
+        {
+            // Bonds were already cleared on a previous attempt but iOS is still
+            // presenting the now-invalid LTK.  Do NOT disconnect — stay connected
+            // so iOS can detect the key-missing rejection from NimBLE and issue a
+            // fresh Pairing Request on this same connection.  The client task's
+            // 10 s encryption-wait timeout will disconnect if iOS does not re-pair.
+            ESP_LOGW(TAG, "Post-bond-clear auth failure — staying connected for iOS re-pair");
+            return;
+        }
+
         if (ancsService->noteAuthFail())
         {
             int rc = ble_store_clear();
             ESP_LOGW(TAG, "Auth fail threshold reached — cleared all bonds (%d)", rc);
+            ancsService->_bondsJustCleared.store(true);
+            // Reset the streak so subsequent failures don't keep calling ble_store_clear().
+            ancsService->resetAuthStreak();
+            // Do NOT disconnect: iOS still holds its LTK and will keep re-using it
+            // if we force a new connection cycle.  By staying connected here, NimBLE's
+            // PIN/key-missing response gives iOS the opportunity to send a new Pairing
+            // Request on this live connection instead of looping forever.
+            ESP_LOGI(TAG, "Bonds cleared — staying connected, awaiting iOS fresh pairing");
+            return;
         }
 
-        // Always update the display regardless of streak.
-        Heltec.setBLEConnectionState(BLE_DISCONNECTED);
+        // Below threshold: transient SMP failure.  Disconnect and let iOS retry.
         NimBLEDevice::getServer()->disconnect(connInfo.getConnHandle());
         return;
     }
 
     ESP_LOGI(TAG, "Authentication successful (encrypted=%d, authenticated=%d, bonded=%d)",
         connInfo.isEncrypted(), connInfo.isAuthenticated(), connInfo.isBonded());
+    ancsService->_bondsJustCleared.store(false);
     ancsService->resetAuthStreak();
     Heltec.setBLEConnectionState(BLE_CONNECTED);
 }

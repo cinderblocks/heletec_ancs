@@ -117,6 +117,7 @@ class BleService
 
         std::atomic<bool> _isConnected{false};
         std::atomic<int>  _authFailStreak{0};
+        std::atomic<bool> _bondsJustCleared{false};
         static constexpr int AUTH_FAIL_PAIRING_THRESHOLD = 2;
 
         void _restartAdvertising();

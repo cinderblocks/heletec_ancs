@@ -106,30 +106,22 @@ void Hardware::startDrawing(void* pvParameters)
             h->showBLEState(h->mBleState);
         }
 
-        // Update GPS time and icon in header — safe here because we're in the draw task.
-        // showTime() and showGpsState() no longer write SPI directly, eliminating the
-        // SPI race where the GPS task and draw task both wrote SPI simultaneously.
-        if (bits & DRAW_GPS)
+        // Update clock display in header — safe here because we're in the draw task.
+        // Time is now sourced from the iOS Current Time Service (CTS) via onTimeSync(),
+        // not GPS.  showTime() writes mTimestamp under the spinlock; we copy it here.
+        if (bits & DRAW_TIME)
         {
             char localTs[sizeof(h->mTimestamp)];
-            bool gpsState;
             portENTER_CRITICAL(&h->mHardwareLock);
             memcpy(localTs, h->mTimestamp, sizeof(localTs));
-            gpsState = h->mGpsState;
             portEXIT_CRITICAL(&h->mHardwareLock);
 
             if (localTs[0] != '\0')
             {
                 h->mDisplay.drawStr(0, 6, localTs, Font_7x10, TFT::Color::WHITE, HEADER_COLOR);
             }
-            if (gpsState)
-            {
-                h->drawIcon(h->mDisplay.width()-50, 1, Bitmaps::GPS);
-            }
-            else
-            {
-                h->mDisplay.fillRectangle(h->mDisplay.width()-50, 1, 16, 16, HEADER_COLOR);
-            }
+            // GPS icon slot (width-50): always cleared — GPS is not used.
+            h->mDisplay.fillRectangle(h->mDisplay.width()-50, 1, 16, 16, HEADER_COLOR);
         }
 
         if (bits & (DRAW_NOTIFY | DRAW_STATE))
@@ -273,7 +265,7 @@ void Hardware::showTime(String const& timestamp)
     strncpy(mTimestamp, timestamp.c_str(), sizeof(mTimestamp) - 1);
     mTimestamp[sizeof(mTimestamp) - 1] = '\0';
     portEXIT_CRITICAL(&mHardwareLock);
-    notifyDraw(DRAW_GPS);
+    notifyDraw(DRAW_TIME);
 }
 
 void Hardware::showBLEState(conn_state_def state)
@@ -305,14 +297,69 @@ void Hardware::showBatteryLevel(uint8_t percent)
     }
 }
 
-void Hardware::showGpsState(bool connected)
+void Hardware::onTimeSync(const struct tm *localTime, int32_t utcOffsetSec)
 {
+    // Store the UTC offset so the periodic timer can compute local time from
+    // the system clock.  Write under the spinlock for cross-core safety.
     portENTER_CRITICAL(&mHardwareLock);
-    bool changed = (connected != mGpsState);
-    if (changed) { mGpsState = connected; }
+    mUtcOffsetSeconds = utcOffsetSec;
     portEXIT_CRITICAL(&mHardwareLock);
 
-    if (changed) { notifyDraw(DRAW_GPS); }
+    // Show the initial time immediately using the value iOS handed us — no need
+    // to read the system clock since it was just set by _applyCurrentTime.
+    char ts[sizeof(mTimestamp)];
+    snprintf(ts, sizeof(ts), "%2d:%02d", localTime->tm_hour, localTime->tm_min);
+    showTime(String(ts));   // thread-safe; posts DRAW_GPS to the draw task
+
+    // Start the 30-second periodic timer so the display stays current.
+    // 30 s ensures the minute digit turns over within half a minute of the
+    // actual change.  The timer is started only once; subsequent CTS syncs
+    // reset it so the next tick is 30 s from the fresh sync.
+    if (mClockTimer == nullptr)
+    {
+        mClockTimer = xTimerCreate("Clock", pdMS_TO_TICKS(30000), pdTRUE,
+                                   this, clockTimerCallback);
+        if (mClockTimer != nullptr)
+        {
+            xTimerStart(mClockTimer, 0);
+        }
+        else
+        {
+            ESP_LOGW(TAG, "Failed to create clock timer");
+        }
+    }
+    else
+    {
+        // Reset the timer so the next tick is 30 s from this fresh sync.
+        xTimerReset(mClockTimer, 0);
+    }
+}
+
+/* static */
+void Hardware::clockTimerCallback(TimerHandle_t xTimer)
+{
+    Hardware *h = static_cast<Hardware *>(pvTimerGetTimerID(xTimer));
+
+    int32_t offset;
+    portENTER_CRITICAL(&h->mHardwareLock);
+    offset = h->mUtcOffsetSeconds;
+    portEXIT_CRITICAL(&h->mHardwareLock);
+
+    // System clock holds UTC (set by _applyCurrentTime via settimeofday).
+    // Add the stored offset to recover iOS local time.
+    // Edge case: if offset is INT32_MIN, _applyCurrentTime fell back to treating
+    // local time as UTC, so the system clock already holds local time — add 0.
+    time_t utc = time(nullptr);
+    time_t localEpoch = (offset != INT32_MIN)
+                      ? (utc + static_cast<time_t>(offset))
+                      : utc;
+
+    struct tm localTm{};
+    gmtime_r(&localEpoch, &localTm);
+
+    char ts[8];
+    snprintf(ts, sizeof(ts), "%2d:%02d", localTm.tm_hour, localTm.tm_min);
+    h->showTime(String(ts));    // writes mTimestamp + posts DRAW_GPS
 }
 
 void Hardware::showCallState(bool active)

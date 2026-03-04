@@ -19,7 +19,6 @@
 #include "applist.h"
 #include "hardware.h"
 #include "bleservice.h"
-#include "gps.h"
 #include "notificationservice.h"
 #include "task.h"
 
@@ -59,7 +58,15 @@ extern "C" void app_main(void)
     NotificationReceiver.start();
     static MainServerCallback serverCallback(&Heltec);
     Ble.setServerCallback(&serverCallback);
-    //gps.start();
+
+    // Sync the ESP32 system clock and header display from the iOS Current Time
+    // Service (CTS).  Called once immediately on connect (initial read) and again
+    // automatically on any iOS time change (DST, manual adjustment, NTP sync).
+    // onTimeSync() stores the UTC offset and starts a 30-second periodic timer
+    // so the header clock stays current for the lifetime of the connection.
+    Ble.setTimeCallback([](const struct tm *localTime, int32_t utcOffsetSec) {
+        Heltec.onTimeSync(localTime, utcOffsetSec);
+    });
 
     while(true)
     {

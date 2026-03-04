@@ -24,6 +24,8 @@
 #include <NimBLEHIDDevice.h>
 #include <host/ble_gap.h>
 #include <host/ble_store.h>
+#include <sys/time.h>
+#include <climits>
 
 static auto TAG = "heltec";
 
@@ -34,6 +36,12 @@ static const auto ANCS_SERVICE_UUID            = NimBLEUUID("7905F431-B5CE-4E99-
 static const auto NOTIFICATION_SOURCE_CHR_UUID = NimBLEUUID("9FBF120D-6301-42D9-8C58-25E699A21DBD");
 static const auto CONTROL_POINT_CHR_UUID       = NimBLEUUID("69D1D8F3-45E1-49A8-9821-9BBDFDAAD9D9");
 static const auto DATA_SOURCE_CHR_UUID         = NimBLEUUID("22EAC6E9-24D6-4BB5-BE44-B36ACE7C7BFB");
+
+// Bluetooth SIG Current Time Service (CTS) — UUID 0x1805
+// iOS exposes this service on an encrypted link to allow accessories to sync their clocks.
+static const auto CTS_SERVICE_UUID          = NimBLEUUID((uint16_t)0x1805);
+static const auto CURRENT_TIME_CHR_UUID     = NimBLEUUID((uint16_t)0x2A2B); // Exact Time 256 + adjust reason
+static const auto LOCAL_TIME_INFO_CHR_UUID  = NimBLEUUID((uint16_t)0x2A0F); // Timezone + DST offset
 
 BleService::BleService(const NotificationCallback notificationSourceCallback, const NotificationCallback dataSourceCallback)
 :   _notificationSourceCallback(notificationSourceCallback)
@@ -251,7 +259,78 @@ void BleService::startClient(void *data)
     ESP_LOGI(TAG, "ANCS subscriptions active");
     } // end discovery block
 
-    // ── Step 4: Keep-alive loop ───────────────────────────────────────────────
+    // ── Step 4: Discover Current Time Service (CTS) ───────────────────────────
+    //
+    // iOS exposes CTS (0x1805) on an encrypted link, so we can sync the ESP32
+    // system clock and optionally receive automatic time-change notifications.
+    // This step is non-fatal; a missing or unreadable CTS is logged and skipped.
+    {
+        NimBLERemoteService *pCtsService = pClient->getService(CTS_SERVICE_UUID);
+        if (pCtsService != nullptr)
+        {
+            // ── 4a: Read Local Time Information (0x2A0F) for UTC offset ──────
+            // Byte 0: Time Zone in ×15-minute units from UTC (int8, -128=unknown).
+            // Byte 1: DST Offset — specific constants (0=no DST, 2=+30 min, 4=+60 min,
+            //         8=+120 min, 0xFF=unknown).  Each unit represents 15 minutes.
+            NimBLERemoteCharacteristic *pLtiChr =
+                pCtsService->getCharacteristic(LOCAL_TIME_INFO_CHR_UUID);
+            if (pLtiChr != nullptr && pLtiChr->canRead())
+            {
+                NimBLEAttValue ltiVal = pLtiChr->readValue();
+                if (ltiVal.size() >= 2)
+                {
+                    int8_t  tzUnits  = static_cast<int8_t>(ltiVal[0]);
+                    uint8_t dstUnits = ltiVal[1];
+                    int32_t totalMin = static_cast<int32_t>(tzUnits) * 15;
+                    if (dstUnits != 0xFF) totalMin += static_cast<int32_t>(dstUnits) * 15;
+                    bleService->_utcOffsetSeconds = totalMin * 60;
+                    ESP_LOGI(TAG, "CTS: UTC offset %+d min (tz=%d, dst=%u)",
+                        static_cast<int>(totalMin), static_cast<int>(tzUnits), dstUnits);
+                }
+            }
+
+            // ── 4b: Discover and read Current Time characteristic (0x2A2B) ───
+            bleService->_currentTimeCharacteristic =
+                pCtsService->getCharacteristic(CURRENT_TIME_CHR_UUID);
+            if (bleService->_currentTimeCharacteristic != nullptr)
+            {
+                if (bleService->_currentTimeCharacteristic->canRead())
+                {
+                    NimBLEAttValue ctVal = bleService->_currentTimeCharacteristic->readValue();
+                    if (ctVal.size() >= 9)
+                    {
+                        BleService::_applyCurrentTime(ctVal.data(), ctVal.size(),
+                            bleService->_utcOffsetSeconds, bleService->_timeCallback);
+                    }
+                }
+
+                // ── 4c: Subscribe to time-change notifications ───────────────
+                if (bleService->_currentTimeCharacteristic->canNotify())
+                {
+                    auto tcb    = bleService->_timeCallback;
+                    auto utcOff = bleService->_utcOffsetSeconds;
+                    bleService->_currentTimeCharacteristic->subscribe(
+                        true,
+                        [tcb, utcOff](NimBLERemoteCharacteristic * /*pChr*/,
+                                      uint8_t *pData, size_t length, bool /*isNotify*/)
+                        {
+                            BleService::_applyCurrentTime(pData, length, utcOff, tcb);
+                        });
+                    ESP_LOGI(TAG, "CTS: subscribed to time-change notifications");
+                }
+            }
+            else
+            {
+                ESP_LOGW(TAG, "CTS: Current Time characteristic (0x2A2B) not found");
+            }
+        }
+        else
+        {
+            ESP_LOGI(TAG, "CTS: service not found on peer — time sync unavailable");
+        }
+    } // end CTS block
+
+    // ── Step 5: Keep-alive loop ───────────────────────────────────────────────
     //
     // Woken by xTaskNotify from ServerCallback::onDisconnect.
     // 200 ms poll via ble_gap_conn_find() catches any disconnect that doesn't
@@ -274,6 +353,8 @@ EndTask:
     bleService->_notificationSourceCharacteristic = nullptr;
     bleService->_controlPointCharacteristic       = nullptr;
     bleService->_dataSourceCharacteristic         = nullptr;
+    bleService->_currentTimeCharacteristic        = nullptr;
+    bleService->_utcOffsetSeconds                 = INT32_MIN;
 
     // Release the server-owned client. This deletes the NimBLEClient object
     // and all cached service / characteristic objects.
@@ -324,6 +405,77 @@ void BleService::setBatteryLevel(uint8_t level)
 {
     if (_hidDevice != nullptr) {
         _hidDevice->setBatteryLevel(level);
+    }
+}
+
+void BleService::setTimeCallback(TimeCallback cb)
+{
+    _timeCallback = cb;
+}
+
+/* static */
+void BleService::_applyCurrentTime(const uint8_t *pData, size_t length,
+                                   int32_t utcOffsetSec, TimeCallback cb)
+{
+    // Current Time characteristic layout (Bluetooth SIG 0x2A2B, 10 bytes):
+    //   Bytes 0–1 : Year (uint16 LE, e.g. 2025)
+    //   Byte  2   : Month (1–12)
+    //   Byte  3   : Day   (1–31)
+    //   Byte  4   : Hours (0–23)
+    //   Byte  5   : Minutes (0–59)
+    //   Byte  6   : Seconds (0–59)
+    //   Byte  7   : Day of Week (1=Mon … 7=Sun, 0=Unknown)
+    //   Byte  8   : Fractions256 (1/256 of a second, ignored here)
+    //   Byte  9   : Adjust Reason (bitmask, optional)
+    if (length < 9)
+    {
+        ESP_LOGW(TAG, "CTS: data too short (%d bytes, need 9)", static_cast<int>(length));
+        return;
+    }
+
+    uint16_t year  = static_cast<uint16_t>(pData[0] | (pData[1] << 8));
+    uint8_t  month = pData[2];
+    uint8_t  day   = pData[3];
+    uint8_t  hours = pData[4];
+    uint8_t  mins  = pData[5];
+    uint8_t  secs  = pData[6];
+
+    // Build a struct tm representing iOS local time (tz + DST already applied by iOS)
+    struct tm localTm{};
+    localTm.tm_year  = static_cast<int>(year) - 1900;
+    localTm.tm_mon   = static_cast<int>(month) - 1;   // tm_mon is 0-based
+    localTm.tm_mday  = static_cast<int>(day);
+    localTm.tm_hour  = static_cast<int>(hours);
+    localTm.tm_min   = static_cast<int>(mins);
+    localTm.tm_sec   = static_cast<int>(secs);
+    localTm.tm_isdst = -1;
+
+    ESP_LOGI(TAG, "CTS: iOS local time %04d-%02d-%02d %02d:%02d:%02d",
+        static_cast<int>(year), static_cast<int>(month), static_cast<int>(day),
+        static_cast<int>(hours), static_cast<int>(mins), static_cast<int>(secs));
+
+    // Convert to epoch and subtract the UTC offset to get UTC epoch.
+    // mktime() treats its argument as *local* time; since ESP-IDF has no timezone
+    // database, TZ is effectively UTC, so mktime() here gives "local time as if UTC".
+    time_t localEpoch = mktime(&localTm);
+    if (localEpoch == static_cast<time_t>(-1))
+    {
+        ESP_LOGW(TAG, "CTS: mktime() failed — clock not updated");
+        return;
+    }
+
+    time_t utcEpoch = (utcOffsetSec != INT32_MIN)
+                    ? (localEpoch - static_cast<time_t>(utcOffsetSec))
+                    : localEpoch;   // fallback: treat local time as UTC
+
+    struct timeval tv{ .tv_sec = utcEpoch, .tv_usec = 0 };
+    settimeofday(&tv, nullptr);
+    ESP_LOGI(TAG, "CTS: system clock synced — UTC epoch %lld (offset %+d s)",
+        static_cast<long long>(utcEpoch), utcOffsetSec != INT32_MIN ? utcOffsetSec : 0);
+
+    if (cb != nullptr)
+    {
+        cb(&localTm, utcOffsetSec);
     }
 }
 

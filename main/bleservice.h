@@ -22,11 +22,20 @@
 #include <Arduino.h>
 #include <NimBLEDevice.h>
 #include <freertos/semphr.h>
+#include <time.h>
 
 class NimBLEHIDDevice;
 
 typedef void (*NotificationCallback)(NimBLERemoteCharacteristic *pBLERemoteCharacteristic,
               uint8_t *pData, size_t length, bool isNotify);
+
+/**
+ * Called after the system clock has been synced from the iOS Current Time Service.
+ * @param localTime   iOS local time (timezone + DST applied).
+ * @param utcOffsetSec Offset added to UTC to obtain localTime, in seconds.
+ *                     INT32_MIN when the iOS device did not expose Local Time Information.
+ */
+typedef void (*TimeCallback)(const struct tm *localTime, int32_t utcOffsetSec);
 
 class ANCSServiceServerCallback
 {
@@ -52,6 +61,7 @@ class BleService
         void setServerCallback(ANCSServiceServerCallback *serverCallback);
         void setClientCallback(ANCSServiceClientCallback *clientCallback);
         void setBatteryLevel(uint8_t level);
+        void setTimeCallback(TimeCallback cb);
         bool isConnected() const { return _isConnected.load(); }
         bool noteAuthFail();
         void resetAuthStreak() { _authFailStreak.store(0); }
@@ -62,8 +72,13 @@ class BleService
         NimBLERemoteCharacteristic *_controlPointCharacteristic = nullptr;
         NimBLERemoteCharacteristic *_dataSourceCharacteristic = nullptr;
 
+        // Current Time Service (CTS) characteristic
+        NimBLERemoteCharacteristic *_currentTimeCharacteristic = nullptr;
+
         NotificationCallback _notificationSourceCallback;
         NotificationCallback _dataSourceCallback;
+        TimeCallback _timeCallback = nullptr;
+        int32_t _utcOffsetSeconds = INT32_MIN;  // INT32_MIN = unknown (Local Time Info unavailable)
         ANCSServiceServerCallback *_serverCallback = nullptr;
         ANCSServiceClientCallback *_clientCallback = nullptr;
         TaskHandle_t _clientTaskHandle = nullptr;
@@ -105,6 +120,18 @@ class BleService
         static constexpr int AUTH_FAIL_PAIRING_THRESHOLD = 2;
 
         void _restartAdvertising();
+
+        /**
+         * Parse a raw Current Time characteristic value, sync the system clock,
+         * and invoke the user callback.
+         * @param pData         Raw bytes from the GATT notification/read.
+         * @param length        Number of bytes (must be >= 9).
+         * @param utcOffsetSec  Total UTC offset in seconds (tz + DST).
+         *                      Pass INT32_MIN when unknown.
+         * @param cb            Optional user callback; may be nullptr.
+         */
+        static void _applyCurrentTime(const uint8_t *pData, size_t length,
+                                      int32_t utcOffsetSec, TimeCallback cb);
 };
 
 extern BleService Ble;

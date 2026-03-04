@@ -1,3 +1,0 @@
-[submodule "heltec"]
-	path = components/heltec
-	url = https://github.com/HelTecAutomation/Heltec_ESP32.git

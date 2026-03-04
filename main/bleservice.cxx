@@ -406,19 +406,19 @@ void BleService::ServerCallback::onAuthenticationComplete(NimBLEConnInfo &connIn
     {
         ESP_LOGW(TAG, "Encryption failed — disconnecting (conn_handle=%d)", connInfo.getConnHandle());
 
-        // Wipe all stored bonds so we don't get stuck retrying a stale LTK.
-        int rc = ble_store_clear();
-        if (rc == 0) {
-            ESP_LOGW(TAG, "Cleared all stored bonds");
-        } else {
-            ESP_LOGW(TAG, "ble_store_clear() returned %d", rc);
-        }
-
-        if (!ancsService->noteAuthFail())
+        // Only wipe stored bonds after CONSECUTIVE failures reach the threshold.
+        // Wiping on every single failure is the root cause of "can't reconnect after
+        // going out of range": a transient SMP hiccup on the first reconnect nukes the
+        // ESP32 bond while iOS still holds its LTK → every subsequent reconnect gets
+        // rejected at the LL layer (iOS sends HCI 0x13 = Remote User Terminated).
+        if (ancsService->noteAuthFail())
         {
-            Heltec.setBLEConnectionState(BLE_DISCONNECTED);
+            int rc = ble_store_clear();
+            ESP_LOGW(TAG, "Auth fail threshold reached — cleared all bonds (%d)", rc);
         }
 
+        // Always update the display regardless of streak.
+        Heltec.setBLEConnectionState(BLE_DISCONNECTED);
         NimBLEDevice::getServer()->disconnect(connInfo.getConnHandle());
         return;
     }

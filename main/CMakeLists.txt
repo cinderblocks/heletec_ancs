@@ -14,7 +14,7 @@ set(SOURCE_FILES
 )
 
 set(REQUIRES
-    arduino
+    arduino-esp32
     heltec
     spi_flash
     bt

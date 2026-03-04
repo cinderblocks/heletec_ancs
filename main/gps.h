@@ -35,7 +35,6 @@ private:
 
     TinyGPSPlus _gps;
     HardwareSerial _serial = HardwareSerial(2);
-    TaskHandle_t _gpsTask = nullptr;
 };
 
 extern GPS gps;

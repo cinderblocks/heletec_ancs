@@ -137,6 +137,17 @@ void Hardware::startDrawing(void* pvParameters)
             // Update call icon in header bar first
             h->showCallState(Notifications.isCallingNotification());
 
+            // Show caller ID once when the call first arrives.  takeCallingNotification
+            // atomically copies and marks showed=true; subsequent Modified re-fetches
+            // (iOS fires one per second) leave showed=true so this block is skipped.
+            notification_def callNotification;
+            if (Notifications.takeCallingNotification(callNotification)) {
+                h->showNotification(callNotification);
+                h->glow(true);
+                vTaskDelay(pdMS_TO_TICKS(15000));
+                h->glow(false);
+            }
+
             size_t count = Notifications.getNotificationCount();
             for (size_t i = 0; i < count; i++) {
                 // takeNotificationByIndex atomically copies the notification and

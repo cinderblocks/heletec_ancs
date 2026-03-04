@@ -55,7 +55,7 @@ extern "C" void app_main(void)
 
     initArduino();
     Heltec.begin();
-    Ble.startServer("HatefulBlue");
+    Ble.startServer("BitterBlue");
     NotificationReceiver.start();
     static MainServerCallback serverCallback(&Heltec);
     Ble.setServerCallback(&serverCallback);

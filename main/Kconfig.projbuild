@@ -1,0 +1,11 @@
+menu "GPS Configuration"
+
+config GPS_TZ_OFFSET
+    int "UTC timezone offset (hours)"
+    range -12 14
+    default -5
+    help
+        UTC timezone offset in whole hours for the on-screen time display.
+        Does not account for daylight saving time.
+
+endmenu

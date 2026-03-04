@@ -94,7 +94,7 @@ public:
     void resetIfStale(uint32_t uuid, TickType_t timeoutTicks);
     bool exists(uint32_t uuid) const;
     [[nodiscard]] bool isCallingNotification() const;
-    notification_def& getCallingNotification();
+    bool takeCallingNotification(notification_def& out);
     notification_def* getNotification(uint32_t uuid);
     size_t getNotificationCount() const;
     notification_def* getNotificationByIndex(size_t index);

@@ -179,7 +179,12 @@ bool NotificationService::resetForUpdate(uint32_t uuid)
         if (index != -1) { notification = &notificationList[index]; }
     }
     if (notification != nullptr && notification->isComplete) {
-        notification->reset(); // clears isComplete, showed, title, message, time, receivedAttributes, fetchStartTime
+        bool wasCall = notification->isCall(); // type survives reset()
+        notification->reset();
+        // For active calls iOS fires EventIDNotificationModified every second.
+        // Preserve showed=true after each re-fetch so the caller-ID screen is
+        // only raised once (when the call first arrives) and not every second.
+        if (wasCall) { notification->showed = true; }
         shouldRequeue = true;
     }
     xSemaphoreGive(mMutex);
@@ -349,9 +354,20 @@ bool NotificationService::isCallingNotification() const
     return result;
 }
 
-notification_def& NotificationService::getCallingNotification()
+bool NotificationService::takeCallingNotification(notification_def& out)
 {
-    return callingNotification;
+    xSemaphoreTake(mMutex, portMAX_DELAY);
+    bool found = false;
+    if (callingNotification.key != 0 &&
+        callingNotification.isComplete &&
+        !callingNotification.showed)
+    {
+        out = callingNotification;
+        callingNotification.showed = true;
+        found = true;
+    }
+    xSemaphoreGive(mMutex);
+    return found;
 }
 
 bool NotificationService::removeNotification(uint32_t uuid)

@@ -23,6 +23,7 @@
 #include <sys/time.h>
 #include <time.h>
 #include <inttypes.h>
+#include <driver/uart.h>
 
 static const char* TAG = "gps";
 
@@ -42,22 +43,17 @@ void GPS::run(void *data)
 {
     ESP_LOGI(TAG, "Starting GPS");
 
-    // Always negotiate baud rate on startup.  After a power cycle (or a previous
-    // RST pulse) the module reverts to its factory default of 9600 baud.
-    // Open at 9600 first, send PMTK251 to switch to 115200, then reopen at 115200.
-    // If the module already retained 115200 in its config, the 9600-baud PMTK
-    // sentence arrives as garbage and is ignored — we reopen at 115200 and it works.
-    _serial.begin(9600, SERIAL_8N1, GPS_RX, GPS_TX);
-    vTaskDelay(pdMS_TO_TICKS(200)); // let module settle
-    _serial.println("$PMTK251,115200*1F");
-    _serial.flush();
-    vTaskDelay(pdMS_TO_TICKS(100)); // let module process + switch baud
-    _serial.end();
+    // VGNSS power rail: ensure VEXT_CTRL (GPIO3) is HIGH.
+    // TFT::init() does this before the GPS task starts, but guard it here too
+    // in case the draw task hasn't run yet or the TFT is not initialised.
+    pinMode(Hardware::VEXT_CTRL, OUTPUT);
+    digitalWrite(Hardware::VEXT_CTRL, HIGH);
+    vTaskDelay(pdMS_TO_TICKS(500)); // let UC6580 complete its boot sequence
+
+    // Use UART1 (HardwareSerial(1) = Serial1) — matches the Heltec factory test
+    // exactly. UART2 can have driver-install issues on some ESP-IDF 5.x versions.
     _serial.begin(115200, SERIAL_8N1, GPS_RX, GPS_TX);
-    // Discard any bytes buffered during the 9600-baud window (TinyGPS++ would
-    // reject them with bad checksums, but clearing them avoids log noise).
-    while (_serial.available()) { _serial.read(); }
-    ESP_LOGI(TAG, "GPS serial open at 115200");
+    ESP_LOGI(TAG, "GPS serial open at 115200 on UART1 (RX=%d TX=%d)", GPS_RX, GPS_TX);
 
     // PPS: fires at the leading edge of each UTC second; use it for
     // sub-millisecond settimeofday() precision.
@@ -123,14 +119,13 @@ void GPS::run(void *data)
                 if (++staleCount >= GPS_WATCHDOG_SEC)
                 {
                     // The module has 115200 stored in NVM — do NOT pull RST (that
-                    // reverts it to 9600).  A plain UART-driver cycle is enough to
-                    // recover a stalled ESP-IDF UART driver or a stuck FIFO.
+                    // reverts it to 9600).  Flush the IDF UART driver's RX FIFO
+                    // and reset the baud register; don't touch the GPIO matrix.
                     ESP_LOGW(TAG, "GPS watchdog: no data for %us — cycling UART "
                              "(charsProcessed=%" PRIu32 ")", GPS_WATCHDOG_SEC, currentChars);
-                    _serial.end();
-                    vTaskDelay(pdMS_TO_TICKS(500));
-                    _serial.begin(115200, SERIAL_8N1, GPS_RX, GPS_TX);
-                    while (_serial.available()) { _serial.read(); } // flush stale bytes
+                    uart_flush(UART_NUM_1);
+                    uart_set_baudrate(UART_NUM_1, 115200);
+                    while (_serial.available()) { _serial.read(); }
                     lastCharsProcessed = _gps.charsProcessed();
                     staleCount = 0;
                 }

@@ -59,7 +59,7 @@ extern "C" void app_main(void)
     NotificationReceiver.start();
     static MainServerCallback serverCallback(&Heltec);
     Ble.setServerCallback(&serverCallback);
-    gps.start();
+    //gps.start();
 
     while(true)
     {

@@ -21,17 +21,19 @@
 #include "hardware.h"
 #include "notificationservice.h"
 #include "security.h"
-#include <BLE2902.h>
-#include <BLEHIDDevice.h>
+#include <NimBLEHIDDevice.h>
+#include <host/ble_gap.h>
+#include <host/ble_store.h>
 
 static auto TAG = "heltec";
 
-static const auto ANCS_SERVICE_UUID = BLEUUID("7905F431-B5CE-4E99-A40F-4B1E122D00D0");
-static const auto NOTIFICATION_SOURCE_CHR_UUID = BLEUUID("9FBF120D-6301-42D9-8C58-25E699A21DBD");
-static const auto CONTROL_POINT_CHR_UUID = BLEUUID("69D1D8F3-45E1-49A8-9821-9BBDFDAAD9D9");
-static const auto DATA_SOURCE_CHR_UUID = BLEUUID("22EAC6E9-24D6-4BB5-BE44-B36ACE7C7BFB");
+// Bluetooth SIG generic-display appearance value (0x0080).
+static constexpr uint16_t BLE_APPEARANCE_GENERIC_DISPLAY = 0x0080;
 
-//static const auto ANS_SERVICE_UUID = BLEUUID(static_cast<uint16_t>(0x1811));
+static const auto ANCS_SERVICE_UUID            = NimBLEUUID("7905F431-B5CE-4E99-A40F-4B1E122D00D0");
+static const auto NOTIFICATION_SOURCE_CHR_UUID = NimBLEUUID("9FBF120D-6301-42D9-8C58-25E699A21DBD");
+static const auto CONTROL_POINT_CHR_UUID       = NimBLEUUID("69D1D8F3-45E1-49A8-9821-9BBDFDAAD9D9");
+static const auto DATA_SOURCE_CHR_UUID         = NimBLEUUID("22EAC6E9-24D6-4BB5-BE44-B36ACE7C7BFB");
 
 BleService::BleService(const NotificationCallback notificationSourceCallback, const NotificationCallback dataSourceCallback)
 :   _notificationSourceCallback(notificationSourceCallback)
@@ -45,275 +47,267 @@ BleService::~BleService()
         delete _hidDevice;
         _hidDevice = nullptr;
     }
-    if (_clientCb != nullptr) {
-        delete _clientCb;
-        _clientCb = nullptr;
-    }
-    if (_gattcDoneSem != nullptr) {
-        vSemaphoreDelete(_gattcDoneSem);
-        _gattcDoneSem = nullptr;
-    }
 }
-
 
 void BleService::startServer(String const& appName)
 {
     // Initialize device
-    BLEDevice::init(appName);
-    BLEDevice::setPower(ESP_PWR_LVL_P20);
+    NimBLEDevice::init(std::string(appName.c_str()));
+    NimBLEDevice::setPower(9);  // +9 dBm (max for ESP32-S3)
 
-    // Create the semaphore used to gate startAdvertising() until the GATTC app has been
-    // unregistered.  ClientCallback::onDisconnect gives it; the client task takes it.
-    if (_gattcDoneSem == nullptr) {
-        _gattcDoneSem = xSemaphoreCreateBinary();
-    }
-    BLEServer *pServer = BLEDevice::createServer();
+    // Security: bonding + MITM + secure connections, display-only IO capability
+    NimBLEDevice::setSecurityAuth(true, true, true);  // bonding, mitm, sc
+    // DISPLAY_YES_NO = numeric comparison: both devices show the same 6-digit
+    // number and the user taps YES/NO on each side to confirm they match.
+    // (DISPLAY_ONLY would require the user to type the number into iOS.)
+    NimBLEDevice::setSecurityIOCap(BLE_HS_IO_DISPLAY_YESNO);
+    NimBLEDevice::setSecurityInitKey(BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID);
+    NimBLEDevice::setSecurityRespKey(BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID);
+    NimBLEDevice::setSecurityPasskey(420420);
+
+    NimBLEServer *pServer = NimBLEDevice::createServer();
     pServer->setCallbacks(new ServerCallback(this));
-    // Advertising restart is handled by the client task after proper GATTC cleanup.
-    // advertiseOnDisconnect(true) fires esp_ble_gap_start_advertising() directly
-    // from inside ESP_GATTS_DISCONNECT_EVT on the BTC task, but at that point
-    // ESP_GATTC_DISCONNECT_EVT has not yet fired, so the GATTC interface is still
-    // registered and the advertising call returns ESP_ERR_INVALID_STATE.
+    // Advertising restart is driven by the client task after full cleanup.
     pServer->advertiseOnDisconnect(false);
-#if defined(CONFIG_BLUEDROID_ENABLED)
-    BLESecurity::setEncryptionLevel(ESP_BLE_SEC_ENCRYPT);
-#endif //defined(CONFIG_BLUEDROID_ENABLED)
-    BLEDevice::setSecurityCallbacks(&Security);
 
-    _hidDevice = new BLEHIDDevice(pServer);
-    _hidDevice->manufacturer()->setValue("Sjofn LLC");
-    _hidDevice->outputReport(0x01);
-    _hidDevice->inputReport(0x02);
-    _hidDevice->pnp(0x00, 0x00C3 ,0xffff, 0x0001);
-    _hidDevice->hidInfo(0x00, 0x01);
-    _hidDevice->startServices();
+    _hidDevice = new NimBLEHIDDevice(pServer);
+    _hidDevice->setManufacturer("Sjofn LLC");
+    _hidDevice->setPnp(0x00, 0x00C3, 0xffff, 0x0001);
+    _hidDevice->setHidInfo(0x00, 0x01);
     _hidDevice->setBatteryLevel(100);
+    _hidDevice->startServices();
 
-    // Soliciting ANCS
-    BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
-    pAdvertising->setAppearance(ESP_BLE_APPEARANCE_GENERIC_DISPLAY);
-    pAdvertising->addServiceUUID(_hidDevice->deviceInfo()->getUUID());
-    pAdvertising->addServiceUUID(_hidDevice->batteryService()->getUUID());
-    pAdvertising->addServiceUUID(_hidDevice->hidService()->getUUID());
-    pAdvertising->setScanResponse(true);
-    pAdvertising->setMinPreferred(0x06); // 7.5ms
-    pAdvertising->setMaxPreferred(0x10); // 15ms
-
-    //Start advertising
-    pAdvertising->start();
-
-    // Create the client callback once - reused for every connection
-    _clientCb = new ClientCallback(this);
+    _restartAdvertising();
 }
 
-/* static */
+void BleService::_restartAdvertising()
+{
+    // ANCS UUID: 7905F431-B5CE-4E99-A40F-4B1E122D00D0 in little-endian byte order
+    // AD type 0x15 = List of 128-bit Service Solicitation UUIDs
+    // length=17 (1 type byte + 16 UUID bytes)
+    //
+    // *** This MUST be in the PRIMARY advertisement packet, NOT the scan response. ***
+    // iOS in background mode does passive scanning (no SCAN_REQ), so scan response
+    // packets are never received. Without the solicitation in the primary packet,
+    // iOS will not activate ANCS for this device.
+    static const uint8_t ANCS_SOLICIT[] = {
+        17, 0x15,                                // length=17, AD type: 128-bit solicitation
+        0xD0, 0x00, 0x2D, 0x12,                 // UUID bytes 0-3  (little-endian)
+        0x1E, 0x4B, 0x0F, 0xA4,                 // bytes 4-7
+        0x99, 0x4E, 0xCE, 0xB5,                 // bytes 8-11
+        0x31, 0xF4, 0x05, 0x79                  // bytes 12-15
+    };
+
+    // Primary advertisement: flags + appearance + ANCS solicitation = 25 bytes (fits in 31)
+    NimBLEAdvertisementData advData;
+    advData.setFlags(BLE_HS_ADV_F_DISC_GEN);
+    advData.setAppearance(BLE_APPEARANCE_GENERIC_DISPLAY);
+    advData.addData(ANCS_SOLICIT, sizeof(ANCS_SOLICIT));
+
+    // Scan response: HID service UUID + preferred connection parameters = 10 bytes
+    // Seen by iOS only when it actively scans (e.g. Settings > Bluetooth is open)
+    NimBLEAdvertisementData scanData;
+    if (_hidDevice != nullptr) {
+        scanData.addServiceUUID(_hidDevice->getHidService()->getUUID());
+    }
+    scanData.setPreferredParams(0x06, 0x10);    // 7.5 ms min, 20 ms max
+
+    NimBLEAdvertising *pAdv = NimBLEDevice::getAdvertising();
+    // enableScanResponse first: sets m_scanResp=true and resets m_advDataSet=false
+    // so that start() will re-push both adv data and scan response to the host on
+    // every call (including after a host reset / onHostSync).
+    pAdv->enableScanResponse(true);
+    // Store the payloads in m_advData / m_scanData so onHostSync can recover them.
+    // setAdvertisementData also calls ble_gap_adv_set_data immediately.
+    pAdv->setAdvertisementData(advData);
+    // setScanResponseData calls ble_gap_adv_rsp_set_data immediately and stores in m_scanData.
+    pAdv->setScanResponseData(scanData);
+    // start() sees m_advDataSet=true (set by setAdvertisementData above), skips the
+    // re-push block, and calls ble_gap_adv_start() directly. The host already has the
+    // correct adv and scan-response data from the explicit calls above.
+    pAdv->start();
+}
 void BleService::startClient(void *data)
 {
-    if (data == nullptr) { return; }
-    ESP_LOGI(TAG, "Starting client");
-    uint8_t v[] = {0x1, 0x0};
+    if (data == nullptr) { vTaskDelete(nullptr); return; }
+    ESP_LOGI(TAG, "Starting client task");
     auto clientParam = static_cast<ClientParameter *>(data);
+    BleService *bleService = clientParam->bleService;
+    uint16_t connHandle = clientParam->connHandle;
 
-#if defined(CONFIG_BLUEDROID_ENABLED)
-    BLESecurity::setEncryptionLevel(ESP_BLE_SEC_ENCRYPT);
-#endif //defined(CONFIG_BLUEDROID_ENABLED)
-    BLEDevice::setSecurityCallbacks(&Security);
-#if defined(CONFIG_BLUEDROID_ENABLED)
-    // Always use full MITM protection via numeric comparison.
-    // The user confirms the passkey shown on the device display.
-    // Use the bool overload — the uint8_t overload does NOT set m_securityEnabled,
-    // so startSecurity() never runs.
-    BLESecurity::setAuthenticationMode(true, true, true); // bonding=true, mitm=true, sc=true
-    BLESecurity::setCapability(ESP_IO_CAP_IO);
-    BLESecurity::setInitEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
-    BLESecurity::setRespEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
-#elif defined(CONFIG_NIMBLE_ENABLED)
-    BLESecurity::setAuthenticationMode(true, true, true);
-    BLESecurity::setCapability(BLE_HS_IO_DISPLAY_ONLY);
-    BLESecurity::setInitEncryptionKey(BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID);
-    BLESecurity::setRespEncryptionKey(BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID);
-#endif
-
-    BLEClient *pClient = BLEDevice::createClient();
-    clientParam->bleService->_pClient = pClient;
-    pClient->setClientCallbacks(clientParam->bleService->_clientCb);
-
-    // connect() returns true only when ESP_GATTC_OPEN_EVT succeeds — i.e. a real
-    // GATTC-level connection was established.  When it returns false (e.g. HCI timeout,
-    // rsn=0x100) there is no GATTC connection to clean up: ClientCallback::onDisconnect
-    // will never fire, so we must not wait on _gattcDoneSem.
-    bool const gattcConnected = pClient->connect(clientParam->bleAddress);
-    if (!gattcConnected)
+    // ── Step 1: Obtain the client for the existing server connection ──────────
+    //
+    // NimBLEServer::getClient(connHandle) is the correct API for the dual-role
+    // (peripheral + central) scenario. It bypasses connect() entirely and directly
+    // sets m_connHandle on the NimBLEClient, reusing the existing GAP link.
+    // The client is owned by the server and must be freed with getServer()->deleteClient().
+    NimBLEClient *pClient = NimBLEDevice::getServer()->getClient(connHandle);
+    if (pClient == nullptr)
     {
-        ESP_LOGW(TAG, "connect() failed — skipping auth wait and service discovery");
+        ESP_LOGW(TAG, "getClient() returned null — connection already gone");
         goto EndTask;
     }
+    bleService->_pClient = pClient;
 
-    // Wait for authentication/bonding to complete before starting GATT service
-    // discovery.  With m_forceSecurity=true the stack starts security immediately
-    // on ESP_GATTC_CONNECT_EVT.  Without this wait, getService() races the pairing
-    // handshake: if the phone rejects a stale bond the link drops mid-discovery and
-    // getService() returns nullptr — misleadingly logged as "ANCS service not found"
-    // even though the service does exist.
-    // waitForAuthenticationComplete() blocks until ESP_GAP_BLE_AUTH_CMPL_EVT fires
-    // (success or failure) or the 10 s timeout expires.
-    BLESecurity::waitForAuthenticationComplete(10000);
-
-    if (!pClient->isConnected())
+    // ── Step 2: Wait for the link to be encrypted ─────────────────────────────
+    //
+    // iOS will not expose ANCS until the BLE link is encrypted (MITM bonded).
+    // onAuthenticationComplete fires from the NimBLE host task; we poll
+    // ble_gap_conn_find() so we don't block that task with a semaphore.
     {
-        ESP_LOGW(TAG, "Client disconnected during authentication — not attempting service discovery");
-        goto EndTask;
+        ESP_LOGI(TAG, "Waiting for encryption (up to 10 s)...");
+        ble_gap_conn_desc authDesc{};
+        TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(10000);
+        bool encrypted = false;
+        while (xTaskGetTickCount() < deadline)
+        {
+            if (ble_gap_conn_find(connHandle, &authDesc) != 0)
+            {
+                ESP_LOGW(TAG, "Connection lost while waiting for encryption");
+                goto EndTask;
+            }
+            if (authDesc.sec_state.encrypted)
+            {
+                encrypted = true;
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        if (!encrypted)
+        {
+            ESP_LOGW(TAG, "Timed out waiting for encryption");
+            goto EndTask;
+        }
+        ESP_LOGI(TAG, "Link encrypted — beginning ANCS discovery");
     }
 
+    // ── Step 3: Discover ANCS service and characteristics ────────────────────
     {
-    BLERemoteService *pAncsService = pClient->getService(ANCS_SERVICE_UUID);
+    NimBLERemoteService *pAncsService = pClient->getService(ANCS_SERVICE_UUID);
     if (pAncsService == nullptr)
     {
         ESP_LOGW(TAG, "Failed to find ANCS service on peer");
         goto EndTask;
     }
-    clientParam->bleService->_notificationSourceCharacteristic =
+
+    // Discover ALL characteristics at once (refresh=true) so m_vChars is populated
+    // in ascending handle order. If we instead call getCharacteristic(uuid) individually,
+    // each call appends to m_vChars in query order (not handle order). That breaks
+    // retrieveDescriptors() which computes endHandle = next_chr.val_handle - 1 by
+    // iterating the vector — an out-of-order vector yields endHandle < val_handle,
+    // no CCCD is found, subscribe() silently returns true without writing the CCCD,
+    // and iOS never receives the Notification Source subscription that triggers the
+    // ANCS permission dialog.
+    pAncsService->getCharacteristics(true);
+
+    bleService->_notificationSourceCharacteristic =
         pAncsService->getCharacteristic(NOTIFICATION_SOURCE_CHR_UUID);
-    if (clientParam->bleService->_notificationSourceCharacteristic == nullptr)
+    if (bleService->_notificationSourceCharacteristic == nullptr)
     {
         ESP_LOGW(TAG, "Failed to find notification source characteristic");
         goto EndTask;
     }
-    clientParam->bleService->_controlPointCharacteristic =
+
+    bleService->_controlPointCharacteristic =
         pAncsService->getCharacteristic(CONTROL_POINT_CHR_UUID);
-    if (clientParam->bleService->_controlPointCharacteristic == nullptr)
+    if (bleService->_controlPointCharacteristic == nullptr)
     {
-        ESP_LOGW(TAG, "Failed to find our control point characteristic");
+        ESP_LOGW(TAG, "Failed to find control point characteristic");
         goto EndTask;
     }
-    clientParam->bleService->_dataSourceCharacteristic =
+
+    bleService->_dataSourceCharacteristic =
         pAncsService->getCharacteristic(DATA_SOURCE_CHR_UUID);
-    if (clientParam->bleService->_dataSourceCharacteristic == nullptr)
+    if (bleService->_dataSourceCharacteristic == nullptr)
     {
         ESP_LOGW(TAG, "Failed to find datasource characteristic");
         goto EndTask;
     }
-    clientParam->bleService->_notificationSourceCharacteristic->registerForNotify(
-        clientParam->bleService->_notificationSourceCallback);
-    clientParam->bleService->_notificationSourceCharacteristic->getDescriptor(
-        BLEUUID(static_cast<uint16_t>(0x2902)))->writeValue(v, 2, true);
-    clientParam->bleService->_dataSourceCharacteristic->registerForNotify(
-        clientParam->bleService->_dataSourceCallback);
-    clientParam->bleService->_dataSourceCharacteristic->getDescriptor(
-        BLEUUID(static_cast<uint16_t>(0x2902)))->writeValue(v, 2, true);
-    } // end auth-guard block
 
-    // Keep-alive loop.  Woken by xTaskNotify from either ServerCallback::onDisconnect
-    // or ClientCallback::onDisconnect, whichever fires first.  100 ms poll catches any
-    // disconnect that slips through without a notification (e.g. link-loss timeout).
+    // subscribe() writes 0x0001 to the CCCD. The Notification Source subscription
+    // is the specific write that triggers the iOS "Allow Notifications Access?" dialog.
+    auto nsCallback = bleService->_notificationSourceCallback;
+    if (!bleService->_notificationSourceCharacteristic->subscribe(
+        true,
+        [nsCallback](NimBLERemoteCharacteristic *pChr, uint8_t *pData, size_t length, bool isNotify) {
+            nsCallback(pChr, pData, length, isNotify);
+        }))
+    {
+        ESP_LOGW(TAG, "Failed to subscribe to Notification Source — CCCD write rejected or not found");
+        goto EndTask;
+    }
+
+    auto dsCallback = bleService->_dataSourceCallback;
+    if (!bleService->_dataSourceCharacteristic->subscribe(
+        true,
+        [dsCallback](NimBLERemoteCharacteristic *pChr, uint8_t *pData, size_t length, bool isNotify) {
+            dsCallback(pChr, pData, length, isNotify);
+        }))
+    {
+        ESP_LOGW(TAG, "Failed to subscribe to Data Source — CCCD write rejected or not found");
+        goto EndTask;
+    }
+
+    ESP_LOGI(TAG, "ANCS subscriptions active");
+    } // end discovery block
+
+    // ── Step 4: Keep-alive loop ───────────────────────────────────────────────
+    //
+    // Woken by xTaskNotify from ServerCallback::onDisconnect.
+    // 200 ms poll via ble_gap_conn_find() catches any disconnect that doesn't
+    // deliver a GAP event (e.g. sudden link loss / supervision timeout).
     while (true)
     {
-        if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100)) != 0)
-            break;  // woken by a disconnect notification
-        if (!pClient->isConnected())
-            break;  // polled disconnect
+        if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(200)) != 0)
+            break;  // server-side disconnect notified us
+
+        ble_gap_conn_desc pollDesc{};
+        if (ble_gap_conn_find(connHandle, &pollDesc) != 0)
+            break;  // link is gone
     }
 
 EndTask:
     ESP_LOGI(TAG, "Ending ClientTask");
 
-    // Capture the service pointer now – we will free clientParam before advertising.
-    BleService *bleService = clientParam->bleService;
-
-    // If the peer was still connected when we fell out of the loop (e.g. goto EndTask
-    // from a setup failure), disconnect now.  This queues ESP_GATTC_DISCONNECT_EVT,
-    // which calls esp_ble_gattc_app_unregister() and then gives _gattcDoneSem via
-    // ClientCallback::onDisconnect.
-    if (pClient->isConnected())
-    {
-        pClient->disconnect();
-    }
-
-    // Wait for ClientCallback::onDisconnect to signal that esp_ble_gattc_app_unregister()
-    // has been posted to the BTC task queue — but ONLY if connect() actually established
-    // a GATTC-level connection.  When connect() returned false there was never a GATTC
-    // connection: ClientCallback::onDisconnect will never fire and ESP_GATTC_CLOSE_EVT
-    // will never arrive, so waiting here would always burn the full 3-second timeout.
-    if (gattcConnected && bleService->_gattcDoneSem != nullptr)
-    {
-        if (xSemaphoreTake(bleService->_gattcDoneSem, pdMS_TO_TICKS(3000)) != pdTRUE)
-        {
-            ESP_LOGW(TAG, "Timed out waiting for GATTC disconnect event");
-        }
-    }
-
-    // Now it is safe to delete the BLEClient (GATTC app is already unregistered).
-    // Null the characteristic pointers FIRST so that any concurrent call to
-    // retrieveNotificationData() that slipped past the _isConnected check (set
-    // in ServerCallback::onDisconnect, which fires before this point) will see
-    // nullptr and return immediately rather than accessing freed memory.
+    // Clear characteristic pointers before releasing the client so any
+    // concurrent retrieveNotificationData() call sees nullptr immediately.
     bleService->_notificationSourceCharacteristic = nullptr;
-    bleService->_controlPointCharacteristic = nullptr;
-    bleService->_dataSourceCharacteristic = nullptr;
-    if (bleService->_pClient != nullptr)
-    {
-        delete pClient;
-        bleService->_pClient = nullptr;
-    }
+    bleService->_controlPointCharacteristic       = nullptr;
+    bleService->_dataSourceCharacteristic         = nullptr;
 
-    // Clear the task handle and param *before* startAdvertising() so a fast reconnect
-    // cannot create a second client task while we are still running.
-    bleService->_clientTaskHandle = nullptr;
-    bleService->_currentClientParam = nullptr;
+    // Release the server-owned client. This deletes the NimBLEClient object
+    // and all cached service / characteristic objects.
+    NimBLEDevice::getServer()->deleteClient();
+    bleService->_pClient = nullptr;
+
+    // Clear task handle and param before advertising so a fast reconnect
+    // cannot create a second task while this one is still in flight.
+    bleService->_clientTaskHandle    = nullptr;
+    bleService->_currentClientParam  = nullptr;
     delete clientParam;
-    clientParam = nullptr;
 
-    // Restart advertising.  _restartAdvertising() calls reset() first so any stuck
-    // m_advConfiguring flag left by a previous interrupted config chain is cleared.
     ESP_LOGI(TAG, "Restarting advertising after disconnect");
     bleService->_restartAdvertising();
     vTaskDelete(nullptr);
 }
 
-void BleService::_restartAdvertising()
-{
-    // BLEAdvertising::start() silently returns true (only log_w) when m_advConfiguring
-    // is stuck as true — e.g. when an async config chain was interrupted by a fast
-    // reconnect during the initial advertising setup.  reset() is the only public API
-    // that forcefully clears both m_advConfiguring and m_advDataSet.
-    //
-    // reset() does NOT clear m_serviceUUIDs, so the UUIDs added in startServer() are
-    // reused by start() automatically via the full async config chain:
-    //   esp_ble_gap_config_adv_data → ADV_DATA_SET_COMPLETE
-    //   → esp_ble_gap_config_adv_data(scanResp) → SCAN_RSP_DATA_SET_COMPLETE
-    //   → esp_ble_gap_start_advertising
-    //
-    // This must be called AFTER _gattcDoneSem has been taken, which guarantees that
-    // esp_ble_gattc_app_unregister() is already in the BTC task queue ahead of our
-    // GAP commands, preventing ESP_ERR_INVALID_STATE on ESP_GAP_BLE_ADV_START_COMPLETE.
-    BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
-    pAdvertising->reset();                                       // clears stuck state
-    pAdvertising->setAppearance(ESP_BLE_APPEARANCE_GENERIC_DISPLAY);
-    pAdvertising->setScanResponse(true);
-    pAdvertising->setMinPreferred(0x06);                         // re-apply after reset
-    pAdvertising->setMaxPreferred(0x10);
-    pAdvertising->start();
-}
-
 void BleService::retrieveNotificationData(uint32_t notifyUUID) const
 {
-        // Belt-and-suspenders: callers should already check isConnected(), but guard
-        // here too in case _controlPointCharacteristic was nulled by EndTask.
-        if (_controlPointCharacteristic == nullptr) { return; }
+    if (_controlPointCharacteristic == nullptr) { return; }
 
-        uint8_t uuid[4];
-        uuid[0] = notifyUUID;
-        uuid[1] = notifyUUID >> 8;
-        uuid[2] = notifyUUID >> 16;
-        uuid[3] = notifyUUID >> 24;
-        uint8_t vIdentifier[] = {0x0,uuid[0],uuid[1],uuid[2],uuid[3], ANCS::NotificationAttributeIDAppIdentifier};
-        _controlPointCharacteristic->writeValue(vIdentifier, 6, true);
-        uint8_t vTitle[] = {0x0,uuid[0],uuid[1],uuid[2],uuid[3], ANCS::NotificationAttributeIDTitle, 0x0, 0x10};
-        _controlPointCharacteristic->writeValue(vTitle, 8, true);
-        uint8_t vMessage[] = {0x0,uuid[0],uuid[1],uuid[2],uuid[3], ANCS::NotificationAttributeIDMessage, 0x0, 0x10};
-        _controlPointCharacteristic->writeValue(vMessage, 8, true);
-        uint8_t vDate[] = {0x0,uuid[0],uuid[1],uuid[2],uuid[3], ANCS::NotificationAttributeIDDate};
-        _controlPointCharacteristic->writeValue(vDate, 6, true);
+    uint8_t uuid[4];
+    uuid[0] = notifyUUID;
+    uuid[1] = notifyUUID >> 8;
+    uuid[2] = notifyUUID >> 16;
+    uuid[3] = notifyUUID >> 24;
+    uint8_t vIdentifier[] = {0x0, uuid[0], uuid[1], uuid[2], uuid[3], ANCS::NotificationAttributeIDAppIdentifier};
+    _controlPointCharacteristic->writeValue(vIdentifier, 6, true);
+    uint8_t vTitle[] = {0x0, uuid[0], uuid[1], uuid[2], uuid[3], ANCS::NotificationAttributeIDTitle, 0x0, 0x10};
+    _controlPointCharacteristic->writeValue(vTitle, 8, true);
+    uint8_t vMessage[] = {0x0, uuid[0], uuid[1], uuid[2], uuid[3], ANCS::NotificationAttributeIDMessage, 0x0, 0x10};
+    _controlPointCharacteristic->writeValue(vMessage, 8, true);
+    uint8_t vDate[] = {0x0, uuid[0], uuid[1], uuid[2], uuid[3], ANCS::NotificationAttributeIDDate};
+    _controlPointCharacteristic->writeValue(vDate, 6, true);
 }
 
 void BleService::setServerCallback(ANCSServiceServerCallback *serverCallback)
@@ -334,74 +328,54 @@ void BleService::setBatteryLevel(uint8_t level)
 }
 
 
-////// Callbacks ///////
+////// Server callbacks ///////
 
-#if defined(CONFIG_BLUEDROID_ENABLED)
-void BleService::ServerCallback::onConnect(BLEServer *pServer, esp_ble_gatts_cb_param_t *desc)
-#elif defined(CONFIG_NIMBLE_ENABLED)
-void BleService::ServerCallback::onConnect(BLEServer *pServer, ble_gap_conn_desc *desc)
-#endif
+void BleService::ServerCallback::onConnect(NimBLEServer *pServer, NimBLEConnInfo &connInfo)
 {
-#if defined(CONFIG_BLUEDROID_ENABLED)
-    const auto peerAddress = BLEAddress(desc->connect.remote_bda);
-#elif defined(CONFIG_NIMBLE_ENABLED)
-    auto peerAddress = BLEAddress(desc->peer_ota_addr);
-#endif
-    ESP_LOGI(TAG, "Device connected %s", peerAddress.toString().c_str());
+    ESP_LOGI(TAG, "Device connected %s", connInfo.getAddress().toString().c_str());
     ancsService->_isConnected.store(true);
-    // Drain any stale semaphore signal left over from the previous disconnect cycle.
-    if (ancsService->_gattcDoneSem != nullptr) {
-        xSemaphoreTake(ancsService->_gattcDoneSem, 0);
-    }
+
     if (ancsService->_serverCallback != nullptr)
     {
         ancsService->_serverCallback->onConnect();
     }
+
+    // Send a BLE Security Request to iOS so it initiates SMP pairing immediately.
+    // Without this, neither side starts the security handshake and ANCS (which
+    // requires an encrypted link) is never exposed by iOS.
+    NimBLEDevice::startSecurity(connInfo.getConnHandle());
+
+    // Spawn the GATT client task, passing the conn handle so it can call
+    // getServer()->getClient(connHandle) to attach to this GAP connection.
     if (ancsService->_clientTaskHandle == nullptr)
     {
-        ancsService->_currentClientParam = new ClientParameter(peerAddress, ancsService);
+        ancsService->_currentClientParam = new ClientParameter(connInfo.getConnHandle(), ancsService);
         xTaskCreatePinnedToCore(&BleService::startClient, "ClientTask", 10000,
             ancsService->_currentClientParam, 5,
             &ancsService->_clientTaskHandle, 0);
     }
 }
 
-void BleService::ServerCallback::onDisconnect(BLEServer *pServer)
+void BleService::ServerCallback::onDisconnect(NimBLEServer *pServer, NimBLEConnInfo &connInfo, int reason)
 {
-    ESP_LOGI(TAG, "Device disconnected");
+    ESP_LOGI(TAG, "Device disconnected (reason=%d)", reason);
 
-    // Mark as disconnected FIRST so NotificationDescription::run() immediately stops
-    // calling retrieveNotificationData().  This is the primary guard against the
-    // use-after-free of _controlPointCharacteristic that was crashing the BTC task.
     ancsService->_isConnected.store(false);
 
-    // Drain any notifications that were queued while connected so they are not
-    // processed on the next connection with stale UUIDs.
+    // Drain stale pending notifications so they are not replayed on the next connection.
     Notifications.clearPendingNotifications();
 
-    // Wake the client task so it exits its keep-alive loop.  The task will wait for
-    // ClientCallback::onDisconnect (which signals that esp_ble_gattc_app_unregister()
-    // is in the BTC queue) before calling startAdvertising().
-    //
-    // IMPORTANT: do NOT null _clientTaskHandle here.  Nulling prematurely would:
-    //   (a) allow onConnect to create a new task while the old one is still cleaning up,
-    //   (b) cause the else-branch below to call startAdvertising() while GATTC is still
-    //       registered, returning ESP_ERR_INVALID_STATE on the dual-core ESP32-S3.
-    // The task owns _clientTaskHandle and nulls it only after startAdvertising() returns.
     if (ancsService->_clientTaskHandle != nullptr)
     {
+        // Wake the client task so it exits its keep-alive loop and cleans up.
         xTaskNotify(ancsService->_clientTaskHandle, 1, eSetValueWithOverwrite);
     }
-    else if (ancsService->_pClient == nullptr)
+    else
     {
-        // No task and no GATTC client — the GATTC app is already unregistered, so
-        // it is safe to restart advertising directly from this BTC task callback.
+        // No client task running — restart advertising directly.
         ESP_LOGI(TAG, "No client task - restarting advertising directly");
         ancsService->_restartAdvertising();
     }
-    // else: _pClient != null but no task handle — the task exited the keep-alive loop
-    // via the polling path and is currently in EndTask cleaning up.  It will call
-    // startAdvertising() itself after taking _gattcDoneSem.
 
     if (ancsService->_serverCallback != nullptr)
     {
@@ -409,40 +383,50 @@ void BleService::ServerCallback::onDisconnect(BLEServer *pServer)
     }
 }
 
-void BleService::ClientCallback::onConnect(BLEClient *pClient)
+uint32_t BleService::ServerCallback::onPassKeyDisplay()
 {
-    if (pClient != nullptr) {
-        ESP_LOGI(TAG, "Device client connected %s", pClient->getPeerAddress().toString().c_str());
-    }
-    if (ancsService->_clientCallback != nullptr)
-    {
-        ancsService->_clientCallback->onConnect();
-    }
+    uint32_t passkey = NimBLEDevice::getSecurityPasskey();
+    ESP_LOGI(TAG, "Passkey display: %06lu", (unsigned long)passkey);
+    Heltec.pairing(String(passkey));
+    return passkey;
 }
 
-void BleService::ClientCallback::onDisconnect(BLEClient *pClient)
+void BleService::ServerCallback::onConfirmPassKey(NimBLEConnInfo &connInfo, uint32_t pin)
 {
-    if (pClient != nullptr) {
-        ESP_LOGI(TAG, "Device Client disconnected %s", pClient->getPeerAddress().toString().c_str());
-    }
+    ESP_LOGI(TAG, "Confirm passkey: %06lu", (unsigned long)pin);
+    Heltec.pairing(String(pin));
+    // With DISPLAY_YES_NO both sides show the same 6-digit number and the user
+    // taps YES on iOS. The ESP32 auto-confirms here; iOS handles the user prompt.
+    NimBLEDevice::injectConfirmPasskey(connInfo, true);
+}
 
-    // This callback fires from inside ESP_GATTC_DISCONNECT_EVT, which means
-    // esp_ble_gattc_app_unregister() has already been posted to the BTC task queue.
-    // Signal the client task that it is now safe to call startAdvertising(): by the
-    // time the task posts START_ADV to the BTC queue, UNREGISTER_APP is already ahead
-    // of it in the queue, guaranteeing correct ordering on both single- and dual-core.
-    if (ancsService->_gattcDoneSem != nullptr) {
-        xSemaphoreGive(ancsService->_gattcDoneSem);
-    }
-    // Also wake the keep-alive loop in case ServerCallback::onDisconnect hasn't fired yet.
-    if (ancsService->_clientTaskHandle != nullptr) {
-        xTaskNotify(ancsService->_clientTaskHandle, 1, eSetValueWithOverwrite);
-    }
-
-    if (ancsService->_clientCallback != nullptr)
+void BleService::ServerCallback::onAuthenticationComplete(NimBLEConnInfo &connInfo)
+{
+    if (!connInfo.isEncrypted())
     {
-        ancsService->_clientCallback->onDisconnect();
+        ESP_LOGW(TAG, "Encryption failed — disconnecting (conn_handle=%d)", connInfo.getConnHandle());
+
+        // Wipe all stored bonds so we don't get stuck retrying a stale LTK.
+        int rc = ble_store_clear();
+        if (rc == 0) {
+            ESP_LOGW(TAG, "Cleared all stored bonds");
+        } else {
+            ESP_LOGW(TAG, "ble_store_clear() returned %d", rc);
+        }
+
+        if (!ancsService->noteAuthFail())
+        {
+            Heltec.setBLEConnectionState(BLE_DISCONNECTED);
+        }
+
+        NimBLEDevice::getServer()->disconnect(connInfo.getConnHandle());
+        return;
     }
+
+    ESP_LOGI(TAG, "Authentication successful (encrypted=%d, authenticated=%d, bonded=%d)",
+        connInfo.isEncrypted(), connInfo.isAuthenticated(), connInfo.isBonded());
+    ancsService->resetAuthStreak();
+    Heltec.setBLEConnectionState(BLE_CONNECTED);
 }
 
 bool BleService::noteAuthFail()
@@ -452,21 +436,6 @@ bool BleService::noteAuthFail()
 
     if (streak >= AUTH_FAIL_PAIRING_THRESHOLD)
     {
-        // What's happening:
-        //   Attempt 1 — iOS presented a stale LTK (we had no matching bond after a
-        //               re-flash / NVS wipe).  Bluedroid rejected it; iOS cleared its
-        //               stale bond and immediately tried a fresh connection.
-        //   Attempt 2+ — iOS now has NO stored bond and is attempting fresh SMP
-        //               pairing. Because ANCS is a background system service, iOS
-        //               sends a Pairing Request with MITM=0 (no dialog). Our device
-        //               requires MITM=1 (ESP_IO_CAP_IO), so Bluedroid returns
-        //               SMP_ERR_AUTH_REQ → 0x66 → same error, infinite loop.
-        //
-        // Resolution: the user must go to iOS Settings > Bluetooth and tap our
-        // device name. With the Bluetooth settings page in the foreground, iOS
-        // WILL send MITM=1 and display the numeric comparison dialog.
-        // Once the user confirms the passkey on both devices, the fresh MITM bond
-        // is stored and ANCS reconnects automatically from then on.
         ESP_LOGW(TAG, "MITM pairing requires user action: go to iOS Settings > Bluetooth");
         Heltec.pairing("iOS Settings");
         return true;

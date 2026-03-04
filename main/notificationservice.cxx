@@ -20,7 +20,7 @@
 #include "ancs.h"
 #include "bleservice.h"
 #include "hardware.h"
-#include <BLERemoteCharacteristic.h>
+#include <NimBLERemoteCharacteristic.h>
 #include <cinttypes>
 #include <cstring>
 
@@ -68,7 +68,7 @@ int NotificationService::findNotificationIndex(uint32_t uuid) const
 }
 
 /* static */
-void NotificationService::DataSourceNotifyCallback(BLERemoteCharacteristic *pCharacteristic, uint8_t *pData, size_t length, bool isNotify)
+void NotificationService::DataSourceNotifyCallback(NimBLERemoteCharacteristic *pCharacteristic, uint8_t *pData, size_t length, bool isNotify)
 {
     // This runs on the BTC task. It MUST return immediately so the GATT indication
     // ACK is sent without delay. Do nothing except copy the raw packet to the event
@@ -82,7 +82,7 @@ void NotificationService::DataSourceNotifyCallback(BLERemoteCharacteristic *pCha
 }
 
 /* static */
-void NotificationService::NotificationSourceNotifyCallback(BLERemoteCharacteristic *pCharacteristic, uint8_t *pData, size_t length,bool isNotify)
+void NotificationService::NotificationSourceNotifyCallback(NimBLERemoteCharacteristic *pCharacteristic, uint8_t *pData, size_t length,bool isNotify)
 {
     // This runs on the BTC task. Must return immediately — see DataSourceNotifyCallback.
     if (length < 8 || Notifications.mEventQueue == nullptr) { return; }

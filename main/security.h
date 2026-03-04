@@ -18,22 +18,11 @@
 #ifndef SECURITY_CALLBACK_H_
 #define SECURITY_CALLBACK_H_
 
-#include <BLESecurity.h>
-
-class SecurityCallback final : public BLESecurityCallbacks
-{
-public:
-    uint32_t onPassKeyRequest() override;
-    void onPassKeyNotify(uint32_t passkey) override;
-    bool onSecurityRequest() override;
-    bool onConfirmPIN(uint32_t pin) override;
-#if defined(CONFIG_BLUEDROID_ENABLED)
-    void onAuthenticationComplete(esp_ble_auth_cmpl_t cmpl) override;
-#elif defined(CONFIG_NIMBLE_ENABLED)
-    void onAuthenticationComplete(ble_gap_conn_desc* cmpl) override;
-#endif
-};
-
-extern SecurityCallback Security;
+// With esp-nimble-cpp 2.x, security callbacks (onAuthenticationComplete,
+// onPassKeyDisplay, onConfirmPasskey) are methods of NimBLEServerCallbacks.
+// They are now implemented directly in BleService::ServerCallback.
+//
+// This header is kept for backward compatibility — it was previously included
+// by bleservice.cxx and other files. It is now essentially empty.
 
 #endif /* SECURITY_CALLBACK_H_ */

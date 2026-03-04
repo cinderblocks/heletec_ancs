@@ -19,12 +19,13 @@
 #define BLE_SERVICE_H
 
 #include <atomic>
-#include <BLEDevice.h>
+#include <Arduino.h>
+#include <NimBLEDevice.h>
 #include <freertos/semphr.h>
 
-class BLEHIDDevice;
+class NimBLEHIDDevice;
 
-typedef void (*NotificationCallback)(BLERemoteCharacteristic *pBLERemoteCharacteristic,
+typedef void (*NotificationCallback)(NimBLERemoteCharacteristic *pBLERemoteCharacteristic,
               uint8_t *pData, size_t length, bool isNotify);
 
 class ANCSServiceServerCallback
@@ -52,88 +53,57 @@ class BleService
         void setClientCallback(ANCSServiceClientCallback *clientCallback);
         void setBatteryLevel(uint8_t level);
         bool isConnected() const { return _isConnected.load(); }
-        // Called by SecurityCallback on every 0x66 auth failure.
-        // Once AUTH_FAIL_PAIRING_THRESHOLD consecutive failures occur, posts
-        // pairing instructions to the display so the user knows to go to
-        // iOS Settings > Bluetooth and tap the device name.
-        // Returns true when the instructions have been posted.
         bool noteAuthFail();
         void resetAuthStreak() { _authFailStreak.store(0); }
 
-    private:        // ANCS
-        BLERemoteCharacteristic *_notificationSourceCharacteristic = nullptr;
-        BLERemoteCharacteristic *_controlPointCharacteristic = nullptr;
-        BLERemoteCharacteristic *_dataSourceCharacteristic = nullptr;
-        // Battery
-        BLECharacteristic *_batteryLevelCharacteristic = nullptr;
+    private:
+        // ANCS remote characteristics (discovered on the iPhone)
+        NimBLERemoteCharacteristic *_notificationSourceCharacteristic = nullptr;
+        NimBLERemoteCharacteristic *_controlPointCharacteristic = nullptr;
+        NimBLERemoteCharacteristic *_dataSourceCharacteristic = nullptr;
 
         NotificationCallback _notificationSourceCallback;
         NotificationCallback _dataSourceCallback;
         ANCSServiceServerCallback *_serverCallback = nullptr;
         ANCSServiceClientCallback *_clientCallback = nullptr;
         TaskHandle_t _clientTaskHandle = nullptr;
-        BLEHIDDevice *_hidDevice = nullptr;
+        NimBLEHIDDevice *_hidDevice = nullptr;
+
+        // Pointer to the server-owned GATT client (obtained via getServer()->getClient()).
+        // Null when no client task is running.
+        NimBLEClient *_pClient = nullptr;
 
         static void startClient(void *data);
 
-        class ServerCallback final : public BLEServerCallbacks
+        class ServerCallback final : public NimBLEServerCallbacks
         {
             friend class ANCSService;
             public:
                 explicit ServerCallback(BleService *ancsService) : ancsService(ancsService) { }
-#if defined(CONFIG_BLUEDROID_ENABLED)
-                void onConnect(BLEServer *pServer, esp_ble_gatts_cb_param_t *desc) override;
-#elif defined(CONFIG_NIMBLE_ENABLED)
-                void onConnect(BLEServer *pServer, ble_gap_conn_desc *desc) override;
-#endif
-                void onDisconnect(BLEServer *pServer) override;
+                void onConnect(NimBLEServer *pServer, NimBLEConnInfo &connInfo) override;
+                void onDisconnect(NimBLEServer *pServer, NimBLEConnInfo &connInfo, int reason) override;
+                void onAuthenticationComplete(NimBLEConnInfo &connInfo) override;
+                uint32_t onPassKeyDisplay() override;
+                void onConfirmPassKey(NimBLEConnInfo &connInfo, uint32_t pin) override;
 
-            private:
-                BleService *ancsService;
-        };
-
-        class ClientCallback final : public BLEClientCallbacks
-        {
-            friend class BleService;
-            public:
-                explicit ClientCallback(BleService *ancsService) : ancsService(ancsService) { }
-                void onConnect(BLEClient *pClient) override;
-                void onDisconnect(BLEClient *pClient) override;
             private:
                 BleService *ancsService;
         };
 
         struct ClientParameter
         {
-            BLEAddress bleAddress;
+            uint16_t connHandle;  // GAP connection handle from the server's onConnect
             BleService *bleService;
-            ClientParameter(BLEAddress const& bleaddress, BleService *bleservice)
-            : bleAddress(bleaddress), bleService(bleservice) { };
+            ClientParameter(uint16_t handle, BleService *bleservice)
+            : connHandle(handle), bleService(bleservice) { };
         };
 
-        // Must be declared after nested classes are defined above
         ClientParameter *_currentClientParam = nullptr;
-        ClientCallback  *_clientCb = nullptr;   // created once in startServer, reused every connection
-        BLEClient       *_pClient  = nullptr;   // current GATTC client
 
-        // Semaphore given by ClientCallback::onDisconnect (fired from ESP_GATTC_DISCONNECT_EVT,
-        // after esp_ble_gattc_app_unregister() has been queued). The client task waits on this
-        // before calling startAdvertising() to guarantee correct BTC-task queue ordering.
-        SemaphoreHandle_t _gattcDoneSem = nullptr;
-
-        // Connection state flag: true from ServerCallback::onConnect, false from
-        // ServerCallback::onDisconnect.  Checked by NotificationDescription::run() to
-        // prevent accessing characteristic pointers after pClient has been deleted.
         std::atomic<bool> _isConnected{false};
-        // Counts consecutive 0x66 auth failures.  After AUTH_FAIL_PAIRING_THRESHOLD
-        // consecutive failures, noteAuthFail() shows "iOS Settings" on the display.
-        // Reset to 0 by resetAuthStreak() on successful authentication.
         std::atomic<int>  _authFailStreak{0};
         static constexpr int AUTH_FAIL_PAIRING_THRESHOLD = 2;
 
-        // Resets the BLEAdvertising object and starts advertising from scratch.
-        // Calling reset() before start() is the only reliable way to clear a stuck
-        // m_advConfiguring flag left by an interrupted async config chain.
         void _restartAdvertising();
 };
 

@@ -27,7 +27,7 @@
 #include <freertos/task.h>
 #include <time.h>
 
-class BLERemoteCharacteristic;
+class NimBLERemoteCharacteristic;
 
 /**
  * Combined event type posted to mEventQueue from BLE callbacks and addPendingNotification.
@@ -101,8 +101,8 @@ public:
     bool takeNotificationByIndex(size_t index, notification_def& out);
 
     // BLE callbacks — must return immediately; do NOT take any mutex or allocate heap.
-    static void DataSourceNotifyCallback(BLERemoteCharacteristic *pCharacteristic, uint8_t *pData, size_t length, bool isNotify);
-    static void NotificationSourceNotifyCallback(BLERemoteCharacteristic *pCharacteristic, uint8_t *pData, size_t length, bool isNotify);
+    static void DataSourceNotifyCallback(NimBLERemoteCharacteristic *pCharacteristic, uint8_t *pData, size_t length, bool isNotify);
+    static void NotificationSourceNotifyCallback(NimBLERemoteCharacteristic *pCharacteristic, uint8_t *pData, size_t length, bool isNotify);
 
 private:
     static constexpr size_t notificationListSize = 16;

@@ -79,7 +79,7 @@ void GPS::run(void *data)
             }
             else
             {
-                ESP_LOGI(TAG, "GPS timeout");
+                //ESP_LOGI(TAG, "GPS timeout");
                 Heltec.showGpsState(false);
             }
         }

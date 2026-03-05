@@ -141,11 +141,11 @@ void Hardware::startDrawing(void* pvParameters)
             }
 
             size_t count = Notifications.getNotificationCount();
+            notification_def notification;
             for (size_t i = 0; i < count; i++) {
                 // takeNotificationByIndex atomically copies the notification and
                 // marks it as showed under the mutex, so the slot is safe to reuse
                 // immediately — no stale pointer is held across the 15 s delay.
-                notification_def notification;
                 if (Notifications.takeNotificationByIndex(i, notification)) {
                     h->showNotification(notification);
                     h->glow(true);
@@ -155,6 +155,15 @@ void Hardware::startDrawing(void* pvParameters)
             }
             // Always refresh body text to reflect current BLE state after processing
             h->standby();
+
+            // Yield to IDLE0 after display work.  DrawTask (priority 3) never
+            // preempts for lower-priority tasks, so IDLE0 only runs when DrawTask
+            // blocks.  Without this delay, rapid DRAW_NOTIFY / DRAW_STATE events
+            // (e.g. iOS firing EventIDNotificationModified every second for active
+            // calls) keep the task-notification bits non-zero, causing
+            // xTaskNotifyWait to return immediately on the next iteration and
+            // preventing IDLE0 from ever running — which triggers the task WDT.
+            vTaskDelay(pdMS_TO_TICKS(20));
         }
     }
     ESP_LOGI(TAG, "Ending Draw task");

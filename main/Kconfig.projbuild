@@ -9,3 +9,14 @@ config GPS_TZ_OFFSET
         Does not account for daylight saving time.
 
 endmenu
+
+menu "BLE Configuration"
+
+config BLE_DEVICE_NAME
+    string "BLE device name (advertised name)"
+    default "HatefulBlue"
+    help
+        The name advertised over BLE and shown in iOS Settings > Bluetooth.
+        Maximum 31 characters (BLE advertisement payload limit).
+
+endmenu

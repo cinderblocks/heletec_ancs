@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2025 Sjofn LLC
+ * Copyright (c) 2025-2026 Sjofn LLC
  * Based on Limor Fried/Ladyada's driver for Adafruit Industries.
  * https://github.com/adafruit/Adafruit-ST7735-Library
  *

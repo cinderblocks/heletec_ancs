@@ -1,5 +1,5 @@
 /**
-* Copyright (c) 2024-2025 Sjofn LLC
+* Copyright (c) 2024-2026 Sjofn LLC
  *
  * Bitmaps are licensed under the Creative Commons Attribution-NoDerivatives 4.0 International License.
  * https://creativecommons.org/licenses/by-nd/4.0/legalcode.txt

@@ -63,6 +63,24 @@ void BleService::startServer(String const& appName)
     NimBLEDevice::init(std::string(appName.c_str()));
     NimBLEDevice::setPower(9);  // +9 dBm (max for ESP32-S3)
 
+    // Enable host-based privacy so the NimBLE host can resolve iOS's Resolvable
+    // Private Addresses (RPAs).  iOS rotates its RPA every ~15 minutes.  When
+    // iOS reconnects, NimBLE must resolve the new RPA back to the identity
+    // address stored in the bond to find the matching LTK.
+    //
+    // On ESP32-S3 the BLE controller (in ROM) does not support LL Privacy, so
+    // the host resolving list is the only mechanism.  setOwnAddrType() with
+    // BLE_OWN_ADDR_RPA_PUBLIC_DEFAULT calls ble_hs_pvcy_rpa_config(ENABLE)
+    // which initialises the host privacy subsystem and loads stored peer IRKs
+    // into the resolving list.
+    //
+    // Sideeffect: our own advertising address becomes a host-generated RPA
+    // (rotated every CONFIG_BT_NIMBLE_RPA_TIMEOUT seconds).  This is standard
+    // BLE practice; iOS bonds to our IRK (distributed via BLE_SM_PAIR_KEY_DIST_ID),
+    // not to our address.
+
+    NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RPA_PUBLIC_DEFAULT);
+
     // Security: bonding + MITM + secure connections, display-only IO capability
     NimBLEDevice::setSecurityAuth(true, true, true);  // bonding, mitm, sc
     // DISPLAY_YES_NO = numeric comparison: both devices show the same 6-digit
@@ -72,6 +90,9 @@ void BleService::startServer(String const& appName)
     NimBLEDevice::setSecurityInitKey(BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID);
     NimBLEDevice::setSecurityRespKey(BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID);
     NimBLEDevice::setSecurityPasskey(420420);
+
+    // Log stored bonds for diagnostics — confirms NVS persistence is working.
+    ESP_LOGI(TAG, "Stored bonds: %d", NimBLEDevice::getNumBonds());
 
     NimBLEServer *pServer = NimBLEDevice::createServer();
     pServer->setCallbacks(new ServerCallback(this));

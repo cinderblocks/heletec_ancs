@@ -74,7 +74,8 @@ public:
     static constexpr uint32_t DRAW_NOTIFY  = (1u << 0); // new notification ready
     static constexpr uint32_t DRAW_STATE   = (1u << 1); // BLE state changed
     static constexpr uint32_t DRAW_BATTERY = (1u << 2); // battery level check
-    static constexpr uint32_t DRAW_TIME     = (1u << 3); // GPS time/state changed
+    static constexpr uint32_t DRAW_TIME    = (1u << 3); // CTS clock updated
+    static constexpr uint32_t DRAW_GPS     = (1u << 4); // GPS fix state changed
 
     Hardware();
     virtual ~Hardware();
@@ -85,6 +86,7 @@ public:
     void notifyDraw(uint32_t events);
     void showTime(String const& timestamp);
     void showCallState(bool active);
+    void showGpsState(bool fixed);
     void glow(bool on);
     /**
      * Called from the CTS TimeCallback after the system clock has been synced.
@@ -113,6 +115,7 @@ private:
     TFT mDisplay;
     conn_state_def mBleState = BLE_DISCONNECTED;
     bool mCallState = false;
+    bool mGpsFixed  = false;
     uint8_t mBatteryLevel = 0;
     int32_t mUtcOffsetSeconds = INT32_MIN;  // INT32_MIN = not yet synced
     // Fixed-size arrays instead of String to allow safe writes from non-draw tasks

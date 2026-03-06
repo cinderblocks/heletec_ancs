@@ -28,15 +28,12 @@ public:
 private:
     void run(void *data) override;
 
-    static constexpr uint8_t GPS_RX  = 33;
-    static constexpr uint8_t GPS_TX  = 34;
-    static constexpr uint8_t GPS_RST = 35;
-    static constexpr uint8_t GPS_PPS = 36;
-    // VGNSS power is controlled through VEXT_CTRL (pin 3) which is driven HIGH
-    // by TFT::init() before the GPS task starts — no separate GPS power pin needed.
+    // UC6580 GPS module pins (matches Heltec factory example)
+    static constexpr uint8_t GPS_RX = 33;
+    static constexpr uint8_t GPS_TX = 34;
 
     TinyGPSPlus _gps;
-    HardwareSerial _serial = HardwareSerial(1); // UART1 = Serial1, matches factory test
+    HardwareSerial _serial = HardwareSerial(1); // UART1 = Serial1
 };
 
 extern GPS gps;

@@ -17,6 +17,7 @@
 
 #include "sdkconfig.h"
 #include "applist.h"
+#include "gps.h"
 #include "hardware.h"
 #include "bleservice.h"
 #include "notificationservice.h"
@@ -56,6 +57,7 @@ extern "C" void app_main(void)
     Heltec.begin();
     Ble.startServer(CONFIG_BLE_DEVICE_NAME);
     NotificationReceiver.start();
+    gps.start();
     static MainServerCallback serverCallback(&Heltec);
     Ble.setServerCallback(&serverCallback);
 

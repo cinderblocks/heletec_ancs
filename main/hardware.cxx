@@ -120,8 +120,23 @@ void Hardware::startDrawing(void* pvParameters)
             {
                 h->mDisplay.drawStr(0, 6, localTs, Font_7x10, TFT::Color::WHITE, HEADER_COLOR);
             }
-            // GPS icon slot (width-50): always cleared — GPS is not used.
-            h->mDisplay.fillRectangle(h->mDisplay.width()-50, 1, 16, 16, HEADER_COLOR);
+        }
+
+        if (bits & DRAW_GPS)
+        {
+            bool fixed;
+            portENTER_CRITICAL(&h->mHardwareLock);
+            fixed = h->mGpsFixed;
+            portEXIT_CRITICAL(&h->mHardwareLock);
+
+            if (fixed)
+            {
+                h->drawIcon(h->mDisplay.width()-50, 1, Bitmaps::GPS, TFT::Color::GREEN);
+            }
+            else
+            {
+                h->mDisplay.fillRectangle(h->mDisplay.width()-50, 1, 16, 16, HEADER_COLOR);
+            }
         }
 
         if (bits & (DRAW_NOTIFY | DRAW_STATE))
@@ -393,6 +408,14 @@ void Hardware::showCallState(bool active)
     {
         mDisplay.fillRectangle(mDisplay.width()-67, 1, 16, 16, HEADER_COLOR);
     }
+}
+
+void Hardware::showGpsState(bool fixed)
+{
+    portENTER_CRITICAL(&mHardwareLock);
+    mGpsFixed = fixed;
+    portEXIT_CRITICAL(&mHardwareLock);
+    notifyDraw(DRAW_GPS);
 }
 
 void Hardware::glow(bool on)

@@ -4,6 +4,7 @@ set(SOURCE_FILES
     applist.cxx
     bleservice.cxx
     fonts.cxx
+    gps.cxx
     hardware.cxx
     main.cxx
     notificationservice.cxx

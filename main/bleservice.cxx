@@ -63,24 +63,6 @@ void BleService::startServer(String const& appName)
     NimBLEDevice::init(std::string(appName.c_str()));
     NimBLEDevice::setPower(9);  // +9 dBm (max for ESP32-S3)
 
-    // Enable host-based privacy so the NimBLE host can resolve iOS's Resolvable
-    // Private Addresses (RPAs).  iOS rotates its RPA every ~15 minutes.  When
-    // iOS reconnects, NimBLE must resolve the new RPA back to the identity
-    // address stored in the bond to find the matching LTK.
-    //
-    // On ESP32-S3 the BLE controller (in ROM) does not support LL Privacy, so
-    // the host resolving list is the only mechanism.  setOwnAddrType() with
-    // BLE_OWN_ADDR_RPA_PUBLIC_DEFAULT calls ble_hs_pvcy_rpa_config(ENABLE)
-    // which initialises the host privacy subsystem and loads stored peer IRKs
-    // into the resolving list.
-    //
-    // Sideeffect: our own advertising address becomes a host-generated RPA
-    // (rotated every CONFIG_BT_NIMBLE_RPA_TIMEOUT seconds).  This is standard
-    // BLE practice; iOS bonds to our IRK (distributed via BLE_SM_PAIR_KEY_DIST_ID),
-    // not to our address.
-
-    NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RPA_PUBLIC_DEFAULT);
-
     // Security: bonding + MITM + secure connections, display-only IO capability
     NimBLEDevice::setSecurityAuth(true, true, true);  // bonding, mitm, sc
     // DISPLAY_YES_NO = numeric comparison: both devices show the same 6-digit
@@ -552,7 +534,11 @@ void BleService::_applyCurrentTime(const uint8_t *pData, size_t length,
 
 void BleService::ServerCallback::onConnect(NimBLEServer *pServer, NimBLEConnInfo &connInfo)
 {
-    ESP_LOGI(TAG, "Device connected %s", connInfo.getAddress().toString().c_str());
+    ESP_LOGI(TAG, "Device connected (ota=%s, id=%s, bonded=%d, bonds_stored=%d)",
+             connInfo.getAddress().toString().c_str(),
+             connInfo.getIdAddress().toString().c_str(),
+             connInfo.isBonded(),
+             NimBLEDevice::getNumBonds());
     ancsService->_isConnected.store(true);
     ancsService->_everEncrypted.store(false); // reset per-connection encryption flag
 
@@ -594,30 +580,6 @@ void BleService::ServerCallback::onDisconnect(NimBLEServer *pServer, NimBLEConnI
     // Drain stale pending notifications so they are not replayed on the next connection.
     Notifications.clearPendingNotifications();
 
-    // ── Bond-mismatch detection ───────────────────────────────────────────────
-    //
-    // Reason 531 = BLE_HS_ERR_HCI_BASE(512) + BLE_ERR_REM_USER_CONN_TERM(0x13):
-    // iOS explicitly terminated the connection.  When this happens WITHOUT the
-    // link ever having been encrypted (_everEncrypted == false), it means iOS
-    // sent LL_START_ENC_REQ with its stored LTK and NimBLE replied with
-    // LTK_Request_Negative_Reply (no matching bond in our NVS store).
-    // iOS received LL_REJECT_EXT_IND(PIN_or_Key_Missing) and terminated.
-    //
-    // Note: BLE_GAP_EVENT_ENC_CHANGE does NOT fire in this NimBLE version for
-    // the LTK-missing path — the SM proc is cleaned up on HCI_Disconnection_
-    // Complete without surfacing an ENC_CHANGE event, so onAuthenticationComplete
-    // is never called.  This onDisconnect hook is the only place to detect it.
-    //
-    // Recovery: delete our (possibly stale) local bond for this peer so that
-    // NimBLE won't try to present a wrong LTK on the next attempt, then display
-    // guidance asking the user to Forget the device in iOS Settings.  Modern iOS
-    // does not automatically initiate fresh SMP after receiving PIN_or_Key_Missing
-    // — the user must manually Forget once, after which fresh pairing succeeds
-    // and the bond is stored in NVS (CONFIG_BT_NIMBLE_NVS_PERSIST=y).
-    static constexpr int REASON_IOS_TERMINATED = 531;
-    const bool bondMismatch = (!ancsService->_everEncrypted.load() &&
-                               reason == REASON_IOS_TERMINATED);
-
     if (ancsService->_clientTaskHandle != nullptr)
     {
         // Wake the client task so it exits its keep-alive loop and cleans up.
@@ -632,18 +594,7 @@ void BleService::ServerCallback::onDisconnect(NimBLEServer *pServer, NimBLEConnI
 
     if (ancsService->_serverCallback != nullptr)
     {
-        ancsService->_serverCallback->onDisconnect(); // sets BLE_DISCONNECTED
-    }
-
-    // Override state AFTER the server callback so BLE_PAIRING is not
-    // overwritten by the MainServerCallback's setBLEConnectionState(BLE_DISCONNECTED).
-    if (bondMismatch)
-    {
-        ESP_LOGW(TAG, "Bond mismatch — iOS has LTK but we have none. "
-                      "User must Forget this device in iOS Settings > Bluetooth.");
-        NimBLEDevice::deleteBond(connInfo.getIdAddress());
-        Heltec.pairing("Forget on iOS");
-        Heltec.setBLEConnectionState(BLE_PAIRING);
+        ancsService->_serverCallback->onDisconnect();
     }
 }
 
@@ -668,19 +619,19 @@ void BleService::ServerCallback::onAuthenticationComplete(NimBLEConnInfo &connIn
 {
     if (!connInfo.isEncrypted())
     {
-        ESP_LOGW(TAG, "Encryption failed (conn_handle=%d)", connInfo.getConnHandle());
+        ESP_LOGW(TAG, "Encryption failed (conn_handle=%d, peer_ota=%s, peer_id=%s)",
+                 connInfo.getConnHandle(),
+                 connInfo.getAddress().toString().c_str(),
+                 connInfo.getIdAddress().toString().c_str());
 
-        // Delete our stale bond so the next Security Request triggers a fresh
-        // Pairing Request from iOS (rather than another LTK retry).
-        // Do NOT call startSecurity() here — this callback runs on the NimBLE
-        // host task while SMP is still unwinding the failed encryption.
-        // Calling ble_gap_security_initiate() mid-unwind causes NimBLE to
-        // terminate with MIC failure, which makes iOS retain its bond and
-        // retry the same LTK on every future reconnect (infinite failure loop).
-        // The client task's wait loop will send the Security Request safely
-        // 1500 ms after connection, by which point SMP is fully settled.
-        NimBLEDevice::deleteBond(connInfo.getIdAddress());
-        ESP_LOGI(TAG, "Local bond deleted — wait loop will send Security Request");
+        // Do NOT call NimBLEDevice::deleteBond() here.
+        // deleteBond() calls ble_gap_unpair() which TERMINATES the active
+        // connection immediately (hci_reason=19).  The encryption wait loop
+        // then sees "connection lost" and exits — no chance to retry pairing.
+        //
+        // NimBLEServer already handles BLE_GAP_EVENT_REPEAT_PAIRING by
+        // deleting the old bond and returning RETRY, so fresh SMP will work
+        // on the next Security Request if iOS cooperates.
         Heltec.setBLEConnectionState(BLE_PAIRING);
         return;
     }

@@ -159,16 +159,43 @@ void BleService::startClient(void *data)
 
     // ── Step 2: Wait for the link to be encrypted ─────────────────────────────
     //
-    // iOS will not expose ANCS until the BLE link is encrypted (MITM bonded).
-    // onAuthenticationComplete fires from the NimBLE host task; we poll
-    // ble_gap_conn_find() so we don't block that task with a semaphore.
+    // Bonded reconnect: iOS fires LL_START_ENC_REQ automatically within ~300 ms
+    // and encryption completes before our 1500 ms Security-Request timer fires.
+    //
+    // Stale-bond (ESP32 has no matching LTK): NimBLE sends LTK_Request_Negative_
+    // Reply → controller sends LL_REJECT_EXT_IND(PIN_or_Key_Missing) →
+    // BLE_GAP_EVENT_ENC_CHANGE(fail) → onAuthenticationComplete(fail) deletes the
+    // local bond entry and returns WITHOUT calling startSecurity().  The connection
+    // stays alive.  At T=1500 ms the wait loop below sends the Security Request
+    // from the client task context (safe — not inside the NimBLE host callback).
+    // iOS, having received PIN_or_Key_Missing, has deleted its own LTK and will
+    // respond with a fresh Pairing Request → iOS pairing dialog appears.
+    //
+    // Fresh pairing (no bond on either side): iOS never sends LL_START_ENC_REQ.
+    // At T=1500 ms we send the Security Request → iOS pairing dialog appears.
+    //
+    // IMPORTANT: do NOT call startSecurity() from onAuthenticationComplete.
+    // That callback runs on the NimBLE host task while SMP is still unwinding
+    // the failed encryption.  Calling ble_gap_security_initiate() re-enters the
+    // SMP state machine mid-transition, causing NimBLE to terminate the
+    // connection with a MIC failure (reason 573).  iOS treats MIC failure as our
+    // error, retains its bond, and retries LL_START_ENC_REQ on every reconnect.
     {
-        ESP_LOGI(TAG, "Waiting for encryption (up to 10 s)...");
+        static constexpr uint32_t SECURITY_REQUEST_DELAY_MS = 1500;
+        ESP_LOGI(TAG, "Waiting for encryption (up to 30 s)...");
         ble_gap_conn_desc authDesc{};
-        TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(10000);
-        bool encrypted = false;
+        const TickType_t encWaitStart  = xTaskGetTickCount();
+        const TickType_t deadline      = encWaitStart + pdMS_TO_TICKS(30000);
+        bool encrypted         = false;
+        bool securityRequested = false;
         while (xTaskGetTickCount() < deadline)
         {
+            // Notification from onDisconnect — exit immediately.
+            if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100)) != 0)
+            {
+                ESP_LOGW(TAG, "Connection lost while waiting for encryption");
+                goto EndTask;
+            }
             if (ble_gap_conn_find(connHandle, &authDesc) != 0)
             {
                 ESP_LOGW(TAG, "Connection lost while waiting for encryption");
@@ -179,7 +206,15 @@ void BleService::startClient(void *data)
                 encrypted = true;
                 break;
             }
-            vTaskDelay(pdMS_TO_TICKS(100));
+            // iOS has not started encryption — send a Security Request to prompt
+            // the iOS pairing dialog (covers fresh pairing and stale-bond cases).
+            if (!securityRequested &&
+                (xTaskGetTickCount() - encWaitStart) >= pdMS_TO_TICKS(SECURITY_REQUEST_DELAY_MS))
+            {
+                ESP_LOGI(TAG, "iOS has not encrypted — sending Security Request");
+                NimBLEDevice::startSecurity(connHandle);
+                securityRequested = true;
+            }
         }
         if (!encrypted)
         {
@@ -367,8 +402,20 @@ EndTask:
     bleService->_currentClientParam  = nullptr;
     delete clientParam;
 
-    ESP_LOGI(TAG, "Restarting advertising after disconnect");
-    bleService->_restartAdvertising();
+    // Only restart advertising if onConnect did NOT spawn a new client task
+    // while we were cleaning up.  If _clientTaskHandle is non-null here, it
+    // means onConnect fired during EndTask (after we set it null above) and
+    // already created a new task for the reconnection — restarting advertising
+    // in that case is harmless but skipping it avoids a redundant GAP call.
+    if (bleService->_clientTaskHandle == nullptr)
+    {
+        ESP_LOGI(TAG, "Restarting advertising after disconnect");
+        bleService->_restartAdvertising();
+    }
+    else
+    {
+        ESP_LOGI(TAG, "New connection already handled — skipping advertising restart");
+    }
     vTaskDelete(nullptr);
 }
 
@@ -486,16 +533,25 @@ void BleService::ServerCallback::onConnect(NimBLEServer *pServer, NimBLEConnInfo
 {
     ESP_LOGI(TAG, "Device connected %s", connInfo.getAddress().toString().c_str());
     ancsService->_isConnected.store(true);
+    ancsService->_everEncrypted.store(false); // reset per-connection encryption flag
 
     if (ancsService->_serverCallback != nullptr)
     {
         ancsService->_serverCallback->onConnect();
     }
 
-    // Send a BLE Security Request to iOS so it initiates SMP pairing immediately.
-    // Without this, neither side starts the security handshake and ANCS (which
-    // requires an encrypted link) is never exposed by iOS.
-    NimBLEDevice::startSecurity(connInfo.getConnHandle());
+    // Do NOT call startSecurity() here.
+    //
+    // For a bonded reconnect (the common case — iOS came back in range), iOS
+    // fires LL_START_ENC_REQ automatically within ~100-300 ms of connecting.
+    // Sending an SMP Security Request at the same moment races with iOS's own
+    // encryption initiation, corrupting the SMP state machine.  iOS responds
+    // with TERMINATE_IND (disconnect reason 531 = BLE_ERR_REM_USER_CONN_TERM)
+    // before encryption can complete, and onAuthenticationComplete never fires.
+    //
+    // The client task (startClient) will send a Security Request after a short
+    // delay if iOS has NOT started encryption on its own — that covers the
+    // fresh (un-bonded) connection case where iOS needs to be prompted.
 
     // Spawn the GATT client task, passing the conn handle so it can call
     // getServer()->getClient(connHandle) to attach to this GAP connection.
@@ -517,6 +573,30 @@ void BleService::ServerCallback::onDisconnect(NimBLEServer *pServer, NimBLEConnI
     // Drain stale pending notifications so they are not replayed on the next connection.
     Notifications.clearPendingNotifications();
 
+    // ── Bond-mismatch detection ───────────────────────────────────────────────
+    //
+    // Reason 531 = BLE_HS_ERR_HCI_BASE(512) + BLE_ERR_REM_USER_CONN_TERM(0x13):
+    // iOS explicitly terminated the connection.  When this happens WITHOUT the
+    // link ever having been encrypted (_everEncrypted == false), it means iOS
+    // sent LL_START_ENC_REQ with its stored LTK and NimBLE replied with
+    // LTK_Request_Negative_Reply (no matching bond in our NVS store).
+    // iOS received LL_REJECT_EXT_IND(PIN_or_Key_Missing) and terminated.
+    //
+    // Note: BLE_GAP_EVENT_ENC_CHANGE does NOT fire in this NimBLE version for
+    // the LTK-missing path — the SM proc is cleaned up on HCI_Disconnection_
+    // Complete without surfacing an ENC_CHANGE event, so onAuthenticationComplete
+    // is never called.  This onDisconnect hook is the only place to detect it.
+    //
+    // Recovery: delete our (possibly stale) local bond for this peer so that
+    // NimBLE won't try to present a wrong LTK on the next attempt, then display
+    // guidance asking the user to Forget the device in iOS Settings.  Modern iOS
+    // does not automatically initiate fresh SMP after receiving PIN_or_Key_Missing
+    // — the user must manually Forget once, after which fresh pairing succeeds
+    // and the bond is stored in NVS (CONFIG_BT_NIMBLE_NVS_PERSIST=y).
+    static constexpr int REASON_IOS_TERMINATED = 531;
+    const bool bondMismatch = (!ancsService->_everEncrypted.load() &&
+                               reason == REASON_IOS_TERMINATED);
+
     if (ancsService->_clientTaskHandle != nullptr)
     {
         // Wake the client task so it exits its keep-alive loop and cleans up.
@@ -531,7 +611,18 @@ void BleService::ServerCallback::onDisconnect(NimBLEServer *pServer, NimBLEConnI
 
     if (ancsService->_serverCallback != nullptr)
     {
-        ancsService->_serverCallback->onDisconnect();
+        ancsService->_serverCallback->onDisconnect(); // sets BLE_DISCONNECTED
+    }
+
+    // Override state AFTER the server callback so BLE_PAIRING is not
+    // overwritten by the MainServerCallback's setBLEConnectionState(BLE_DISCONNECTED).
+    if (bondMismatch)
+    {
+        ESP_LOGW(TAG, "Bond mismatch — iOS has LTK but we have none. "
+                      "User must Forget this device in iOS Settings > Bluetooth.");
+        NimBLEDevice::deleteBond(connInfo.getIdAddress());
+        Heltec.pairing("Forget on iOS");
+        Heltec.setBLEConnectionState(BLE_PAIRING);
     }
 }
 
@@ -557,58 +648,27 @@ void BleService::ServerCallback::onAuthenticationComplete(NimBLEConnInfo &connIn
     if (!connInfo.isEncrypted())
     {
         ESP_LOGW(TAG, "Encryption failed (conn_handle=%d)", connInfo.getConnHandle());
-        Heltec.setBLEConnectionState(BLE_DISCONNECTED);
 
-        if (ancsService->_bondsJustCleared.load())
-        {
-            // Bonds were already cleared on a previous attempt but iOS is still
-            // presenting the now-invalid LTK.  Do NOT disconnect — stay connected
-            // so iOS can detect the key-missing rejection from NimBLE and issue a
-            // fresh Pairing Request on this same connection.  The client task's
-            // 10 s encryption-wait timeout will disconnect if iOS does not re-pair.
-            ESP_LOGW(TAG, "Post-bond-clear auth failure — staying connected for iOS re-pair");
-            return;
-        }
-
-        if (ancsService->noteAuthFail())
-        {
-            int rc = ble_store_clear();
-            ESP_LOGW(TAG, "Auth fail threshold reached — cleared all bonds (%d)", rc);
-            ancsService->_bondsJustCleared.store(true);
-            // Reset the streak so subsequent failures don't keep calling ble_store_clear().
-            ancsService->resetAuthStreak();
-            // Do NOT disconnect: iOS still holds its LTK and will keep re-using it
-            // if we force a new connection cycle.  By staying connected here, NimBLE's
-            // PIN/key-missing response gives iOS the opportunity to send a new Pairing
-            // Request on this live connection instead of looping forever.
-            ESP_LOGI(TAG, "Bonds cleared — staying connected, awaiting iOS fresh pairing");
-            return;
-        }
-
-        // Below threshold: transient SMP failure.  Disconnect and let iOS retry.
-        NimBLEDevice::getServer()->disconnect(connInfo.getConnHandle());
+        // Delete our stale bond so the next Security Request triggers a fresh
+        // Pairing Request from iOS (rather than another LTK retry).
+        // Do NOT call startSecurity() here — this callback runs on the NimBLE
+        // host task while SMP is still unwinding the failed encryption.
+        // Calling ble_gap_security_initiate() mid-unwind causes NimBLE to
+        // terminate with MIC failure, which makes iOS retain its bond and
+        // retry the same LTK on every future reconnect (infinite failure loop).
+        // The client task's wait loop will send the Security Request safely
+        // 1500 ms after connection, by which point SMP is fully settled.
+        NimBLEDevice::deleteBond(connInfo.getIdAddress());
+        ESP_LOGI(TAG, "Local bond deleted — wait loop will send Security Request");
+        Heltec.setBLEConnectionState(BLE_PAIRING);
         return;
     }
 
     ESP_LOGI(TAG, "Authentication successful (encrypted=%d, authenticated=%d, bonded=%d)",
         connInfo.isEncrypted(), connInfo.isAuthenticated(), connInfo.isBonded());
-    ancsService->_bondsJustCleared.store(false);
+    ancsService->_everEncrypted.store(true);
     ancsService->resetAuthStreak();
     Heltec.setBLEConnectionState(BLE_CONNECTED);
-}
-
-bool BleService::noteAuthFail()
-{
-    int streak = _authFailStreak.fetch_add(1) + 1;
-    ESP_LOGW(TAG, "Auth fail streak: %d / %d", streak, AUTH_FAIL_PAIRING_THRESHOLD);
-
-    if (streak >= AUTH_FAIL_PAIRING_THRESHOLD)
-    {
-        ESP_LOGW(TAG, "MITM pairing requires user action: go to iOS Settings > Bluetooth");
-        Heltec.pairing("iOS Settings");
-        return true;
-    }
-    return false;
 }
 
 /* extern */

@@ -246,8 +246,17 @@ void Hardware::standby()
             portENTER_CRITICAL(&mHardwareLock);
             memcpy(localMsg, mMessage, sizeof(localMsg));
             portEXIT_CRITICAL(&mHardwareLock);
-            mDisplay.drawStr(0, 36, "Pairing", Font_11x18, TFT::Color::WHITE);
-            mDisplay.drawStr(0, 60, localMsg, Font_11x18, TFT::Color::WHITE);
+            // "Forget on iOS" = bond-mismatch hint; numeric codes = passkey display.
+            // Use a smaller font for the hint so it fits without clipping.
+            if (strncmp(localMsg, "Forget", 6) == 0) {
+                mDisplay.drawStr(0, 28, "Pairing failed:", Font_7x10, TFT::Color::WHITE);
+                mDisplay.drawStr(0, 42, "iOS Settings >", Font_7x10, TFT::Color::WHITE);
+                mDisplay.drawStr(0, 56, "Bluetooth >", Font_7x10, TFT::Color::WHITE);
+                mDisplay.drawStr(0, 70, "Forget device", Font_7x10, TFT::Color::WHITE);
+            } else {
+                mDisplay.drawStr(0, 36, "Pairing", Font_11x18, TFT::Color::WHITE);
+                mDisplay.drawStr(0, 60, localMsg, Font_11x18, TFT::Color::WHITE);
+            }
             break;
         }
         case BLE_DISCONNECTED:

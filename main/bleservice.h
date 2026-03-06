@@ -63,7 +63,6 @@ class BleService
         void setBatteryLevel(uint8_t level);
         void setTimeCallback(TimeCallback cb);
         bool isConnected() const { return _isConnected.load(); }
-        bool noteAuthFail();
         void resetAuthStreak() { _authFailStreak.store(0); }
 
     private:
@@ -117,7 +116,7 @@ class BleService
 
         std::atomic<bool> _isConnected{false};
         std::atomic<int>  _authFailStreak{0};
-        std::atomic<bool> _bondsJustCleared{false};
+        std::atomic<bool> _everEncrypted{false}; // true once onAuthenticationComplete succeeds
         static constexpr int AUTH_FAIL_PAIRING_THRESHOLD = 2;
 
         void _restartAdvertising();

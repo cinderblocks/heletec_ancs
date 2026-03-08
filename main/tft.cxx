@@ -59,10 +59,10 @@ TFT::TFT(int8_t cs_pin, int8_t rest_pin, int8_t dc_pin, int8_t sclk_pin,
 ,   _mosi_pin(mosi_pin)
 ,   _led_k_pin(led_k_pin)
 ,   _vtft_ctrl_pin(vtft_ctrl_pin)
-,   _width(ST7735_WIDTH)
-,   _height(ST7735_HEIGHT)
-,   _x_start(ST7735_XSTART)
-,   _y_start(ST7735_YSTART)
+,   _width(static_cast<uint8_t>(ST7735_WIDTH))
+,   _height(static_cast<uint8_t>(ST7735_HEIGHT))
+,   _x_start(static_cast<uint8_t>(ST7735_XSTART))
+,   _y_start(static_cast<uint8_t>(ST7735_YSTART))
 { }
 
 void TFT::reset(void)
@@ -112,17 +112,17 @@ void TFT::writeData(uint8_t* buff, size_t buff_size)
     spi_device_polling_transmit(_spi, &t);
 }
 
-void TFT::setAddressWindow(uint8_t x, uint8_t y, uint8_t w, uint8_t h)
+void TFT::setAddressWindow(uint8_t x1, uint8_t y1, uint8_t x2, uint8_t y2)
 {
     // column address set
     writeCommand(CASET);
-    uint8_t data[4] = { 0x00, static_cast<uint8_t>(x + _x_start), 0x00, static_cast<uint8_t>(w + _x_start) };
+    uint8_t data[4] = { 0x00, static_cast<uint8_t>(x1 + _x_start), 0x00, static_cast<uint8_t>(x2 + _x_start) };
     writeData(data, sizeof(data));
 
     // row address set
     writeCommand(RASET);
-    data[1] = y + _y_start;
-    data[3] = h + _y_start;
+    data[1] = y1 + _y_start;
+    data[3] = y2 + _y_start;
     writeData(data, sizeof(data));
 
     // write to RAM
@@ -180,7 +180,7 @@ void TFT::init(void)
     buscfg.sclk_io_num     = _sclk_pin;
     buscfg.quadwp_io_num   = -1;
     buscfg.quadhd_io_num   = -1;
-    buscfg.max_transfer_sz = ST7735_WIDTH * static_cast<int>(sizeof(uint16_t));
+    buscfg.max_transfer_sz = static_cast<int>(_width) * static_cast<int>(sizeof(uint16_t));
     esp_err_t ret = spi_bus_initialize(TFT_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "spi_bus_initialize: %s", esp_err_to_name(ret));

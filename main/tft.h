@@ -138,7 +138,7 @@ private:
 	void writeCommand(uint8_t cmd);
 	void writeData(uint8_t data);
 	void writeData(uint8_t* buff, size_t buff_size);
-	void setAddressWindow(uint8_t x, uint8_t y, uint8_t w, uint8_t h);
+	void setAddressWindow(uint8_t x1, uint8_t y1, uint8_t x2, uint8_t y2);
 	int8_t 	  _cs_pin;
 	int8_t    _rest_pin;
 	int8_t    _dc_pin;
@@ -146,10 +146,10 @@ private:
 	int8_t    _mosi_pin;
 	int8_t    _led_k_pin;
 	int8_t    _vtft_ctrl_pin;
-	uint16_t _width;
-	uint16_t _height;
-	uint16_t _x_start;
-	uint16_t _y_start;
+	uint8_t  _width;
+	uint8_t  _height;
+	uint8_t  _x_start;
+	uint8_t  _y_start;
 
 	// IDF SPI master driver handle
 	spi_device_handle_t _spi = nullptr;

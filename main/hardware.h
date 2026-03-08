@@ -15,8 +15,8 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#ifndef HELTEC_H_
-#define HELTEC_H_
+#ifndef HARDWARE_H_
+#define HARDWARE_H_
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/portmacro.h>
@@ -54,19 +54,10 @@ public:
     static constexpr uint8_t ST7735_LED = 21;
 
     // Misc
-    static constexpr uint8_t BUTTON = 0;
+    static constexpr uint8_t BUTTON     = 0;
     static constexpr uint8_t FACTORY_LED = 18;
-    static constexpr uint8_t VBAT_READ = 1;
-    static constexpr uint8_t BUZZER = 45;
-
-    // LoRa
-    static constexpr uint8_t NSS = 8;
-    static constexpr uint8_t CLK = 9;
-    static constexpr uint8_t MOSI = 10;
-    static constexpr uint8_t MISO = 11;
-    static constexpr uint8_t RESET = 12;
-    static constexpr uint8_t BUSY = 13;
-    static constexpr uint8_t DIO_1 = 14;
+    static constexpr uint8_t VBAT_READ  = 1;
+    static constexpr uint8_t BUZZER     = 45;
 
     static constexpr uint16_t HEADER_COLOR = 0x3190;
 
@@ -78,7 +69,7 @@ public:
     static constexpr uint32_t DRAW_GPS     = (1u << 4); // GPS fix state changed
 
     Hardware();
-    virtual ~Hardware();
+    ~Hardware();
     void begin();
 
     void pairing(const char* passcode);
@@ -97,9 +88,6 @@ public:
 
     uint8_t getBatteryLevel();
 
-protected:
-    TaskHandle_t mDrawTask = nullptr;
-
 private:
     static void startDrawing(void* pvParameters);
     static void batteryTimerCallback(TimerHandle_t xTimer);
@@ -111,6 +99,8 @@ private:
     void showBLEState(conn_state_def state);
     void showBatteryLevel(uint8_t percent);
     void standby();
+
+    TaskHandle_t mDrawTask = nullptr;
 
     TFT mDisplay;
     conn_state_def mBleState = BLE_DISCONNECTED;
@@ -131,4 +121,4 @@ private:
 
 extern Hardware Heltec;
 
-#endif // HELTEC_H_
+#endif // HARDWARE_H_

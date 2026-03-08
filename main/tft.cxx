@@ -29,9 +29,8 @@
 
 static const char* TAG = "tft";
 
-// SPI3_HOST = Arduino's HSPI (index 1 in the ESP32-S3 Arduino bus array,
-// mapped to DR_REG_SPI3_BASE).  The Arduino SPI HAL uses direct register
-// writes (not spi_bus_initialize), so there is no driver conflict.
+// SPI3_HOST on ESP32-S3 — driven by the IDF spi_master driver.
+// 40 MHz works reliably through the GPIO matrix with short PCB traces.
 static constexpr spi_host_device_t TFT_SPI_HOST = SPI3_HOST;
 
 // Maximum SPI clock for the ST7735S.  40 MHz works reliably through the
@@ -290,11 +289,6 @@ void TFT::drawChar(uint16_t x, uint16_t y, char ch, FontDef font, uint16_t color
         }
         spi_device_polling_transmit(_spi, &t);
     }
-}
-
-void TFT::drawStr(uint16_t x, uint16_t y, String const& str_data, FontDef font, uint16_t color, uint16_t bgcolor)
-{
-    drawStr(x, y, str_data.c_str(), font, color, bgcolor);
 }
 
 void TFT::drawStr(uint16_t x, uint16_t y, const char* str, FontDef font, uint16_t color, uint16_t bgcolor)

@@ -20,7 +20,6 @@
 #ifndef TFT_H_
 #define TFT_H_
 
-#include <Arduino.h>
 #include <driver/spi_master.h>
 #include "fonts.h"
 
@@ -69,11 +68,10 @@ public:
 	} MADCTL_ARG;
 
 	TFT(int8_t cs_pin, int8_t rest_pin, int8_t dc_pin, int8_t sclk_pin, int8_t mosi_pin, int8_t led_k_pin, int8_t vtft_ctrl_pin);
-	virtual ~TFT() = default;;
+	~TFT() = default;
 	void init(void);
 	void drawPixel(uint16_t x, uint16_t y, uint16_t color);
 	void drawChar(uint16_t x, uint16_t y, char ch, FontDef font, uint16_t color, uint16_t bgcolor);
-	void drawStr(uint16_t x, uint16_t y, String const& str_data, FontDef font=Font_11x18, uint16_t color=BLUE, uint16_t bgcolor=BLACK);
 	void drawStr(uint16_t x, uint16_t y, const char *str, FontDef font=Font_11x18, uint16_t color=BLUE, uint16_t bgcolor=BLACK);
 	void fillRectangle(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t color);
 	void fillScreen(uint16_t color);

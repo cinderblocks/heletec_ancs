@@ -54,7 +54,7 @@ class BleService
 {
     public:
         BleService(NotificationCallback notificationSourceCallback, NotificationCallback dataSourceCallback);
-        virtual ~BleService();
+        ~BleService();
         void startServer(const char* appName);
         void retrieveNotificationData(uint32_t notifyUUID) const;
         void setServerCallback(ANCSServiceServerCallback *serverCallback);

@@ -57,10 +57,9 @@ BleService::~BleService()
     }
 }
 
-void BleService::startServer(String const& appName)
+void BleService::startServer(const char* appName)
 {
-    // Initialize device
-    NimBLEDevice::init(std::string(appName.c_str()));
+    NimBLEDevice::init(appName);
     NimBLEDevice::setPower(9);  // +9 dBm (max for ESP32-S3)
 
     // Security: bonding + MITM + secure connections, display-only IO capability
@@ -602,16 +601,18 @@ uint32_t BleService::ServerCallback::onPassKeyDisplay()
 {
     uint32_t passkey = NimBLEDevice::getSecurityPasskey();
     ESP_LOGI(TAG, "Passkey display: %06lu", (unsigned long)passkey);
-    Heltec.pairing(String(passkey));
+    char buf[7];
+    snprintf(buf, sizeof(buf), "%06lu", (unsigned long)passkey);
+    Heltec.pairing(buf);
     return passkey;
 }
 
 void BleService::ServerCallback::onConfirmPassKey(NimBLEConnInfo &connInfo, uint32_t pin)
 {
     ESP_LOGI(TAG, "Confirm passkey: %06lu", (unsigned long)pin);
-    Heltec.pairing(String(pin));
-    // With DISPLAY_YES_NO both sides show the same 6-digit number and the user
-    // taps YES on iOS. The ESP32 auto-confirms here; iOS handles the user prompt.
+    char buf[7];
+    snprintf(buf, sizeof(buf), "%06lu", (unsigned long)pin);
+    Heltec.pairing(buf);
     NimBLEDevice::injectConfirmPasskey(connInfo, true);
 }
 

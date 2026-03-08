@@ -20,15 +20,14 @@
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#include <Arduino.h>
 
 class Task {
 public:
-    explicit Task(String const& taskName = "Task", uint16_t stackSize = 10000, uint8_t priority = 5);
+    explicit Task(const char* taskName = "Task", uint16_t stackSize = 10000, uint8_t priority = 5);
     virtual ~Task();
     void setStackSize(uint16_t stackSize);
     void setPriority(uint8_t priority);
-    void setName(String const& name);
+    void setName(const char* name);
     void setCore(BaseType_t coreId);
     void start(void* taskData = nullptr);
     void stop();
@@ -48,7 +47,7 @@ private:
     TaskHandle_t m_handle;
     void*        m_taskData;
     static void  runTask(void* pTaskInstance);
-    String       m_taskName;
+    const char*  m_taskName;
     uint16_t     m_stackSize;
     uint8_t      m_priority;
     BaseType_t   m_coreId;

@@ -24,7 +24,7 @@
 class GPS : public Task
 {
 public:
-    GPS(String const& name, uint16_t stack_size);
+    GPS(const char* name, uint16_t stack_size);
 private:
     void run(void *data) override;
 

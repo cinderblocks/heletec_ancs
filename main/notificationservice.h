@@ -20,7 +20,6 @@
 
 #include "applist.h"
 #include "task.h"
-#include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/semphr.h>
@@ -42,15 +41,15 @@ struct ancs_event_t {
 
 struct notification_def
 {
-    String title = "";
-    String message = "";
+    char title[64]   = {};
+    char message[128] = {};
     time_t time = 0;
     application_def type = APP_UNKNOWN;
     uint32_t key = 0;
-    boolean showed = false;
-    boolean isComplete = false;
-    uint8_t receivedAttributes = 0; // bitmask: bit0=Title, bit1=Message, bit2=Date
-    TickType_t fetchStartTime = 0;  // set when fetch begins; used to detect stuck fetches
+    bool showed = false;
+    bool isComplete = false;
+    uint8_t receivedAttributes = 0;
+    TickType_t fetchStartTime = 0;
 
     static constexpr uint8_t ATTR_TITLE   = (1u << 0);
     static constexpr uint8_t ATTR_MESSAGE = (1u << 1);
@@ -61,8 +60,8 @@ struct notification_def
 
     void reset()
     {
-        title = "";
-        message = "";
+        title[0]  = '\0';
+        message[0] = '\0';
         time = 0;
         showed = false;
         isComplete = false;
@@ -83,7 +82,7 @@ public:
     void addPendingNotification(uint32_t uuid);
     void clearPendingNotifications();
     void addNotification(notification_def const& notification, bool isCalling);
-    void setNotificationAttribute(uint32_t uuid, uint8_t attributeId, String const& value);
+    void setNotificationAttribute(uint32_t uuid, uint8_t attributeId, const char* value);
     bool resetForUpdate(uint32_t uuid);
     bool removeIfCall(uint32_t uuid);
     bool removeNotification(uint32_t uuid);
@@ -128,7 +127,7 @@ private:
 class NotificationDescription final : public Task
 {
 public:
-    NotificationDescription(String const& name, uint16_t stack_size);
+    NotificationDescription(const char* name, uint16_t stack_size);
 private:
     void run(void *data) override;
 };

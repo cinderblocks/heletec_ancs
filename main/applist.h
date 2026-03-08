@@ -18,7 +18,7 @@
 #ifndef APP_LIST_H_
 #define APP_LIST_H_
 
-#include <Arduino.h>
+#include <stddef.h>
 
 typedef enum
 {
@@ -49,9 +49,9 @@ struct AppDisplayName {
 class ApplicationList
 {
 public:
-    bool isAllowedApplication(String const &appName) const;
-    application_def getApplicationId(String const& appName) const;
-    String getDisplayName(application_def appId) const;
+    bool isAllowedApplication(const char* appName) const;
+    application_def getApplicationId(const char* appName) const;
+    const char* getDisplayName(application_def appId) const;
 private:
     static constexpr AppMapping allowedApplications[] = {
         {"com.apple.MobileSMS", APP_SMS},

@@ -27,7 +27,7 @@ static const char* TAG = "gps";
 // Use UART1 for the UC6580.
 static constexpr uart_port_t GPS_UART = UART_NUM_1;
 
-GPS::GPS(String const& name, uint16_t stack_size)
+GPS::GPS(const char* name, uint16_t stack_size)
 :   Task(name, stack_size, 1)
 { }
 

@@ -16,45 +16,40 @@
  */
 
 #include "applist.h"
+#include <cstring>
 
 // Define static constexpr arrays
 constexpr AppMapping ApplicationList::allowedApplications[];
 constexpr AppDisplayName ApplicationList::applicationNames[];
 
-bool ApplicationList::isAllowedApplication(String const& appName) const
+bool ApplicationList::isAllowedApplication(const char* appName) const
 {
     for (size_t i = 0; i < allowedAppCount; i++)
     {
-        if (appName == allowedApplications[i].bundleId)
-        {
+        if (strcmp(appName, allowedApplications[i].bundleId) == 0)
             return true;
-        }
     }
     return false;
 }
 
-application_def ApplicationList::getApplicationId(String const& appName) const
+application_def ApplicationList::getApplicationId(const char* appName) const
 {
     for (size_t i = 0; i < allowedAppCount; i++)
     {
-        if (appName == allowedApplications[i].bundleId)
-        {
+        if (strcmp(appName, allowedApplications[i].bundleId) == 0)
             return allowedApplications[i].appId;
-        }
     }
     return APP_UNKNOWN;
 }
 
-String ApplicationList::getDisplayName(application_def appId) const
+const char* ApplicationList::getDisplayName(application_def appId) const
 {
     for (size_t i = 0; i < appNameCount; i++)
     {
         if (applicationNames[i].appId == appId)
-        {
-            return String(applicationNames[i].displayName);
-        }
+            return applicationNames[i].displayName;
     }
-    return String();
+    return "";
 }
 
 /* extern */

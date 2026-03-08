@@ -8,12 +8,12 @@ set(SOURCE_FILES
     hardware.cxx
     main.cxx
     notificationservice.cxx
-    security.cxx
     task.cxx
     tft.cxx
 )
 
 set(REQUIRES
+    arduino-esp32
     esp_tinygpsplusplus
     spi_flash
     bt

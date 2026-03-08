@@ -19,7 +19,6 @@
 #define BLE_SERVICE_H
 
 #include <atomic>
-#include <Arduino.h>
 #include <NimBLEDevice.h>
 #include <freertos/semphr.h>
 #include <time.h>
@@ -56,7 +55,7 @@ class BleService
     public:
         BleService(NotificationCallback notificationSourceCallback, NotificationCallback dataSourceCallback);
         virtual ~BleService();
-        void startServer(String const& appName);
+        void startServer(const char* appName);
         void retrieveNotificationData(uint32_t notifyUUID) const;
         void setServerCallback(ANCSServiceServerCallback *serverCallback);
         void setClientCallback(ANCSServiceClientCallback *clientCallback);

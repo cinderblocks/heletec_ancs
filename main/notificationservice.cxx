@@ -21,6 +21,7 @@
 #include "bleservice.h"
 #include "hardware.h"
 #include <NimBLERemoteCharacteristic.h>
+#include <algorithm>
 #include <cinttypes>
 #include <cstring>
 
@@ -93,12 +94,11 @@ void NotificationService::NotificationSourceNotifyCallback(NimBLERemoteCharacter
     xQueueSend(Notifications.mEventQueue, &event, 0); // non-blocking; drop if full
 }
 
-void NotificationService::setNotificationAttribute(uint32_t uuid, uint8_t attributeId, String const& value)
+void NotificationService::setNotificationAttribute(uint32_t uuid, uint8_t attributeId, const char* value)
 {
     bool shouldNotify = false;
 
     xSemaphoreTake(mMutex, portMAX_DELAY);
-    // Locate the notification — could be in the call slot or the regular list
     notification_def *notification = nullptr;
     if (callingNotification.key == uuid) {
         notification = &callingNotification;
@@ -110,18 +110,20 @@ void NotificationService::setNotificationAttribute(uint32_t uuid, uint8_t attrib
     if (notification != nullptr) {
         switch (attributeId) {
             case ANCS::NotificationAttributeIDTitle:
-                notification->title = value;
+                strncpy(notification->title, value, sizeof(notification->title) - 1);
+                notification->title[sizeof(notification->title) - 1] = '\0';
                 notification->receivedAttributes |= notification_def::ATTR_TITLE;
-                Serial.println(value.c_str());
+                ESP_LOGI(TAG, "Title: %s", notification->title);
                 break;
             case ANCS::NotificationAttributeIDMessage:
-                notification->message = value;
+                strncpy(notification->message, value, sizeof(notification->message) - 1);
+                notification->message[sizeof(notification->message) - 1] = '\0';
                 notification->receivedAttributes |= notification_def::ATTR_MESSAGE;
-                Serial.println(value.c_str());
+                ESP_LOGI(TAG, "Message: %s", notification->message);
                 break;
             case ANCS::NotificationAttributeIDDate: {
                 tm t = {};
-                strptime(value.c_str(), "%Y%m%dT%H%M%S", &t);
+                strptime(value, "%Y%m%dT%H%M%S", &t);
                 notification->time = mktime(&t);
                 notification->receivedAttributes |= notification_def::ATTR_DATE;
                 break;
@@ -129,9 +131,6 @@ void NotificationService::setNotificationAttribute(uint32_t uuid, uint8_t attrib
             default:
                 break;
         }
-        // Mark complete once all three requested attributes have arrived.
-        // Using a received-bitmask instead of isEmpty()/time!=0 correctly handles
-        // notifications whose message body is intentionally empty (calls, timers, etc.).
         if (!notification->isComplete &&
             (notification->receivedAttributes & notification_def::ATTR_ALL) == notification_def::ATTR_ALL)
         {
@@ -141,7 +140,6 @@ void NotificationService::setNotificationAttribute(uint32_t uuid, uint8_t attrib
     }
     xSemaphoreGive(mMutex);
 
-    // Notify outside the mutex — xTaskNotify is safe without a lock
     if (shouldNotify) {
         Heltec.notifyDraw(Hardware::DRAW_NOTIFY);
     }
@@ -460,7 +458,7 @@ void NotificationService::resetIfStale(uint32_t uuid, TickType_t timeoutTicks)
 }
 
 
-NotificationDescription::NotificationDescription(String const& name, uint16_t stack_size)
+NotificationDescription::NotificationDescription(const char* name, uint16_t stack_size)
 :   Task(name, stack_size)
 { }
 
@@ -480,11 +478,13 @@ void NotificationService::handleDataSourceEvent(const uint8_t* pData, uint8_t le
                        | ((uint32_t)pData[3] << 16)
                        | ((uint32_t)pData[4] << 24);
 
-    // Attribute data starts at byte 8; value may be empty if length <= 8
-    String message;
-    for (uint8_t i = 8; i < length; i++)
-    {
-        message += static_cast<char>(pData[i]);
+    // Attribute value is the bytes from offset 8 to end.
+    // Null-terminate into a fixed stack buffer; excess bytes are silently truncated.
+    char message[65] = {};
+    if (length > 8) {
+        size_t msgLen = std::min((size_t)(length - 8), sizeof(message) - 1);
+        memcpy(message, pData + 8, msgLen);
+        message[msgLen] = '\0';
     }
 
     if (exists(messageId))
@@ -500,11 +500,11 @@ void NotificationService::handleDataSourceEvent(const uint8_t* pData, uint8_t le
             notification.type = applicationType;
             notification.key  = messageId;
             addNotification(notification, notification.isCall());
-            ESP_LOGI(TAG, "Message from %s added", message.c_str());
+            ESP_LOGI(TAG, "Message from %s added", message);
         }
         else
         {
-            ESP_LOGI(TAG, "Message from %s suppressed", message.c_str());
+            ESP_LOGI(TAG, "Message from %s suppressed", message);
         }
     }
 }

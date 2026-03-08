@@ -18,7 +18,7 @@
 #ifndef STACK_H_
 #define STACK_H_
 
-#include <Arduino.h>
+#include <algorithm>
 
 template <typename T> class Stack;
 
@@ -36,7 +36,7 @@ class StackExt {
     void setBuffer(T* arr, size_t capacity, size_t length = 0) {
         _buf = arr;
         _cap = capacity;
-        _len = min(length, capacity);
+        _len = std::min(length, capacity);
     }
 
     bool push(const T& val) {

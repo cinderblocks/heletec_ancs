@@ -234,12 +234,10 @@ void Hardware::startDrawing(void* pvParameters)
     vTaskDelete(nullptr);
 }
 
-void Hardware::pairing(String const& passcode)
+void Hardware::pairing(const char* passcode)
 {
-    // mMessage is read by standby() in the draw task, so guard the write with the
-    // hardware spinlock to prevent a data race on the dual-core ESP32-S3.
     portENTER_CRITICAL(&mHardwareLock);
-    strncpy(mMessage, passcode.c_str(), sizeof(mMessage) - 1);
+    strncpy(mMessage, passcode, sizeof(mMessage) - 1);
     mMessage[sizeof(mMessage) - 1] = '\0';
     portEXIT_CRITICAL(&mHardwareLock);
     setBLEConnectionState(BLE_PAIRING);

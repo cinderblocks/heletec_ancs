@@ -18,7 +18,6 @@
 #ifndef HELTEC_H_
 #define HELTEC_H_
 
-#include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/portmacro.h>
 #include <esp_adc/adc_oneshot.h>
@@ -82,7 +81,7 @@ public:
     virtual ~Hardware();
     void begin();
 
-    void pairing(String const& passcode);
+    void pairing(const char* passcode);
     void setBLEConnectionState(conn_state_def state);
     void notifyDraw(uint32_t events);
     void showTime(const char* timestamp);

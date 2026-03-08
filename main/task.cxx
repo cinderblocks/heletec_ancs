@@ -32,7 +32,7 @@ static const char* LOG_TAG = "Task";
  * @param [in] priority The priority level of this task.
  * @return N/A.
  */
-Task::Task(String const& taskName, uint16_t stackSize, uint8_t priority)
+Task::Task(const char* taskName, uint16_t stackSize, uint8_t priority)
 :	m_handle(nullptr)
 ,	m_taskData(nullptr)
 ,	m_taskName(taskName)
@@ -66,9 +66,9 @@ void Task::delay(int ms)
 void Task::runTask(void* pTaskInstance)
 {
 	Task* pTask = static_cast<Task*>(pTaskInstance);
-	ESP_LOGD(LOG_TAG, ">> runTask: taskName=%s", pTask->m_taskName.c_str());
+	ESP_LOGD(LOG_TAG, ">> runTask: taskName=%s", pTask->m_taskName);
 	pTask->run(pTask->m_taskData);
-	ESP_LOGD(LOG_TAG, "<< runTask: taskName=%s", pTask->m_taskName.c_str());
+	ESP_LOGD(LOG_TAG, "<< runTask: taskName=%s", pTask->m_taskName);
 	pTask->stop();
 }
 
@@ -85,7 +85,7 @@ void Task::start(void* taskData)
 		ESP_LOGW(LOG_TAG, "Task::start - There might be a task already running!");
 	}
 	m_taskData = taskData;
-	::xTaskCreatePinnedToCore(&runTask, m_taskName.c_str(),
+	::xTaskCreatePinnedToCore(&runTask, m_taskName,
 		m_stackSize, this, m_priority, &m_handle, m_coreId);
 }
 
@@ -130,7 +130,7 @@ void Task::setPriority(uint8_t priority)
  * @param [in] name The name for the task.
  * @return N/A.
  */
-void Task::setName(String const& name)
+void Task::setName(const char* name)
 {
 	m_taskName = name;
 }

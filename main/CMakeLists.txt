@@ -14,7 +14,6 @@ set(SOURCE_FILES
 )
 
 set(REQUIRES
-    arduino-esp32
     esp_tinygpsplusplus
     spi_flash
     bt

@@ -15,7 +15,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include "Task.h"
+#include "task.h"
 #include "sdkconfig.h"
 
 #include <esp_log.h>

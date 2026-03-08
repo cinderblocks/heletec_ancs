@@ -53,7 +53,6 @@ extern "C" void app_main(void)
 {
     ESP_LOGI(TAG, "Boot count: %d", boot_count++);
 
-    initArduino();
     Heltec.begin();
     Ble.startServer(CONFIG_BLE_DEVICE_NAME);
     NotificationReceiver.start();
@@ -70,9 +69,8 @@ extern "C" void app_main(void)
         Heltec.onTimeSync(localTime, utcOffsetSec);
     });
 
-    while(true)
-    {
-        vTaskDelay(pdMS_TO_TICKS(5000));
-    }
+    // All work is done by dedicated FreeRTOS tasks.  Delete this task to
+    // reclaim its ~4 KB stack — it serves no purpose after initialization.
+    vTaskDelete(nullptr);
 }
 

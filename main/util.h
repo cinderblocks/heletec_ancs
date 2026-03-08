@@ -18,10 +18,7 @@
 #ifndef HELTEC_ANCS_UTIL_H
 #define HELTEC_ANCS_UTIL_H
 
-inline uint8_t convert_to_tz(uint8_t utc, int8_t tz_offset)
-{
-    int8_t local = (utc + tz_offset) % 24;
-    return local < 0 ? local + 24 : local;
-}
+// There was stuff here. There isn't anymore, but it's being retained as
+// a placeholder. (I would miss it if I deleted it.)
 
-#endif //HELTEC_ANCS_UTIL_H
+#endif // HELTEC_ANCS_UTIL_H

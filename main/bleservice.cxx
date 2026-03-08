@@ -20,7 +20,6 @@
 #include "ancs.h"
 #include "hardware.h"
 #include "notificationservice.h"
-#include "security.h"
 #include <NimBLEHIDDevice.h>
 #include <host/ble_gap.h>
 #include <host/ble_store.h>

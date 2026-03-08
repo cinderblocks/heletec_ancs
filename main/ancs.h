@@ -20,7 +20,7 @@
 
 namespace ANCS
 {
-    typedef enum
+    enum category_id_t
     {
         CategoryIDOther = 0,
         CategoryIDIncomingCall = 1,
@@ -34,42 +34,42 @@ namespace ANCS
         CategoryIDBusinessAndFinance = 9,
         CategoryIDLocation = 10,
         CategoryIDEntertainment = 11
-    } category_id_t;
+    };
 
-    typedef enum
+    enum event_id_t
     {
         EventIDNotificationAdded = 0,
         EventIDNotificationModified = 1,
         EventIDNotificationRemoved = 2
-    } event_id_t;
+    };
 
-    typedef enum
+    enum event_flags_t
     {
-        EventFlagSilent = (1 << 0),
-        EventFlagImportant = (1 << 1),
-        EventFlagPreExisting = (1 << 2),
-        EventFlagPositiveAction = (1 << 3),
-        EventFlagNegativeAction = (1 << 4)
-    } event_flags_t;
+        EventFlagSilent          = (1 << 0),
+        EventFlagImportant       = (1 << 1),
+        EventFlagPreExisting     = (1 << 2),
+        EventFlagPositiveAction  = (1 << 3),
+        EventFlagNegativeAction  = (1 << 4)
+    };
 
-    typedef enum
+    enum command_id_t
     {
-        CommandIDGetNotificationAttributes = 0,
-        CommandIDGetAppAttributes = 1,
-        CommandIDPerformNotificationAction = 2
-    } command_id_t;
+        CommandIDGetNotificationAttributes  = 0,
+        CommandIDGetAppAttributes           = 1,
+        CommandIDPerformNotificationAction  = 2
+    };
 
-    typedef enum
+    enum notification_attribute_id_t
     {
-        NotificationAttributeIDAppIdentifier = 0,
-        NotificationAttributeIDTitle = 1,    // (Needs to be followed by a 2-bytes max length parameter)
-        NotificationAttributeIDSubtitle = 2, // (Needs to be followed by a 2-bytes max length parameter)
-        NotificationAttributeIDMessage = 3,  // (Needs to be followed by a 2-bytes max length parameter)
-        NotificationAttributeIDMessageSize = 4,
-        NotificationAttributeIDDate = 5,
-        NotificationAttributeIDPositiveActionLabel = 6,
-        NotificationAttributeIDNegativeActionLabel = 7
-    } notification_attribute_id_t;
+        NotificationAttributeIDAppIdentifier        = 0,
+        NotificationAttributeIDTitle                = 1,  // followed by 2-byte max-length
+        NotificationAttributeIDSubtitle             = 2,  // followed by 2-byte max-length
+        NotificationAttributeIDMessage              = 3,  // followed by 2-byte max-length
+        NotificationAttributeIDMessageSize          = 4,
+        NotificationAttributeIDDate                 = 5,
+        NotificationAttributeIDPositiveActionLabel  = 6,
+        NotificationAttributeIDNegativeActionLabel  = 7
+    };
 } // namespace ANCS
 
 #endif /* ANCS_H_ */

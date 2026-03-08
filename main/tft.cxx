@@ -393,7 +393,7 @@ void TFT::drawXbm(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
         uint8_t xbm_byte = 0;
         for (uint16_t col = 0; col < w; col++) {
             if (!(col & 7)) {
-                xbm_byte = pgm_read_byte(xbm + (col >> 3) + row * widthInXbm);
+                xbm_byte = xbm[(col >> 3) + row * widthInXbm];
             } else {
                 xbm_byte >>= 1;
             }

@@ -19,14 +19,35 @@
 
 #include "tft.h"
 
-#include "malloc.h"
-#include "cstring"
-#include <SPI.h>
+#include <cstring>
+#include <driver/spi_master.h>
+#include <driver/gpio.h>
+#include <esp_heap_caps.h>
+#include <esp_log.h>
 
-#define ST7735_FREQ 40000000
-
-SPIClass st7735_spi(HSPI);
 static const char* TAG = "tft";
+
+// SPI3_HOST = Arduino's HSPI (index 1 in the ESP32-S3 Arduino bus array,
+// mapped to DR_REG_SPI3_BASE).  The Arduino SPI HAL uses direct register
+// writes (not spi_bus_initialize), so there is no driver conflict.
+static constexpr spi_host_device_t TFT_SPI_HOST = SPI3_HOST;
+
+// Maximum SPI clock for the ST7735S.  40 MHz works reliably through the
+// GPIO matrix on ESP32-S3 with short PCB traces.
+static constexpr int TFT_SPI_FREQ_HZ = 40 * 1000 * 1000;
+
+// ── DC-pin pre-transfer callback ──────────────────────────────────────────
+// Called by spi_device_polling_transmit() before every transaction.
+// t->user encodes the DC level: 0 = command (DC LOW), 1 = data (DC HIGH).
+// Stored file-scope because the IDF callback has no user-data pointer.
+static gpio_num_t s_dc_pin = GPIO_NUM_NC;
+
+static void IRAM_ATTR spi_pre_transfer_cb(spi_transaction_t* t)
+{
+    gpio_set_level(s_dc_pin, static_cast<int>(reinterpret_cast<intptr_t>(t->user)));
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────
 
 TFT::TFT(int8_t cs_pin, int8_t rest_pin, int8_t dc_pin, int8_t sclk_pin,
     int8_t mosi_pin, int8_t led_k_pin, int8_t vtft_ctrl_pin)
@@ -43,16 +64,6 @@ TFT::TFT(int8_t cs_pin, int8_t rest_pin, int8_t dc_pin, int8_t sclk_pin,
 ,   _y_start(ST7735_YSTART)
 { }
 
-void TFT::select(void)
-{
-    digitalWrite(_cs_pin, LOW);
-}
-
-void TFT::unselect(void)
-{
-    digitalWrite(_cs_pin, HIGH);
-}
-
 void TFT::reset(void)
 {
     digitalWrite(_rest_pin, LOW);
@@ -60,27 +71,44 @@ void TFT::reset(void)
     digitalWrite(_rest_pin, HIGH);
 }
 
+// Send one command byte (DC = LOW).
 void TFT::writeCommand(uint8_t cmd)
 {
-    digitalWrite(_dc_pin, LOW);
-    st7735_spi.transfer(cmd);
+    spi_transaction_t t = {};
+    t.flags     = SPI_TRANS_USE_TXDATA;
+    t.length    = 8;
+    t.tx_data[0] = cmd;
+    t.user      = reinterpret_cast<void*>(0);   // DC LOW
+    spi_device_polling_transmit(_spi, &t);
 }
 
-void TFT::writeData(uint8_t data) {
-    digitalWrite(_dc_pin, HIGH);
-    st7735_spi.transfer(data);
-}
-
-void TFT::writeData(uint8_t *buff, size_t buff_size)
+// Send one data byte (DC = HIGH).
+void TFT::writeData(uint8_t data)
 {
-    digitalWrite(_dc_pin, HIGH);
-    st7735_spi.transfer(buff, buff_size);
+    spi_transaction_t t = {};
+    t.flags     = SPI_TRANS_USE_TXDATA;
+    t.length    = 8;
+    t.tx_data[0] = data;
+    t.user      = reinterpret_cast<void*>(1);   // DC HIGH
+    spi_device_polling_transmit(_spi, &t);
 }
 
-void TFT::writeColor(uint16_t color)
+// Send a byte buffer as data (DC = HIGH).
+// For ≤4 bytes uses inline tx_data (no DMA concern).
+// Larger buffers must be in DRAM (stack/static on ESP32-S3 always qualifies).
+void TFT::writeData(uint8_t* buff, size_t buff_size)
 {
-    digitalWrite(_dc_pin, HIGH);
-    st7735_spi.transfer16(color);
+    if (buff_size == 0) return;
+    spi_transaction_t t = {};
+    t.length = buff_size * 8;
+    t.user   = reinterpret_cast<void*>(1);      // DC HIGH
+    if (buff_size <= 4) {
+        t.flags = SPI_TRANS_USE_TXDATA;
+        memcpy(t.tx_data, buff, buff_size);
+    } else {
+        t.tx_buffer = buff;                      // DRAM → DMA-capable on ESP32-S3
+    }
+    spi_device_polling_transmit(_spi, &t);
 }
 
 void TFT::setAddressWindow(uint8_t x, uint8_t y, uint8_t w, uint8_t h)
@@ -100,204 +128,182 @@ void TFT::setAddressWindow(uint8_t x, uint8_t y, uint8_t w, uint8_t h)
     writeCommand(RAMWR);
 }
 
-void TFT::init(void) {
+// ── init ──────────────────────────────────────────────────────────────────
+
+void TFT::init(void)
+{
     if ((_dc_pin < 0) || (_cs_pin < 0) || (_rest_pin < 0) || (_led_k_pin < 0)) {
-        ESP_LOGW(TAG, "Pin error: %x %x %x %x", _dc_pin, _cs_pin, _rest_pin, _led_k_pin);
+        ESP_LOGW(TAG, "Pin error: dc=%d cs=%d rst=%d led=%d",
+                 _dc_pin, _cs_pin, _rest_pin, _led_k_pin);
         return;
     }
 
+    // ── DMA pixel buffer ──────────────────────────────────────────────────
+    // Allocated before the SPI init sequence so writeData can use it for
+    // gamma tables (> 4 bytes but guaranteed DRAM from heap).
+    _dma_buf = static_cast<uint16_t*>(
+        heap_caps_malloc(ST7735_WIDTH * sizeof(uint16_t),
+                         MALLOC_CAP_DMA | MALLOC_CAP_8BIT));
+    if (!_dma_buf) {
+        ESP_LOGE(TAG, "DMA buffer allocation failed");
+        return;
+    }
+
+    // ── GPIO: VEXT, RST, LED (all plain output, not SPI) ─────────────────
     if (_vtft_ctrl_pin >= 0) {
         pinMode(_vtft_ctrl_pin, OUTPUT);
         digitalWrite(_vtft_ctrl_pin, HIGH);
     }
-
-    pinMode(_dc_pin, OUTPUT);
-    pinMode(_cs_pin, OUTPUT);
     pinMode(_rest_pin, OUTPUT);
-
     pinMode(_led_k_pin, OUTPUT);
     digitalWrite(_led_k_pin, HIGH);
 
-    st7735_spi.begin(_sclk_pin, -1, _mosi_pin, _cs_pin);
-    st7735_spi.beginTransaction(SPISettings(ST7735_FREQ, MSBFIRST, SPI_MODE0));
+    // DC pin is driven by the pre-transfer ISR callback via gpio_set_level().
+    s_dc_pin = static_cast<gpio_num_t>(_dc_pin);
+    const gpio_config_t dc_conf = {
+        .pin_bit_mask  = 1ULL << static_cast<unsigned>(_dc_pin),
+        .mode          = GPIO_MODE_OUTPUT,
+        .pull_up_en    = GPIO_PULLUP_DISABLE,
+        .pull_down_en  = GPIO_PULLDOWN_DISABLE,
+        .intr_type     = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&dc_conf);
+
+    // ── IDF SPI bus + device ──────────────────────────────────────────────
+    // CS is managed by the SPI driver; do NOT call pinMode for it here.
+    const spi_bus_config_t buscfg = {
+        .mosi_io_num     = _mosi_pin,
+        .miso_io_num     = -1,
+        .sclk_io_num     = _sclk_pin,
+        .quadwp_io_num   = -1,
+        .quadhd_io_num   = -1,
+        .max_transfer_sz = ST7735_WIDTH * static_cast<int>(sizeof(uint16_t)),
+        .flags           = 0,
+    };
+    esp_err_t ret = spi_bus_initialize(TFT_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "spi_bus_initialize: %s", esp_err_to_name(ret));
+        // Fall through — spi_bus_add_device may still succeed if bus was
+        // already initialised with compatible settings.
+    } else {
+        ESP_LOGI(TAG, "SPI bus init OK (MOSI=GPIO%d SCLK=GPIO%d)",
+                 _mosi_pin, _sclk_pin);
+    }
+
+    const spi_device_interface_config_t devcfg = {
+        .mode           = 0,                    // CPOL=0 CPHA=0
+        .clock_speed_hz = TFT_SPI_FREQ_HZ,
+        .spics_io_num   = _cs_pin,
+        .queue_size     = 1,
+        .pre_cb         = spi_pre_transfer_cb,
+    };
+    ret = spi_bus_add_device(TFT_SPI_HOST, &devcfg, &_spi);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "spi_bus_add_device: %s", esp_err_to_name(ret));
+        return;
+    }
+    ESP_LOGI(TAG, "ST7735 device added (CS=GPIO%d @ %d MHz)",
+             _cs_pin, TFT_SPI_FREQ_HZ / 1000000);
+
+    // ── ST7735 init sequence ──────────────────────────────────────────────
     reset();
-    ScopedSelect select(_cs_pin);
-    {
-        writeCommand(SWRESET);
-        delay(150);
-    }
-    {
-        writeCommand(SLPOUT);
-        delay(120);
-    }
-    {
-        writeCommand(FRMCTR1);
-        uint8_t buffer[3] = {0x01, 0x2C, 0x2D};
-        writeData(buffer, sizeof(buffer));
-    }
-    {
-        writeCommand(FRMCTR2);
-        uint8_t buffer[3] = {0x01, 0x2C, 0x2D};
-        writeData(buffer, sizeof(buffer));
-    }
-    {
-        writeCommand(FRMCTR3);
-        uint8_t buffer[6] = {0x01, 0x2C, 0x2D, 0x01, 0x2C, 0x2D};
-        writeData(buffer, sizeof(buffer));
-    }
-    {
-        writeCommand(INVCTR);
-        writeData(0x07); // no inversion
-    }
-    {
-        writeCommand(PWCTR1);
-        uint8_t buffer[3] = {0xA2, 0x02, 0x84};
-        writeData(buffer, sizeof(buffer));
-    }
-    {
-        writeCommand(PWCTR2);
-        writeData(0xC5);
-    }
-    {
-        writeCommand(PWCTR3);
-        uint8_t buffer[2] = {0x0A, 0x00};
-        writeData(buffer, sizeof(buffer));
-    }
-    {
-        writeCommand(PWCTR4);
-        uint8_t buffer[2] = {0x8A, 0x2A};
-        writeData(buffer, sizeof(buffer));
-    }
-    {
-        writeCommand(PWCTR5);
-        uint8_t buffer[2] = {0x8A, 0xEE};
-        writeData(buffer, sizeof(buffer));
-    }
-    {
-        writeCommand(VMCTR1);
-        uint8_t buffer[1] = {0x0E};
-        writeData(buffer, sizeof(buffer));
-    }
-    {
-        writeCommand(INVOFF);
-    }
-    {
-        writeCommand(MADCTL);
-        writeData(ST7735_ROTATION);
-    }
-    {
-        writeCommand(COLMOD);
-        writeData(0x05);
-    }
-#if (defined(ST7735_IS_128X128) || defined(ST7735_IS_160X128))
-    {
-        writeCommand(ST7735_CASET);
-        uint8_t buffer[4] = {0x00, 0x00, 0x00, 0x7F};
-        writeData(buffer, sizeof(buffer));
-    }
-    {
-        writeCommand(ST7735_RASET);
-        uint8_t buffer[4] = {0x00, 0x00, 0x00, 0x7F};
-        writeData(buffer, sizeof(buffer));
-    }
-#elif defined(ST7735_IS_160X80)
-    {
-        writeCommand(CASET);
-        uint8_t buffer[4] = {0x00, 0x00, 0x00, 0x4F};
-        writeData(buffer, sizeof(buffer));
-    }
-    {
-        writeCommand(RASET);
-        uint8_t buffer[4] = {0x00, 0x00, 0x00, 0x9F};
-        writeData(buffer, sizeof(buffer));
-    }
+
+    writeCommand(SWRESET); delay(150);
+    writeCommand(SLPOUT);  delay(120);
+
+    writeCommand(FRMCTR1);
+    { uint8_t b[] = {0x01, 0x2C, 0x2D}; writeData(b, sizeof(b)); }
+    writeCommand(FRMCTR2);
+    { uint8_t b[] = {0x01, 0x2C, 0x2D}; writeData(b, sizeof(b)); }
+    writeCommand(FRMCTR3);
+    { uint8_t b[] = {0x01, 0x2C, 0x2D, 0x01, 0x2C, 0x2D}; writeData(b, sizeof(b)); }
+
+    writeCommand(INVCTR);  writeData(0x07);
+
+    writeCommand(PWCTR1);  { uint8_t b[] = {0xA2, 0x02, 0x84}; writeData(b, sizeof(b)); }
+    writeCommand(PWCTR2);  writeData(0xC5);
+    writeCommand(PWCTR3);  { uint8_t b[] = {0x0A, 0x00}; writeData(b, sizeof(b)); }
+    writeCommand(PWCTR4);  { uint8_t b[] = {0x8A, 0x2A}; writeData(b, sizeof(b)); }
+    writeCommand(PWCTR5);  { uint8_t b[] = {0x8A, 0xEE}; writeData(b, sizeof(b)); }
+    writeCommand(VMCTR1);  writeData(0x0E);
+    writeCommand(INVOFF);
+    writeCommand(MADCTL);  writeData(ST7735_ROTATION);
+    writeCommand(COLMOD);  writeData(0x05);
+
+#if defined(ST7735_IS_160X80)
+    writeCommand(CASET);   { uint8_t b[] = {0x00, 0x00, 0x00, 0x4F}; writeData(b, sizeof(b)); }
+    writeCommand(RASET);   { uint8_t b[] = {0x00, 0x00, 0x00, 0x9F}; writeData(b, sizeof(b)); }
+    writeCommand(INVON);
+#elif defined(ST7735_IS_128X128) || defined(ST7735_IS_160X128)
+    writeCommand(CASET);   { uint8_t b[] = {0x00, 0x00, 0x00, 0x7F}; writeData(b, sizeof(b)); }
+    writeCommand(RASET);   { uint8_t b[] = {0x00, 0x00, 0x00, 0x7F}; writeData(b, sizeof(b)); }
 #endif
-    {
-        writeCommand(INVON);
-    }
-    {
-        writeCommand(GMCTRP1);
-        uint8_t buffer[16] = {0x02, 0x1c, 0x07, 0x12, 0x37, 0x32, 0x29, 0x2d,
-                              0x29, 0x25, 0x2B, 0x39, 0x00, 0x01, 0x03, 0x10};
-        writeData(buffer, sizeof(buffer));
-    }
-    {
-        writeCommand(GMCTRN1);
-        uint8_t buffer[16] = {0x03, 0x1d, 0x07, 0x06, 0x2E, 0x2C, 0x29, 0x2D,
-                              0x2E, 0x2E, 0x37, 0x3F, 0x00, 0x00, 0x02, 0x10};
-        writeData(buffer, sizeof(buffer));
-    }
-    {
-        writeCommand(NORON);
-        delay(10);
-    }
-    {
-        writeCommand(DISPON);
-        delay(100);
-    }
+
+    writeCommand(GMCTRP1);
+    { uint8_t b[] = {0x02,0x1c,0x07,0x12,0x37,0x32,0x29,0x2d,
+                     0x29,0x25,0x2B,0x39,0x00,0x01,0x03,0x10}; writeData(b, sizeof(b)); }
+    writeCommand(GMCTRN1);
+    { uint8_t b[] = {0x03,0x1d,0x07,0x06,0x2E,0x2C,0x29,0x2D,
+                     0x2E,0x2E,0x37,0x3F,0x00,0x00,0x02,0x10}; writeData(b, sizeof(b)); }
+
+    writeCommand(NORON);  delay(10);
+    writeCommand(DISPON); delay(100);
 }
+
+// ── Drawing primitives ────────────────────────────────────────────────────
 
 void TFT::drawPixel(uint16_t x, uint16_t y, uint16_t color)
 {
-    if ((x >= _width) || (y >= _height)) {
-        return;
-    }
+    if ((x >= _width) || (y >= _height)) return;
 
-    ScopedSelect select(_cs_pin);
+    setAddressWindow(x, y, x, y);
+    _dma_buf[0] = __builtin_bswap16(color);
 
-    setAddressWindow(x, y, x + 1, y + 1);
-    writeColor(color);
+    spi_transaction_t t = {};
+    t.length    = 16;
+    t.tx_buffer = _dma_buf;
+    t.user      = reinterpret_cast<void*>(1);
+    spi_device_polling_transmit(_spi, &t);
 }
 
 void TFT::drawChar(uint16_t x, uint16_t y, char ch, FontDef font, uint16_t color, uint16_t bgcolor)
 {
-    // Skip characters outside the printable ASCII range [32, 127).
-    // Negative indices (control chars) or indices past the font table (extended
-    // ASCII / UTF-8 continuation bytes) both cause out-of-bounds memory reads.
-    if (ch < 32 || ch >= 127) {
-        return;
-    }
+    if (ch < 32 || ch >= 127) return;
 
-    uint32_t i, b, j;
-
-    ScopedSelect select(_cs_pin);
     setAddressWindow(x, y, x + font.width - 1, y + font.height - 1);
 
-    for (i = 0; i < font.height; i++) {
-        b = font.data[(ch - 32) * font.height + i];
-        for (j = 0; j < font.width; j++) {
-            if ((b << j) & 0x8000) {
-                writeColor(color);
-            } else {
-                writeColor(bgcolor);
-            }
+    // Pre-swap colors once; font data is in flash (.rodata) so read via CPU
+    // and expand each row into _dma_buf before the DMA transaction.
+    const uint16_t color_be   = __builtin_bswap16(color);
+    const uint16_t bgcolor_be = __builtin_bswap16(bgcolor);
+
+    spi_transaction_t t = {};
+    t.length    = font.width * 16;
+    t.tx_buffer = _dma_buf;
+    t.user      = reinterpret_cast<void*>(1);
+
+    for (uint32_t row = 0; row < font.height; row++) {
+        uint32_t bits = font.data[(ch - 32) * font.height + row];
+        for (uint32_t col = 0; col < font.width; col++) {
+            _dma_buf[col] = ((bits << col) & 0x8000) ? color_be : bgcolor_be;
         }
+        spi_device_polling_transmit(_spi, &t);
     }
 }
 
-void TFT::drawStr(uint16_t x, uint16_t y, String const &str_data, FontDef font, uint16_t color, uint16_t bgcolor)
+void TFT::drawStr(uint16_t x, uint16_t y, String const& str_data, FontDef font, uint16_t color, uint16_t bgcolor)
 {
-    const char *str = str_data.c_str();
-    drawStr(x, y, str, font, color, bgcolor);
+    drawStr(x, y, str_data.c_str(), font, color, bgcolor);
 }
 
-void TFT::drawStr(uint16_t x, uint16_t y, const char *str, FontDef font, uint16_t color, uint16_t bgcolor)
+void TFT::drawStr(uint16_t x, uint16_t y, const char* str, FontDef font, uint16_t color, uint16_t bgcolor)
 {
-    // No ScopedSelect here — drawChar manages its own CS per character.
-    // Holding CS across multiple drawChar calls would be defeated anyway since
-    // each drawChar creates its own ScopedSelect that destructs (CS HIGH) on return.
     while (*str) {
         if (x + font.width >= _width) {
             x = 0;
             y += font.height;
-            if (y + font.height >= _height) {
-                break;
-            }
-            if (*str == ' ') {
-                // skip spaces in the beginning of the new line
-                str++;
-                continue;
-            }
+            if (y + font.height >= _height) break;
+            if (*str == ' ') { str++; continue; }
         }
         drawChar(x, y, *str, font, color, bgcolor);
         x += font.width;
@@ -307,22 +313,29 @@ void TFT::drawStr(uint16_t x, uint16_t y, const char *str, FontDef font, uint16_
 
 void TFT::fillRectangle(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t color)
 {
-    // clipping
     if ((x >= _width) || (y >= _height)) {
-        ESP_LOGW(TAG, "fillRectangle clipped X=%i Y=%i", x, y);
+        ESP_LOGW(TAG, "fillRectangle clipped X=%u Y=%u", x, y);
         return;
     }
-    if ((x + w - 1) >= _width) w = _width - x;
+    if ((x + w - 1) >= _width)  w = _width  - x;
     if ((y + h - 1) >= _height) h = _height - y;
-
-    ScopedSelect select(_cs_pin);
 
     setAddressWindow(x, y, x + w - 1, y + h - 1);
 
-    for (y = h; y > 0; y--) {
-        for (x = w; x > 0; x--) {
-            writeColor(color);
-        }
+    // Pre-fill the DMA buffer with the byte-swapped colour once, then blast
+    // each row in a single DMA transaction — avoids per-pixel SPI overhead.
+    const uint16_t color_be = __builtin_bswap16(color);
+    for (uint16_t i = 0; i < w; i++) {
+        _dma_buf[i] = color_be;
+    }
+
+    spi_transaction_t t = {};
+    t.length    = static_cast<size_t>(w) * 16;
+    t.tx_buffer = _dma_buf;
+    t.user      = reinterpret_cast<void*>(1);
+
+    for (uint16_t row = 0; row < h; row++) {
+        spi_device_polling_transmit(_spi, &t);
     }
 }
 
@@ -331,74 +344,77 @@ void TFT::fillScreen(uint16_t color)
     fillRectangle(0, 0, _width, _height, color);
 }
 
-void TFT::drawImage(uint16_t x, uint16_t y, uint16_t w, uint16_t h, const uint16_t *data)
+void TFT::drawImage(uint16_t x, uint16_t y, uint16_t w, uint16_t h, const uint16_t* data)
 {
-    if (x >= _width || y >= _height || (x + w - 1) >= _width || (y + h - 1) >= _height)
+    if (x >= _width || y >= _height ||
+        (x + w - 1) >= _width || (y + h - 1) >= _height)
     {
-        ESP_LOGW(TAG, "drawImage clipped X=%i Y=%i W=%i, H=%i", x, y, w, h);
+        ESP_LOGW(TAG, "drawImage clipped X=%u Y=%u W=%u H=%u", x, y, w, h);
         return;
     }
 
-    ScopedSelect select(_cs_pin);
-    setAddressWindow(x, y, x + w - 1, y + h - 1);
-    writeData((uint8_t *) data, sizeof(uint16_t) * w * h);
-}
-
-void TFT::drawXbm(uint16_t x, uint16_t y, uint16_t w, uint16_t h, const uint8_t *xbm, uint16_t color, uint16_t bgcolor)
-{
-    if (x >= _width || y >= _height || (x + w - 1) >= _width || (y + h - 1) >= _height)
-    {
-        ESP_LOGW(TAG, "drawImage clipped X=%i Y=%i W=%i, H=%i", x, y, w, h);
-        return;
-    }
-
-    ScopedSelect select(_cs_pin);
-
     setAddressWindow(x, y, x + w - 1, y + h - 1);
 
-    uint16_t widthInXbm = (w + 7) >> 3;
-    uint8_t data = 0u;
+    // data[] is in flash (.rodata) — not DMA-accessible.  Copy one row at a
+    // time into _dma_buf (DRAM) with byte-swap, then DMA to display.
+    spi_transaction_t t = {};
+    t.length    = static_cast<size_t>(w) * 16;
+    t.tx_buffer = _dma_buf;
+    t.user      = reinterpret_cast<void*>(1);
 
-    for(uint16_t yy = 0; yy < h; ++yy) {
-        for(uint16_t xx = 0; xx < w; ++xx ) {
-            if (xx & 7) {
-                data >>= 1; // Move a bit
-            } else {  // Read new data every 8 bit
-                data = pgm_read_byte(xbm + (xx >> 3) + yy * widthInXbm);
-            }
-            // if there is a bit draw it
-            if (data & 0x01) {
-                writeColor(color);
-            } else {
-                writeColor(bgcolor);
-            }
+    for (uint16_t row = 0; row < h; row++) {
+        const uint16_t* src = data + static_cast<size_t>(row) * w;
+        for (uint16_t col = 0; col < w; col++) {
+            _dma_buf[col] = __builtin_bswap16(src[col]);
         }
+        spi_device_polling_transmit(_spi, &t);
     }
 }
 
+void TFT::drawXbm(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
+                  const uint8_t* xbm, uint16_t color, uint16_t bgcolor)
+{
+    if (x >= _width || y >= _height ||
+        (x + w - 1) >= _width || (y + h - 1) >= _height)
+    {
+        ESP_LOGW(TAG, "drawXbm clipped X=%u Y=%u W=%u H=%u", x, y, w, h);
+        return;
+    }
+
+    setAddressWindow(x, y, x + w - 1, y + h - 1);
+
+    const uint16_t color_be   = __builtin_bswap16(color);
+    const uint16_t bgcolor_be = __builtin_bswap16(bgcolor);
+    const uint16_t widthInXbm = (w + 7) >> 3;
+
+    // XBM bit ordering: LSB of each byte = leftmost pixel.
+    // Read byte-by-byte from flash via CPU cache, expand into _dma_buf, DMA per row.
+    spi_transaction_t t = {};
+    t.length    = static_cast<size_t>(w) * 16;
+    t.tx_buffer = _dma_buf;
+    t.user      = reinterpret_cast<void*>(1);
+
+    for (uint16_t row = 0; row < h; row++) {
+        uint8_t xbm_byte = 0;
+        for (uint16_t col = 0; col < w; col++) {
+            if (!(col & 7)) {
+                xbm_byte = pgm_read_byte(xbm + (col >> 3) + row * widthInXbm);
+            } else {
+                xbm_byte >>= 1;
+            }
+            _dma_buf[col] = (xbm_byte & 0x01) ? color_be : bgcolor_be;
+        }
+        spi_device_polling_transmit(_spi, &t);
+    }
+}
 
 void TFT::invertColors(bool invert)
 {
-    ScopedSelect select(_cs_pin);
     writeCommand(invert ? INVON : INVOFF);
 }
 
 void TFT::setGamma(GammaDef gamma)
 {
-    uint8_t data[1] = { static_cast<uint8_t>(gamma) };
-
-    ScopedSelect select(_cs_pin);
     writeCommand(GAMSET);
-    writeData(data, sizeof(data));
-}
-
-TFT::ScopedSelect::ScopedSelect(int8_t pin)
-:   _pin(pin)
-{
-    digitalWrite(_pin, LOW);
-}
-
-TFT::ScopedSelect::~ScopedSelect()
-{
-    digitalWrite(_pin, HIGH);
+    writeData(static_cast<uint8_t>(gamma));
 }

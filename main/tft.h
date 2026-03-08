@@ -21,6 +21,7 @@
 #define TFT_H_
 
 #include <Arduino.h>
+#include <driver/spi_master.h>
 #include "fonts.h"
 
 #define ST7735_IS_160X80 1
@@ -135,34 +136,28 @@ private:
 	} CMD;
 
 	/* data */
-	void inline select(void);
-	void inline unselect(void);
 	void inline reset(void);
 	void writeCommand(uint8_t cmd);
 	void writeData(uint8_t data);
 	void writeData(uint8_t* buff, size_t buff_size);
-	void writeColor(uint16_t color);
 	void setAddressWindow(uint8_t x, uint8_t y, uint8_t w, uint8_t h);
 	int8_t 	  _cs_pin;
-	int8_t    _rest_pin;     
-	int8_t    _dc_pin;    
-	int8_t    _sclk_pin;   
-	int8_t    _mosi_pin;  
-	int8_t    _led_k_pin; 
+	int8_t    _rest_pin;
+	int8_t    _dc_pin;
+	int8_t    _sclk_pin;
+	int8_t    _mosi_pin;
+	int8_t    _led_k_pin;
 	int8_t    _vtft_ctrl_pin;
 	uint16_t _width;
 	uint16_t _height;
 	uint16_t _x_start;
 	uint16_t _y_start;
 
-public:
-	class ScopedSelect {
-	public:
-		ScopedSelect(int8_t pin);
-		~ScopedSelect();
-	private:
-		int8_t _pin;
-	};
+	// IDF SPI master driver handle
+	spi_device_handle_t _spi = nullptr;
+	// One-row DMA-capable pixel buffer (ST7735_WIDTH × 2 bytes).
+	// Allocated in init(); used by fillRectangle / drawChar / drawXbm / drawImage.
+	uint16_t* _dma_buf = nullptr;
 };
 
 #endif // TFT_H_

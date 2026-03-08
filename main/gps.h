@@ -19,7 +19,7 @@
 #define HELTEC_ANCS_GPS_H
 
 #include "task.h"
-#include <HT_TinyGPS++.h>
+#include <TinyGPSPlus.h>
 
 class GPS : public Task
 {

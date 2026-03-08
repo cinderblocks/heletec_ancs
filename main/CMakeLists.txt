@@ -15,7 +15,7 @@ set(SOURCE_FILES
 
 set(REQUIRES
     arduino-esp32
-    Heltec_ESP32
+    esp_tinygpsplusplus
     spi_flash
     bt
     esp-nimble-cpp

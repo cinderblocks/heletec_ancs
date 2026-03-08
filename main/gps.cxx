@@ -62,6 +62,7 @@ void GPS::run(void* /*data*/)
         .flow_ctrl           = UART_HW_FLOWCTRL_DISABLE,
         .rx_flow_ctrl_thresh = 122,
         .source_clk          = UART_SCLK_DEFAULT,
+        .flags               = 0,
     };
 
     esp_err_t err = uart_driver_install(GPS_UART,

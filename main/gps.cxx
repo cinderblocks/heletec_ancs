@@ -54,16 +54,14 @@ void GPS::run(void* /*data*/)
         uart_driver_delete(GPS_UART);
     }
 
-    const uart_config_t uart_cfg = {
-        .baud_rate           = 115200,
-        .data_bits           = UART_DATA_8_BITS,
-        .parity              = UART_PARITY_DISABLE,
-        .stop_bits           = UART_STOP_BITS_1,
-        .flow_ctrl           = UART_HW_FLOWCTRL_DISABLE,
-        .rx_flow_ctrl_thresh = 122,
-        .source_clk          = UART_SCLK_DEFAULT,
-        .flags               = 0,
-    };
+    uart_config_t uart_cfg = {};
+    uart_cfg.baud_rate           = 115200;
+    uart_cfg.data_bits           = UART_DATA_8_BITS;
+    uart_cfg.parity              = UART_PARITY_DISABLE;
+    uart_cfg.stop_bits           = UART_STOP_BITS_1;
+    uart_cfg.flow_ctrl           = UART_HW_FLOWCTRL_DISABLE;
+    uart_cfg.rx_flow_ctrl_thresh = 122;
+    uart_cfg.source_clk          = UART_SCLK_DEFAULT;
 
     esp_err_t err = uart_driver_install(GPS_UART,
                                         /*rx_buf*/ 512,

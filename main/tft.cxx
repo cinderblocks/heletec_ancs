@@ -175,15 +175,13 @@ void TFT::init(void)
 
     // ── IDF SPI bus + device ──────────────────────────────────────────────
     // CS is managed by the SPI driver; do NOT call pinMode for it here.
-    const spi_bus_config_t buscfg = {
-        .mosi_io_num     = _mosi_pin,
-        .miso_io_num     = -1,
-        .sclk_io_num     = _sclk_pin,
-        .quadwp_io_num   = -1,
-        .quadhd_io_num   = -1,
-        .max_transfer_sz = ST7735_WIDTH * static_cast<int>(sizeof(uint16_t)),
-        .flags           = 0,
-    };
+    spi_bus_config_t buscfg = {};
+    buscfg.mosi_io_num     = _mosi_pin;
+    buscfg.miso_io_num     = -1;
+    buscfg.sclk_io_num     = _sclk_pin;
+    buscfg.quadwp_io_num   = -1;
+    buscfg.quadhd_io_num   = -1;
+    buscfg.max_transfer_sz = ST7735_WIDTH * static_cast<int>(sizeof(uint16_t));
     esp_err_t ret = spi_bus_initialize(TFT_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "spi_bus_initialize: %s", esp_err_to_name(ret));
@@ -194,13 +192,12 @@ void TFT::init(void)
                  _mosi_pin, _sclk_pin);
     }
 
-    const spi_device_interface_config_t devcfg = {
-        .mode           = 0,                    // CPOL=0 CPHA=0
-        .clock_speed_hz = TFT_SPI_FREQ_HZ,
-        .spics_io_num   = _cs_pin,
-        .queue_size     = 1,
-        .pre_cb         = spi_pre_transfer_cb,
-    };
+    spi_device_interface_config_t devcfg = {};
+    devcfg.mode           = 0;                    // CPOL=0 CPHA=0
+    devcfg.clock_speed_hz = TFT_SPI_FREQ_HZ;
+    devcfg.spics_io_num   = _cs_pin;
+    devcfg.queue_size     = 1;
+    devcfg.pre_cb         = spi_pre_transfer_cb;
     ret = spi_bus_add_device(TFT_SPI_HOST, &devcfg, &_spi);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "spi_bus_add_device: %s", esp_err_to_name(ret));

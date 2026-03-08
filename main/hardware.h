@@ -21,6 +21,7 @@
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/portmacro.h>
+#include <esp_adc/adc_oneshot.h>
 #include <time.h>
 #include <climits>
 #include "tft.h"
@@ -84,7 +85,7 @@ public:
     void pairing(String const& passcode);
     void setBLEConnectionState(conn_state_def state);
     void notifyDraw(uint32_t events);
-    void showTime(String const& timestamp);
+    void showTime(const char* timestamp);
     void showCallState(bool active);
     void showGpsState(bool fixed);
     void glow(bool on);
@@ -126,6 +127,7 @@ private:
     portMUX_TYPE mHardwareLock; // initialized in Hardware() via portMUX_INITIALIZE
     TimerHandle_t mBatteryTimer = nullptr;
     TimerHandle_t mClockTimer   = nullptr;
+    adc_oneshot_unit_handle_t mAdcHandle = nullptr;
 };
 
 extern Hardware Heltec;

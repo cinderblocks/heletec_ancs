@@ -20,6 +20,7 @@
 #include <esp_log.h>
 #include <inttypes.h>
 #include <driver/uart.h>
+#include <driver/gpio.h>
 
 static const char* TAG = "gps";
 
@@ -34,11 +35,9 @@ void GPS::run(void* /*data*/)
 {
     ESP_LOGI(TAG, "Starting GPS (RX=%d TX=%d)", GPS_RX, GPS_TX);
 
-    // Power the VGNSS rail — same GPIO as VEXT used by the TFT.
-    // TFT::init() has already driven it HIGH, but guard here in case
-    // the draw task hasn't started yet on this boot.
-    pinMode(Hardware::VEXT_CTRL, OUTPUT);
-    digitalWrite(Hardware::VEXT_CTRL, HIGH);
+    // Power the VGNSS rail.  Use IDF directly — no Arduino peripheral manager.
+    gpio_set_direction(static_cast<gpio_num_t>(Hardware::VEXT_CTRL), GPIO_MODE_OUTPUT);
+    gpio_set_level(static_cast<gpio_num_t>(Hardware::VEXT_CTRL), 1);
 
     // UC6580 needs ~500 ms after VGNSS rises before UART is ready.
     vTaskDelay(pdMS_TO_TICKS(500));

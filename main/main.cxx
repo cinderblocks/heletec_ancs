@@ -72,7 +72,7 @@ extern "C" void app_main(void)
 
     while(true)
     {
-        delay(5000);
+        vTaskDelay(pdMS_TO_TICKS(5000));
     }
 }
 

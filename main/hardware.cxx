@@ -20,6 +20,10 @@
 #include "bitmaps.h"
 #include "bleservice.h"
 #include "notificationservice.h"
+#include <algorithm>
+#include <driver/gpio.h>
+#include <esp_adc/adc_oneshot.h>
+#include <freertos/task.h>
 
 static const char* TAG = "hardware";
 
@@ -39,8 +43,52 @@ void Hardware::begin()
     mDisplay.drawXbm(16, 10, 128,64, Bitmaps::Gnu_128x64, TFT::Color::BLUE);
     ESP_LOGI(TAG, "TFT initialized.");
 
-    pinMode(VBAT_READ, INPUT);
-    pinMode(FACTORY_LED, OUTPUT);
+    // ── FACTORY_LED — output, initially off ───────────────────────────────
+    {
+        const gpio_config_t led_conf = {
+            .pin_bit_mask  = 1ULL << FACTORY_LED,
+            .mode          = GPIO_MODE_OUTPUT,
+            .pull_up_en    = GPIO_PULLUP_DISABLE,
+            .pull_down_en  = GPIO_PULLDOWN_DISABLE,
+            .intr_type     = GPIO_INTR_DISABLE,
+        };
+        gpio_config(&led_conf);
+        gpio_set_level(static_cast<gpio_num_t>(FACTORY_LED), 0);
+    }
+
+    // ── ADC_CTRL (GPIO2) — initially pull-down (divider disabled) ─────────
+    {
+        const gpio_config_t adc_ctrl_conf = {
+            .pin_bit_mask  = 1ULL << ADC_CTRL,
+            .mode          = GPIO_MODE_INPUT,
+            .pull_up_en    = GPIO_PULLUP_DISABLE,
+            .pull_down_en  = GPIO_PULLDOWN_ENABLE,
+            .intr_type     = GPIO_INTR_DISABLE,
+        };
+        gpio_config(&adc_ctrl_conf);
+    }
+
+    // ── ADC1 / VBAT_READ (GPIO1 = ADC1_CH0) ──────────────────────────────
+    // Create the oneshot ADC unit once here; reused by every getBatteryLevel() call.
+    {
+        const adc_oneshot_unit_init_cfg_t adc_cfg = {
+            .unit_id  = ADC_UNIT_1,
+            .clk_src  = ADC_RTC_CLK_SRC_DEFAULT,
+            .ulp_mode = ADC_ULP_MODE_DISABLE,
+        };
+        esp_err_t err = adc_oneshot_new_unit(&adc_cfg, &mAdcHandle);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "adc_oneshot_new_unit: %s", esp_err_to_name(err));
+        } else {
+            const adc_oneshot_chan_cfg_t chan_cfg = {
+                .atten    = ADC_ATTEN_DB_12,   // 0–3.9 V input range
+                .bitwidth = ADC_BITWIDTH_12,    // 0–4095 raw output
+            };
+            err = adc_oneshot_config_channel(mAdcHandle, ADC_CHANNEL_0, &chan_cfg);
+            if (err != ESP_OK)
+                ESP_LOGE(TAG, "adc_oneshot_config_channel: %s", esp_err_to_name(err));
+        }
+    }
 
     mBatteryTimer = xTimerCreate("Battery", pdMS_TO_TICKS(30000), pdTRUE, nullptr, batteryTimerCallback);
     if (mBatteryTimer == nullptr)
@@ -235,13 +283,18 @@ void Hardware::showNotification(notification_def const& notification)
 
 uint8_t Hardware::getBatteryLevel()
 {
-    pinMode(ADC_CTRL, INPUT_PULLUP);
-    delay(100); // wait for GPIO stabilization
-    uint16_t analogValue = analogRead(VBAT_READ);
-    pinMode(ADC_CTRL, INPUT_PULLDOWN);
+    // Enable battery voltage divider by driving ADC_CTRL high via internal pull-up.
+    gpio_set_pull_mode(static_cast<gpio_num_t>(ADC_CTRL), GPIO_PULLUP_ONLY);
+    vTaskDelay(pdMS_TO_TICKS(100));  // wait for rail to settle
 
-    //const float voltage = analogValue * 0.0037f;
-    return constrain(((analogValue - 680.f) / 343.f) * 100, 0, 100);
+    int raw = 0;
+    adc_oneshot_read(mAdcHandle, ADC_CHANNEL_0, &raw);
+
+    // Disable divider — pull ADC_CTRL low to stop current through the resistor network.
+    gpio_set_pull_mode(static_cast<gpio_num_t>(ADC_CTRL), GPIO_PULLDOWN_ONLY);
+
+    return static_cast<uint8_t>(
+        std::clamp(((raw - 680.f) / 343.f) * 100.f, 0.f, 100.f));
 }
 
 void Hardware::standby()
@@ -290,12 +343,10 @@ void Hardware::drawIcon(const uint16_t x, const uint16_t y, const uint8_t* xbm, 
     mDisplay.drawXbm(x, y, 16, 16, xbm, color, HEADER_COLOR);
 }
 
-void Hardware::showTime(String const& timestamp)
+void Hardware::showTime(const char* timestamp)
 {
-    // mTimestamp is read by the draw task under DRAW_GPS, so guard the write with
-    // the hardware spinlock to prevent a data race on the dual-core ESP32-S3.
     portENTER_CRITICAL(&mHardwareLock);
-    strncpy(mTimestamp, timestamp.c_str(), sizeof(mTimestamp) - 1);
+    strncpy(mTimestamp, timestamp, sizeof(mTimestamp) - 1);
     mTimestamp[sizeof(mTimestamp) - 1] = '\0';
     portEXIT_CRITICAL(&mHardwareLock);
     notifyDraw(DRAW_TIME);
@@ -342,7 +393,7 @@ void Hardware::onTimeSync(const struct tm *localTime, int32_t utcOffsetSec)
     // to read the system clock since it was just set by _applyCurrentTime.
     char ts[sizeof(mTimestamp)];
     snprintf(ts, sizeof(ts), "%2d:%02d", localTime->tm_hour, localTime->tm_min);
-    showTime(String(ts));   // thread-safe; posts DRAW_GPS to the draw task
+    showTime(ts);   // thread-safe; posts DRAW_TIME to the draw task
 
     // Start the 30-second periodic timer so the display stays current.
     // 30 s ensures the minute digit turns over within half a minute of the
@@ -392,7 +443,7 @@ void Hardware::clockTimerCallback(TimerHandle_t xTimer)
 
     char ts[8];
     snprintf(ts, sizeof(ts), "%2d:%02d", localTm.tm_hour, localTm.tm_min);
-    h->showTime(String(ts));    // writes mTimestamp + posts DRAW_GPS
+    h->showTime(ts);    // writes mTimestamp + posts DRAW_TIME
 }
 
 void Hardware::showCallState(bool active)
@@ -420,7 +471,7 @@ void Hardware::showGpsState(bool fixed)
 
 void Hardware::glow(bool on)
 {
-    digitalWrite(FACTORY_LED, on ? HIGH : LOW);
+    gpio_set_level(static_cast<gpio_num_t>(FACTORY_LED), on ? 1 : 0);
 }
 
 /* static */

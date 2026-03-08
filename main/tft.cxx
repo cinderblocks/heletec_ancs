@@ -20,6 +20,8 @@
 #include "tft.h"
 
 #include <cstring>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <driver/spi_master.h>
 #include <driver/gpio.h>
 #include <esp_heap_caps.h>
@@ -66,9 +68,9 @@ TFT::TFT(int8_t cs_pin, int8_t rest_pin, int8_t dc_pin, int8_t sclk_pin,
 
 void TFT::reset(void)
 {
-    digitalWrite(_rest_pin, LOW);
-    delay(5);
-    digitalWrite(_rest_pin, HIGH);
+    gpio_set_level(static_cast<gpio_num_t>(_rest_pin), 0);
+    vTaskDelay(pdMS_TO_TICKS(5));
+    gpio_set_level(static_cast<gpio_num_t>(_rest_pin), 1);
 }
 
 // Send one command byte (DC = LOW).
@@ -149,25 +151,27 @@ void TFT::init(void)
         return;
     }
 
-    // ── GPIO: VEXT, RST, LED (all plain output, not SPI) ─────────────────
-    if (_vtft_ctrl_pin >= 0) {
-        pinMode(_vtft_ctrl_pin, OUTPUT);
-        digitalWrite(_vtft_ctrl_pin, HIGH);
-    }
-    pinMode(_rest_pin, OUTPUT);
-    pinMode(_led_k_pin, OUTPUT);
-    digitalWrite(_led_k_pin, HIGH);
-
-    // DC pin is driven by the pre-transfer ISR callback via gpio_set_level().
+    // ── GPIO: all non-SPI output pins in one config call ─────────────────
+    // DC is driven by spi_pre_transfer_cb; RST, LED_K, and optionally
+    // VTFT_CTRL are plain outputs driven directly by gpio_set_level().
     s_dc_pin = static_cast<gpio_num_t>(_dc_pin);
-    const gpio_config_t dc_conf = {
-        .pin_bit_mask  = 1ULL << static_cast<unsigned>(_dc_pin),
+    uint64_t out_mask = (1ULL << _dc_pin) |
+                        (1ULL << _rest_pin) |
+                        (1ULL << _led_k_pin);
+    if (_vtft_ctrl_pin >= 0) out_mask |= (1ULL << _vtft_ctrl_pin);
+    const gpio_config_t out_conf = {
+        .pin_bit_mask  = out_mask,
         .mode          = GPIO_MODE_OUTPUT,
         .pull_up_en    = GPIO_PULLUP_DISABLE,
         .pull_down_en  = GPIO_PULLDOWN_DISABLE,
         .intr_type     = GPIO_INTR_DISABLE,
     };
-    gpio_config(&dc_conf);
+    gpio_config(&out_conf);
+    if (_vtft_ctrl_pin >= 0)
+        gpio_set_level(static_cast<gpio_num_t>(_vtft_ctrl_pin), 1);  // VEXT on
+    gpio_set_level(static_cast<gpio_num_t>(_led_k_pin), 1);           // backlight on
+    gpio_set_level(static_cast<gpio_num_t>(_rest_pin),  1);           // RST idle-high
+    gpio_set_level(static_cast<gpio_num_t>(_dc_pin),    1);           // DC harmless default
 
     // ── IDF SPI bus + device ──────────────────────────────────────────────
     // CS is managed by the SPI driver; do NOT call pinMode for it here.
@@ -208,8 +212,8 @@ void TFT::init(void)
     // ── ST7735 init sequence ──────────────────────────────────────────────
     reset();
 
-    writeCommand(SWRESET); delay(150);
-    writeCommand(SLPOUT);  delay(120);
+    writeCommand(SWRESET); vTaskDelay(pdMS_TO_TICKS(150));
+    writeCommand(SLPOUT);  vTaskDelay(pdMS_TO_TICKS(120));
 
     writeCommand(FRMCTR1);
     { uint8_t b[] = {0x01, 0x2C, 0x2D}; writeData(b, sizeof(b)); }
@@ -246,8 +250,8 @@ void TFT::init(void)
     { uint8_t b[] = {0x03,0x1d,0x07,0x06,0x2E,0x2C,0x29,0x2D,
                      0x2E,0x2E,0x37,0x3F,0x00,0x00,0x02,0x10}; writeData(b, sizeof(b)); }
 
-    writeCommand(NORON);  delay(10);
-    writeCommand(DISPON); delay(100);
+    writeCommand(NORON);  vTaskDelay(pdMS_TO_TICKS(10));
+    writeCommand(DISPON); vTaskDelay(pdMS_TO_TICKS(100));
 }
 
 // ── Drawing primitives ────────────────────────────────────────────────────

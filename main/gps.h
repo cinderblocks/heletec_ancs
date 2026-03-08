@@ -29,11 +29,13 @@ private:
     void run(void *data) override;
 
     // UC6580 GPS module pins (matches Heltec factory example)
+    // GPS_TX = ESP32 TX → GPS RX; GPS_RX = ESP32 RX ← GPS TX
     static constexpr uint8_t GPS_RX = 33;
     static constexpr uint8_t GPS_TX = 34;
 
     TinyGPSPlus _gps;
-    HardwareSerial _serial = HardwareSerial(1); // UART1 = Serial1
+    // No HardwareSerial member — UART1 is driven via the IDF uart driver
+    // directly in run() to avoid the Arduino wrapper's dual-instance conflict.
 };
 
 extern GPS gps;

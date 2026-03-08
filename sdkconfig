@@ -596,10 +596,10 @@ CONFIG_PARTITION_TABLE_MD5=y
 # end of Partition Table
 
 #
-# GPS Configuration
+# BLE Configuration
 #
-CONFIG_GPS_TZ_OFFSET=-5
-# end of GPS Configuration
+CONFIG_BLE_DEVICE_NAME="HatefulBlue"
+# end of BLE Configuration
 
 #
 # Arduino Configuration

@@ -44,6 +44,22 @@ static const auto CTS_SERVICE_UUID          = NimBLEUUID((uint16_t)0x1805);
 static const auto CURRENT_TIME_CHR_UUID     = NimBLEUUID((uint16_t)0x2A2B); // Exact Time 256 + adjust reason
 static const auto LOCAL_TIME_INFO_CHR_UUID  = NimBLEUUID((uint16_t)0x2A0F); // Timezone + DST offset
 
+// Map Kconfig CHOICE (CONFIG_NIMBLE_LOG_LEVEL_*) to esp_log_level_t.
+// Exactly one of these symbols is defined by the build system.
+#if   defined(CONFIG_NIMBLE_LOG_LEVEL_NONE)
+#  define _NIMBLE_LOG_LEVEL ESP_LOG_NONE
+#elif defined(CONFIG_NIMBLE_LOG_LEVEL_ERROR)
+#  define _NIMBLE_LOG_LEVEL ESP_LOG_ERROR
+#elif defined(CONFIG_NIMBLE_LOG_LEVEL_INFO)
+#  define _NIMBLE_LOG_LEVEL ESP_LOG_INFO
+#elif defined(CONFIG_NIMBLE_LOG_LEVEL_DEBUG)
+#  define _NIMBLE_LOG_LEVEL ESP_LOG_DEBUG
+#elif defined(CONFIG_NIMBLE_LOG_LEVEL_VERBOSE)
+#  define _NIMBLE_LOG_LEVEL ESP_LOG_VERBOSE
+#else  // CONFIG_NIMBLE_LOG_LEVEL_WARN (default) or undefined
+#  define _NIMBLE_LOG_LEVEL ESP_LOG_WARN
+#endif
+
 BleService::BleService(const NotificationCallback notificationSourceCallback, const NotificationCallback dataSourceCallback)
 :   _notificationSourceCallback(notificationSourceCallback)
 ,   _dataSourceCallback(dataSourceCallback)
@@ -63,13 +79,8 @@ void BleService::startServer(const char* appName)
     // Initialize device
     NimBLEDevice::init(appName);
 
-    // Configure NimBLE runtime log level from menuconfig.  CONFIG_NIMBLE_LOG_LEVEL
-    // is defined via main/Kconfig.projbuild (0=NONE,1=ERROR,2=WARN,3=INFO,4=DEBUG,5=VERBOSE).
-#ifdef CONFIG_NIMBLE_LOG_LEVEL
-    esp_log_level_set("NimBLE", static_cast<esp_log_level_t>(CONFIG_NIMBLE_LOG_LEVEL));
-#else
-    esp_log_level_set("NimBLE", ESP_LOG_WARN);
-#endif
+    // Apply NimBLE log level selected in menuconfig (BLE Configuration menu).
+    esp_log_level_set("NimBLE", _NIMBLE_LOG_LEVEL);
 
     NimBLEDevice::setPower(9);  // +9 dBm (max for ESP32-S3)
 

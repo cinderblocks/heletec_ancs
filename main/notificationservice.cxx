@@ -27,6 +27,19 @@
 
 static const char* TAG = "notify";
 
+// ---------------------------------------------------------------------------
+// Scoped mutex guard — takes on construction, releases on destruction.
+// Ensures the mutex is always released even on early return or exception.
+// ---------------------------------------------------------------------------
+struct ScopedLock {
+    explicit ScopedLock(SemaphoreHandle_t m) : _m(m) { xSemaphoreTake(_m, portMAX_DELAY); }
+    ~ScopedLock() { xSemaphoreGive(_m); }
+    ScopedLock(const ScopedLock&) = delete;
+    ScopedLock& operator=(const ScopedLock&) = delete;
+private:
+    SemaphoreHandle_t _m;
+};
+
 NotificationService::NotificationService()
 :   notificationCount(0)
 ,   mEventQueue(nullptr)
@@ -97,48 +110,48 @@ void NotificationService::NotificationSourceNotifyCallback(NimBLERemoteCharacter
 void NotificationService::setNotificationAttribute(uint32_t uuid, uint8_t attributeId, const char* value)
 {
     bool shouldNotify = false;
+    {
+        ScopedLock lock(mMutex);
+        notification_def *notification = nullptr;
+        if (callingNotification.key == uuid) {
+            notification = &callingNotification;
+        } else {
+            int index = findNotificationIndex(uuid);
+            if (index != -1) { notification = &notificationList[index]; }
+        }
 
-    xSemaphoreTake(mMutex, portMAX_DELAY);
-    notification_def *notification = nullptr;
-    if (callingNotification.key == uuid) {
-        notification = &callingNotification;
-    } else {
-        int index = findNotificationIndex(uuid);
-        if (index != -1) { notification = &notificationList[index]; }
-    }
-
-    if (notification != nullptr) {
-        switch (attributeId) {
-            case ANCS::NotificationAttributeIDTitle:
-                strncpy(notification->title, value, sizeof(notification->title) - 1);
-                notification->title[sizeof(notification->title) - 1] = '\0';
-                notification->receivedAttributes |= notification_def::ATTR_TITLE;
-                ESP_LOGI(TAG, "Title: %s", notification->title);
-                break;
-            case ANCS::NotificationAttributeIDMessage:
-                strncpy(notification->message, value, sizeof(notification->message) - 1);
-                notification->message[sizeof(notification->message) - 1] = '\0';
-                notification->receivedAttributes |= notification_def::ATTR_MESSAGE;
-                ESP_LOGI(TAG, "Message: %s", notification->message);
-                break;
-            case ANCS::NotificationAttributeIDDate: {
-                tm t = {};
-                strptime(value, "%Y%m%dT%H%M%S", &t);
-                notification->time = mktime(&t);
-                notification->receivedAttributes |= notification_def::ATTR_DATE;
-                break;
+        if (notification != nullptr) {
+            switch (attributeId) {
+                case ANCS::NotificationAttributeIDTitle:
+                    strncpy(notification->title, value, sizeof(notification->title) - 1);
+                    notification->title[sizeof(notification->title) - 1] = '\0';
+                    notification->receivedAttributes |= notification_def::ATTR_TITLE;
+                    ESP_LOGI(TAG, "Title: %s", notification->title);
+                    break;
+                case ANCS::NotificationAttributeIDMessage:
+                    strncpy(notification->message, value, sizeof(notification->message) - 1);
+                    notification->message[sizeof(notification->message) - 1] = '\0';
+                    notification->receivedAttributes |= notification_def::ATTR_MESSAGE;
+                    ESP_LOGI(TAG, "Message: %s", notification->message);
+                    break;
+                case ANCS::NotificationAttributeIDDate: {
+                    tm t = {};
+                    strptime(value, "%Y%m%dT%H%M%S", &t);
+                    notification->time = mktime(&t);
+                    notification->receivedAttributes |= notification_def::ATTR_DATE;
+                    break;
+                }
+                default:
+                    break;
             }
-            default:
-                break;
+            if (!notification->isComplete &&
+                (notification->receivedAttributes & notification_def::ATTR_ALL) == notification_def::ATTR_ALL)
+            {
+                notification->isComplete = true;
+                shouldNotify = true;
+            }
         }
-        if (!notification->isComplete &&
-            (notification->receivedAttributes & notification_def::ATTR_ALL) == notification_def::ATTR_ALL)
-        {
-            notification->isComplete = true;
-            shouldNotify = true;
-        }
-    }
-    xSemaphoreGive(mMutex);
+    } // lock released here
 
     if (shouldNotify) {
         Heltec.notifyDraw(Hardware::DRAW_NOTIFY);
@@ -148,13 +161,13 @@ void NotificationService::setNotificationAttribute(uint32_t uuid, uint8_t attrib
 bool NotificationService::removeIfCall(uint32_t uuid)
 {
     bool wasCall = false;
-    xSemaphoreTake(mMutex, portMAX_DELAY);
-    if (callingNotification.key == uuid) {
-        callingNotification.key = 0;
-        wasCall = true;
+    {
+        ScopedLock lock(mMutex);
+        if (callingNotification.key == uuid) {
+            callingNotification.key = 0;
+            wasCall = true;
+        }
     }
-    xSemaphoreGive(mMutex);
-
     if (wasCall) {
         Heltec.notifyDraw(Hardware::DRAW_NOTIFY);
     }
@@ -163,11 +176,7 @@ bool NotificationService::removeIfCall(uint32_t uuid)
 
 bool NotificationService::resetForUpdate(uint32_t uuid)
 {
-    // Returns true (and resets fields) ONLY if the notification was already complete.
-    // If isComplete is false, a re-fetch is already in flight — returning false prevents
-    // adding the same UUID to the pending queue again (key deduplication for iOS
-    // EventIDNotificationModified floods, e.g. active call duration updates).
-    xSemaphoreTake(mMutex, portMAX_DELAY);
+    ScopedLock lock(mMutex);
     bool shouldRequeue = false;
     notification_def *notification = nullptr;
     if (callingNotification.key == uuid) {
@@ -177,15 +186,11 @@ bool NotificationService::resetForUpdate(uint32_t uuid)
         if (index != -1) { notification = &notificationList[index]; }
     }
     if (notification != nullptr && notification->isComplete) {
-        bool wasCall = notification->isCall(); // type survives reset()
+        bool wasCall = notification->isCall();
         notification->reset();
-        // For active calls iOS fires EventIDNotificationModified every second.
-        // Preserve showed=true after each re-fetch so the caller-ID screen is
-        // only raised once (when the call first arrives) and not every second.
         if (wasCall) { notification->showed = true; }
         shouldRequeue = true;
     }
-    xSemaphoreGive(mMutex);
     return shouldRequeue;
 }
 
@@ -212,7 +217,7 @@ void NotificationService::clearPendingNotifications()
 
 void NotificationService::addNotification(notification_def const& notification, bool isCalling)
 {
-    xSemaphoreTake(mMutex, portMAX_DELAY);
+    ScopedLock lock(mMutex);
     if (isCalling)
     {
         callingNotification = notification;
@@ -221,53 +226,28 @@ void NotificationService::addNotification(notification_def const& notification, 
     else
     {
         int targetIndex = -1;
-
-        // Pass 1: find an empty slot (key == 0)
         for (size_t i = 0; i < notificationListSize; i++)
         {
-            if (notificationList[i].key == 0)
-            {
-                targetIndex = static_cast<int>(i);
-                break;
-            }
+            if (notificationList[i].key == 0) { targetIndex = static_cast<int>(i); break; }
         }
-
-        if (targetIndex != -1)
-        {
+        if (targetIndex != -1) {
             notificationCount++;
-        }
-        else
-        {
-            // Pass 2: prefer evicting an already-showed notification (safe to discard).
-            // This avoids clobbering a not-yet-displayed notification with a new one.
+        } else {
             for (size_t i = 0; i < notificationListSize; i++)
             {
-                if (notificationList[i].showed)
-                {
-                    targetIndex = static_cast<int>(i);
-                    break;
-                }
+                if (notificationList[i].showed) { targetIndex = static_cast<int>(i); break; }
             }
-            // Pass 3: no showed slot — fall back to slot 0 (oldest by position).
-            if (targetIndex == -1)
-            {
-                targetIndex = 0;
-            }
-            // Eviction: count stays the same (replacing one entry with another).
+            if (targetIndex == -1) { targetIndex = 0; }
         }
-
         notificationList[targetIndex] = notification;
         notificationList[targetIndex].fetchStartTime = xTaskGetTickCount();
     }
-    xSemaphoreGive(mMutex);
 }
 
 size_t NotificationService::getNotificationCount() const
 {
-    xSemaphoreTake(mMutex, portMAX_DELAY);
-    size_t count = notificationCount;
-    xSemaphoreGive(mMutex);
-    return count;
+    ScopedLock lock(mMutex);
+    return notificationCount;
 }
 
 notification_def* NotificationService::getNotificationByIndex(size_t index)
@@ -289,8 +269,7 @@ notification_def* NotificationService::getNotificationByIndex(size_t index)
 
 bool NotificationService::takeNotificationByIndex(size_t index, notification_def& out)
 {
-    xSemaphoreTake(mMutex, portMAX_DELAY);
-    bool found = false;
+    ScopedLock lock(mMutex);
     size_t currentIndex = 0;
     for (size_t i = 0; i < notificationListSize; i++)
     {
@@ -302,15 +281,14 @@ bool NotificationService::takeNotificationByIndex(size_t index, notification_def
                 {
                     out = notificationList[i];
                     notificationList[i].showed = true;
-                    found = true;
+                    return true;
                 }
                 break;
             }
             currentIndex++;
         }
     }
-    xSemaphoreGive(mMutex);
-    return found;
+    return false;
 }
 
 bool NotificationService::exists(uint32_t uuid) const
@@ -339,38 +317,33 @@ notification_def* NotificationService::getNotification(uint32_t uuid)
 
 void NotificationService::removeCallNotification()
 {
-    xSemaphoreTake(mMutex, portMAX_DELAY);
+    ScopedLock lock(mMutex);
     callingNotification.key = 0;
-    xSemaphoreGive(mMutex);
 }
 
 bool NotificationService::isCallingNotification() const
 {
-    xSemaphoreTake(mMutex, portMAX_DELAY);
-    bool result = callingNotification.key != 0;
-    xSemaphoreGive(mMutex);
-    return result;
+    ScopedLock lock(mMutex);
+    return callingNotification.key != 0;
 }
 
 bool NotificationService::takeCallingNotification(notification_def& out)
 {
-    xSemaphoreTake(mMutex, portMAX_DELAY);
-    bool found = false;
+    ScopedLock lock(mMutex);
     if (callingNotification.key != 0 &&
         callingNotification.isComplete &&
         !callingNotification.showed)
     {
         out = callingNotification;
         callingNotification.showed = true;
-        found = true;
+        return true;
     }
-    xSemaphoreGive(mMutex);
-    return found;
+    return false;
 }
 
 bool NotificationService::removeNotification(uint32_t uuid)
 {
-    xSemaphoreTake(mMutex, portMAX_DELAY);
+    ScopedLock lock(mMutex);
     int index = findNotificationIndex(uuid);
     if (index != -1)
     {
@@ -379,14 +352,12 @@ bool NotificationService::removeNotification(uint32_t uuid)
         notificationList[index].type = APP_UNKNOWN;
         notificationCount--;
     }
-    xSemaphoreGive(mMutex);
     return index != -1;
 }
 
 void NotificationService::addCancelledUUID(uint32_t uuid)
 {
-    xSemaphoreTake(mMutex, portMAX_DELAY);
-    // Deduplicate — don't add if already present.
+    ScopedLock lock(mMutex);
     bool found = false;
     for (size_t i = 0; i < cancelledCount; i++) {
         if (cancelledUUIDs[i] == uuid) { found = true; break; }
@@ -394,36 +365,29 @@ void NotificationService::addCancelledUUID(uint32_t uuid)
     if (!found && cancelledCount < cancelledSetSize) {
         cancelledUUIDs[cancelledCount++] = uuid;
     } else if (!found) {
-        // Set is full — overwrite the oldest entry (index 0) by rotating.
-        // In practice this should never happen (size 16 is very generous).
         memmove(&cancelledUUIDs[0], &cancelledUUIDs[1], (cancelledSetSize - 1) * sizeof(uint32_t));
         cancelledUUIDs[cancelledSetSize - 1] = uuid;
         ESP_LOGW(TAG, "cancelledUUIDs set full — oldest entry evicted");
     }
-    xSemaphoreGive(mMutex);
 }
 
 bool NotificationService::consumeCancelledUUID(uint32_t uuid)
 {
-    xSemaphoreTake(mMutex, portMAX_DELAY);
-    bool found = false;
+    ScopedLock lock(mMutex);
     for (size_t i = 0; i < cancelledCount; i++) {
         if (cancelledUUIDs[i] == uuid) {
-            // Shift remaining entries down to fill the gap.
             memmove(&cancelledUUIDs[i], &cancelledUUIDs[i + 1],
                     (cancelledCount - i - 1) * sizeof(uint32_t));
             cancelledCount--;
-            found = true;
-            break;
+            return true;
         }
     }
-    xSemaphoreGive(mMutex);
-    return found;
+    return false;
 }
 
 void NotificationService::markFetchStart(uint32_t uuid)
 {
-    xSemaphoreTake(mMutex, portMAX_DELAY);
+    ScopedLock lock(mMutex);
     notification_def *notification = nullptr;
     if (callingNotification.key == uuid) {
         notification = &callingNotification;
@@ -434,12 +398,11 @@ void NotificationService::markFetchStart(uint32_t uuid)
     if (notification != nullptr) {
         notification->fetchStartTime = xTaskGetTickCount();
     }
-    xSemaphoreGive(mMutex);
 }
 
 void NotificationService::resetIfStale(uint32_t uuid, TickType_t timeoutTicks)
 {
-    xSemaphoreTake(mMutex, portMAX_DELAY);
+    ScopedLock lock(mMutex);
     notification_def *notification = nullptr;
     if (callingNotification.key == uuid) {
         notification = &callingNotification;
@@ -454,7 +417,6 @@ void NotificationService::resetIfStale(uint32_t uuid, TickType_t timeoutTicks)
         ESP_LOGW(TAG, "Fetch for UUID %08lx timed out — resetting for re-fetch", uuid);
         notification->reset();
     }
-    xSemaphoreGive(mMutex);
 }
 
 

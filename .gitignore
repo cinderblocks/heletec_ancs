@@ -1,7 +1,7 @@
 build/
+cmake-build-default-esp-idf/
 managed_components/
 .idea/
 
-dependencies.lock
 .DS_Store
 sdkconfig.old

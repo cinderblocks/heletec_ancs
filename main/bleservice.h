@@ -25,8 +25,8 @@
 
 class NimBLEHIDDevice;
 
-typedef void (*NotificationCallback)(NimBLERemoteCharacteristic *pBLERemoteCharacteristic,
-              uint8_t *pData, size_t length, bool isNotify);
+using NotificationCallback = void (*)(NimBLERemoteCharacteristic *pBLERemoteCharacteristic,
+                                      uint8_t *pData, size_t length, bool isNotify);
 
 /**
  * Called after the system clock has been synced from the iOS Current Time Service.
@@ -34,20 +34,22 @@ typedef void (*NotificationCallback)(NimBLERemoteCharacteristic *pBLERemoteChara
  * @param utcOffsetSec Offset added to UTC to obtain localTime, in seconds.
  *                     INT32_MIN when the iOS device did not expose Local Time Information.
  */
-typedef void (*TimeCallback)(const struct tm *localTime, int32_t utcOffsetSec);
+using TimeCallback = void (*)(const struct tm *localTime, int32_t utcOffsetSec);
 
 class ANCSServiceServerCallback
 {
-    public:
-        virtual void onConnect() = 0;
-        virtual void onDisconnect() = 0;
+public:
+    virtual void onConnect() = 0;
+    virtual void onDisconnect() = 0;
+    virtual ~ANCSServiceServerCallback() = default;
 };
 
 class ANCSServiceClientCallback
 {
-    public:
-        virtual void onConnect() = 0;
-        virtual void onDisconnect() = 0;
+public:
+    virtual void onConnect() = 0;
+    virtual void onDisconnect() = 0;
+    virtual ~ANCSServiceClientCallback() = default;
 };
 
 class BleService

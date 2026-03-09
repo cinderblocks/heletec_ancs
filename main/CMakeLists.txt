@@ -2,6 +2,7 @@
 
 set(SOURCE_FILES
     applist.cxx
+    applistservice.cxx
     bleservice.cxx
     diag.cxx
     fonts.cxx
@@ -16,6 +17,7 @@ set(SOURCE_FILES
 set(REQUIRES
     esp_tinygpsplusplus
     spi_flash
+    nvs_flash
     bt
     esp-nimble-cpp
     esp_driver_uart

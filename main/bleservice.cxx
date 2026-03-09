@@ -16,6 +16,7 @@
  */
 
 #include "bleservice.h"
+#include "applistservice.h"
 #include "diag.h"
 #include <esp_log.h>
 #include "sdkconfig.h"
@@ -109,9 +110,11 @@ void BleService::startServer(const char* appName)
     _hidDevice->setHidInfo(0x00, 0x01);
     _hidDevice->setBatteryLevel(100);
 
-    // Register diagnostic GATT service before startServices() so it is
-    // included in the server's service table from the first connection.
+    // Register diagnostic and applist management GATT services before
+    // startServices() so both are included in the server's GATT table
+    // from the first connection.
     Diag::registerService(pServer);
+    AppListService::registerService(pServer);
 
     _hidDevice->startServices();
 

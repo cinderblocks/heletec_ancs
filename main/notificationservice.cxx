@@ -461,6 +461,7 @@ void NotificationService::handleDataSourceEvent(const uint8_t* pData, uint8_t le
             notification_def notification;
             notification.type = applicationType;
             notification.key  = messageId;
+            strncpy(notification.bundleId, message, sizeof(notification.bundleId) - 1);
             addNotification(notification, notification.isCall());
             ESP_LOGI(TAG, "Message from %s added", message);
         }

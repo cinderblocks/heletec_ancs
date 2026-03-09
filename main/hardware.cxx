@@ -271,7 +271,7 @@ void Hardware::showNotification(notification_def const& notification)
     strftime(timestamp, sizeof(timestamp), "%R", &timeinfo);
     blank();
     mDisplay.fillRectangle(0, 20, mDisplay.width(), mDisplay.height() - 20, TFT::Color::WHITE);
-    mDisplay.drawStr(0, 21, AppList.getDisplayName(notification.type),
+    mDisplay.drawStr(0, 21, AppList.getDisplayName(notification.bundleId),
         Font_7x10, TFT::Color::BLACK, TFT::Color::WHITE);
     mDisplay.drawStr(mDisplay.width() - 38, 21, timestamp,
         Font_7x10, TFT::Color::BLACK, TFT::Color::WHITE);

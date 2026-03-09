@@ -41,8 +41,9 @@ struct ancs_event_t {
 
 struct notification_def
 {
-    char title[64]   = {};
+    char title[64]    = {};
     char message[128] = {};
+    char bundleId[64] = {};  ///< iOS bundle ID — used to resolve display name for custom apps
     time_t time = 0;
     application_def type = APP_UNKNOWN;
     uint32_t key = 0;
@@ -60,8 +61,9 @@ struct notification_def
 
     void reset()
     {
-        title[0]  = '\0';
-        message[0] = '\0';
+        title[0]    = '\0';
+        message[0]  = '\0';
+        bundleId[0] = '\0';
         time = 0;
         showed = false;
         isComplete = false;

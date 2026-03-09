@@ -20,6 +20,8 @@
 
 #include "task.h"
 #include <TinyGPSPlus.h>
+#include <freertos/queue.h>
+#include <driver/uart.h>
 
 class GPS : public Task
 {
@@ -28,16 +30,19 @@ public:
 private:
     void run(void *data) override;
 
-    // UC6580 GPS module pins (matches Heltec factory example)
-    // GPS_TX = ESP32 TX → GPS RX; GPS_RX = ESP32 RX ← GPS TX
+    /// (Re)install the IDF UART driver at the requested baud rate.
+    /// Tears down any existing driver first.  Fills _uartQueue on success.
+    esp_err_t _installUart(int baud);
+
+    // UC6580 GPS module pins (matches Heltec factory schematic)
+    // GPS_TX = ESP32 TX → GPS RX;  GPS_RX = ESP32 RX ← GPS TX
     static constexpr uint8_t GPS_RX = 33;
     static constexpr uint8_t GPS_TX = 34;
 
-    TinyGPSPlus _gps;
-    // No HardwareSerial member — UART1 is driven via the IDF uart driver
-    // directly in run() to avoid the Arduino wrapper's dual-instance conflict.
+    TinyGPSPlus  _gps;
+    QueueHandle_t _uartQueue = nullptr;  // populated by _installUart()
 };
 
 extern GPS gps;
 
-#endif //HELTEC_ANCS_GPS_H
+#endif // HELTEC_ANCS_GPS_H

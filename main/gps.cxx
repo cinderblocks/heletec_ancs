@@ -25,7 +25,8 @@
 static const char* TAG = "gps";
 
 // Use UART1 for the UC6580.
-static constexpr uart_port_t GPS_UART = UART_NUM_1;
+static constexpr uart_port_t GPS_UART     = UART_NUM_1;
+static constexpr int         GPS_BAUD_RATE = 115200;
 
 GPS::GPS(const char* name, uint16_t stack_size)
 :   Task(name, stack_size, 1)
@@ -55,7 +56,7 @@ void GPS::run(void* /*data*/)
     }
 
     uart_config_t uart_cfg = {};
-    uart_cfg.baud_rate           = 115200;
+    uart_cfg.baud_rate           = GPS_BAUD_RATE;
     uart_cfg.data_bits           = UART_DATA_8_BITS;
     uart_cfg.parity              = UART_PARITY_DISABLE;
     uart_cfg.stop_bits           = UART_STOP_BITS_1;
@@ -89,8 +90,8 @@ void GPS::run(void* /*data*/)
         ESP_LOGE(TAG, "uart_set_pin(TX=%d RX=%d) failed: %s",
                  GPS_TX, GPS_RX, esp_err_to_name(err));
     } else {
-        ESP_LOGI(TAG, "UART%d pins set: TX=GPIO%d  RX=GPIO%d  @ 115200",
-                 GPS_UART, GPS_TX, GPS_RX);
+        ESP_LOGI(TAG, "UART%d pins set: TX=GPIO%d  RX=GPIO%d  @ %d",
+                 GPS_UART, GPS_TX, GPS_RX, GPS_BAUD_RATE);
     }
 
     bool       prevFixed    = false;
@@ -108,12 +109,14 @@ void GPS::run(void* /*data*/)
     while (true)
     {
         // ── Drain UART RX ring-buffer ─────────────────────────────────────
-        // uart_read_bytes with timeout=0 is non-blocking: it returns however
-        // many bytes are already in the ring buffer, or 0 if there are none.
-        uint8_t byte;
-        while (uart_read_bytes(GPS_UART, &byte, 1, 0) == 1)
+        // Read up to 64 bytes per iteration into a local buffer — far cheaper
+        // than calling uart_read_bytes() one byte at a time inside a tight loop.
+        uint8_t buf[64];
+        int nread;
+        while ((nread = uart_read_bytes(GPS_UART, buf, sizeof(buf), 0)) > 0)
         {
-            _gps.encode(static_cast<char>(byte));
+            for (int i = 0; i < nread; i++)
+                _gps.encode(static_cast<char>(buf[i]));
         }
 
         TickType_t now = xTaskGetTickCount();

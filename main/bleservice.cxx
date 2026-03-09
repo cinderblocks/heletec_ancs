@@ -28,7 +28,7 @@
 #include <sys/time.h>
 #include <climits>
 
-static auto TAG = "heltec";
+static const char* TAG = "heltec";
 
 // Bluetooth SIG generic-display appearance value (0x0080).
 static constexpr uint16_t BLE_APPEARANCE_GENERIC_DISPLAY = 0x0080;

@@ -16,7 +16,6 @@
  */
 
 #include "task.h"
-#include "sdkconfig.h"
 
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>

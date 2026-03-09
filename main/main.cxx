@@ -23,13 +23,6 @@
 #include "notificationservice.h"
 #include "task.h"
 
-// Prevent initArduino() from calling esp_bt_controller_mem_release().
-// The Arduino hal checks btInUse() before releasing BT controller memory;
-// this header registers a __attribute__((constructor)) that sets the
-// _btLibraryInUse flag to true before app_main(), so the memory is preserved
-// for NimBLEDevice::init() to use.
-#include "esp32-hal-bt-mem.h"
-
 #include <esp_log.h>
 #include <cinttypes>
 

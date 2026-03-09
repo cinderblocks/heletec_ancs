@@ -20,7 +20,7 @@
 
 #include <stddef.h>
 
-typedef enum
+enum application_def
 {
     APP_UNKNOWN = 0,
     APP_SMS,
@@ -34,7 +34,7 @@ typedef enum
     APP_HONK,
     APP_GHRN,
     APP_TOWBOOK,
-} application_def;
+};
 
 struct AppMapping {
     const char* bundleId;

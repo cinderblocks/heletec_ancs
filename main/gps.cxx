@@ -359,5 +359,31 @@ void GPS::run(void* /*data*/)
     }
 }
 
+// ── Diagnostic accessors ──────────────────────────────────────────────────
+bool GPS::isFixed() const
+{
+    return _gps.location.isValid() && _gps.location.age() < FIX_MAX_AGE_MS;
+}
+
+uint32_t GPS::satellites()
+{
+    return _gps.satellites.isValid() ? _gps.satellites.value() : 0u;
+}
+
+float GPS::hdop()
+{
+    return _gps.hdop.isValid() ? static_cast<float>(_gps.hdop.hdop()) : 99.9f;
+}
+
+uint32_t GPS::passedChecksum() const
+{
+    return _gps.passedChecksum();
+}
+
+uint32_t GPS::failedChecksum() const
+{
+    return _gps.failedChecksum();
+}
+
 /* extern */
 GPS gps("GPS", 8192);

@@ -15,4 +15,14 @@ config NIMBLE_LOG_LEVEL
         console spam from GATT/ATT operations. The value maps directly to
         esp_log_level_t used by esp_log_level_set().
 
+config DIAG_NOTIFY_INTERVAL_SEC
+    int "Diagnostic NOTIFY interval (seconds, 0 = disabled)"
+    default 30
+    range 0 300
+    help
+        How often (in seconds) the BLE diagnostic characteristic pushes an
+        updated JSON report to subscribed clients via NOTIFY.
+        Set to 0 to disable periodic notifications entirely — READ still
+        works on demand at any interval.
+
 endmenu

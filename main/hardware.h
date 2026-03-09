@@ -27,15 +27,15 @@
 
 struct notification_def;
 
-typedef enum
+enum conn_state_def
 {
     BLE_DISCONNECTED = 0,
     BLE_PAIRING,
     BLE_SERVER_CONNECTED,
     BLE_CONNECTED
-} conn_state_def;
+};
 
-typedef void (*PairButtonCallback)();
+using PairButtonCallback = void (*)();
 
 class Hardware
 {

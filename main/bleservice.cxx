@@ -16,6 +16,7 @@
  */
 
 #include "bleservice.h"
+#include "diag.h"
 #include <esp_log.h>
 #include "sdkconfig.h"
 
@@ -107,6 +108,11 @@ void BleService::startServer(const char* appName)
     _hidDevice->setPnp(0x00, 0x00C3, 0xffff, 0x0001);
     _hidDevice->setHidInfo(0x00, 0x01);
     _hidDevice->setBatteryLevel(100);
+
+    // Register diagnostic GATT service before startServices() so it is
+    // included in the server's service table from the first connection.
+    Diag::registerService(pServer);
+
     _hidDevice->startServices();
 
     _restartAdvertising();
@@ -597,6 +603,9 @@ void BleService::ServerCallback::onDisconnect(NimBLEServer *pServer, NimBLEConnI
     ESP_LOGI(TAG, "Device disconnected (reason=%d)", reason);
 
     ancsService->_isConnected.store(false);
+
+    // Stop the diagnostic NOTIFY timer — no point firing into a disconnected stack.
+    Diag::stopNotifications();
 
     // Drain stale pending notifications so they are not replayed on the next connection.
     Notifications.clearPendingNotifications();

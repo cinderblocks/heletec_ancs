@@ -3,6 +3,7 @@
 set(SOURCE_FILES
     applist.cxx
     bleservice.cxx
+    diag.cxx
     fonts.cxx
     gps.cxx
     hardware.cxx

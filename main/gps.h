@@ -27,6 +27,17 @@ class GPS : public Task
 {
 public:
     GPS(const char* name, uint16_t stack_size);
+
+    // ── Diagnostic accessors ──────────────────────────────────────────────
+    // Safe to call from any task.  _gps is owned by the GPS task; these reads
+    // carry no lock — for telemetry purposes a stale or slightly torn read is
+    // acceptable, and the data is inherently stale by nature.
+    bool     isFixed()        const;  ///< true when location age < FIX_MAX_AGE_MS
+    uint32_t satellites();            ///< satellite count (0 if invalid); clears updated flag
+    float    hdop();                  ///< HDOP (99.9 if invalid); clears updated flag
+    uint32_t passedChecksum() const;  ///< cumulative passed-checksum count
+    uint32_t failedChecksum() const;  ///< cumulative failed-checksum count
+
 private:
     void run(void *data) override;
 

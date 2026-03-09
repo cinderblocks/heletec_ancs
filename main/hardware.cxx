@@ -179,7 +179,7 @@ void Hardware::startDrawing(void* pvParameters)
 
             if (fixed)
             {
-                h->drawIcon(h->mDisplay.width()-50, 1, Bitmaps::GPS, TFT::Color::GREEN);
+                h->drawIcon(h->mDisplay.width()-50, 1, Bitmaps::GPS, TFT::Color::WHITE);
             }
             else
             {

@@ -599,6 +599,7 @@ CONFIG_PARTITION_TABLE_MD5=y
 # BLE Configuration
 #
 CONFIG_BLE_DEVICE_NAME="HatefulBlue"
+CONFIG_NIMBLE_LOG_LEVEL=2
 # end of BLE Configuration
 
 #

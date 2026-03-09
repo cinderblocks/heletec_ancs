@@ -7,4 +7,12 @@ config BLE_DEVICE_NAME
         The name advertised over BLE and shown in iOS Settings > Bluetooth.
         Maximum 31 characters (BLE advertisement payload limit).
 
+config NIMBLE_LOG_LEVEL
+    int "NimBLE runtime log level (0=NONE,1=ERROR,2=WARN,3=INFO,4=DEBUG,5=VERBOSE)"
+    default 2
+    help
+        Select the runtime log level for the NimBLE host. Lower values reduce
+        console spam from GATT/ATT operations. The value maps directly to
+        esp_log_level_t used by esp_log_level_set().
+
 endmenu

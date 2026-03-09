@@ -16,6 +16,8 @@
  */
 
 #include "bleservice.h"
+#include <esp_log.h>
+#include "sdkconfig.h"
 
 #include "ancs.h"
 #include "hardware.h"
@@ -58,7 +60,17 @@ BleService::~BleService()
 
 void BleService::startServer(const char* appName)
 {
+    // Initialize device
     NimBLEDevice::init(appName);
+
+    // Configure NimBLE runtime log level from menuconfig.  CONFIG_NIMBLE_LOG_LEVEL
+    // is defined via main/Kconfig.projbuild (0=NONE,1=ERROR,2=WARN,3=INFO,4=DEBUG,5=VERBOSE).
+#ifdef CONFIG_NIMBLE_LOG_LEVEL
+    esp_log_level_set("NimBLE", static_cast<esp_log_level_t>(CONFIG_NIMBLE_LOG_LEVEL));
+#else
+    esp_log_level_set("NimBLE", ESP_LOG_WARN);
+#endif
+
     NimBLEDevice::setPower(9);  // +9 dBm (max for ESP32-S3)
 
     // Security: bonding + MITM + secure connections, display-only IO capability

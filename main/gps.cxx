@@ -17,6 +17,7 @@
 
 #include "gps.h"
 #include "hardware.h"
+#include "sdkconfig.h"
 #include <esp_log.h>
 #include <inttypes.h>
 #include <driver/uart.h>
@@ -269,6 +270,7 @@ void GPS::run(void* /*data*/)
         }
 
         // ── 30-second diagnostic log ──────────────────────────────────────
+#if CONFIG_GPS_DIAG_LOG
         if ((now - lastDiagTick) >= pdMS_TO_TICKS(DIAG_INTERVAL_MS))
         {
             lastDiagTick = now;
@@ -310,6 +312,9 @@ void GPS::run(void* /*data*/)
                         " (normal during cold start)");
             }
         }
+#else
+        (void)lastDiagTick;  // suppress unused-variable warning when logging is off
+#endif // CONFIG_GPS_DIAG_LOG
 
         // ── 1-second housekeeping: fix state + position log ───────────────
         if ((now - lastHouseTick) >= pdMS_TO_TICKS(1000))
@@ -324,12 +329,14 @@ void GPS::run(void* /*data*/)
             {
                 prevFixed = fixed;
                 Heltec.showGpsState(fixed);
+#if CONFIG_GPS_DIAG_LOG
                 ESP_LOGI(TAG,
                     "GPS fix %s  chars=%" PRIu32 "  ok=%" PRIu32
                     "  fail=%" PRIu32 "  baud=%d",
                     fixed ? "acquired" : "lost",
                     _gps.charsProcessed(), _gps.passedChecksum(),
                     _gps.failedChecksum(), BAUD_CANDIDATES[baudIdx]);
+#endif
             }
 
             if (fixed)
@@ -338,7 +345,7 @@ void GPS::run(void* /*data*/)
                                     ? _gps.satellites.value() : 0u;
                 const double   hdop = _gps.hdop.isValid()
                                     ? _gps.hdop.hdop() : 99.9;
-
+#if CONFIG_GPS_DIAG_LOG
                 // Log satellite count only when it changes.
                 if (sats != prevSats)
                 {
@@ -354,6 +361,10 @@ void GPS::run(void* /*data*/)
                              _gps.location.lng(),
                              _gps.altitude.isValid() ? _gps.altitude.meters() : 0.0);
                 }
+#else
+                (void)sats; (void)hdop;
+                (void)prevSats;
+#endif // CONFIG_GPS_DIAG_LOG
             }
         }
     }

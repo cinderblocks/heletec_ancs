@@ -27,6 +27,21 @@ config DIAG_NOTIFY_INTERVAL_SEC
 
 endmenu
 
+menu "GPS Configuration"
+
+config GPS_DIAG_LOG
+    bool "Enable GPS diagnostic logging"
+    default y
+    help
+        When enabled, the GPS task emits a periodic 30-second health summary
+        (chars, checksums, satellites, HDOP, fix state, baud) and logs every
+        fix-state transition, satellite-count change, and 1 Hz position fix
+        to the console via ESP_LOGI.
+        Disable to reduce console output in production builds while keeping
+        all UART error/warning and watchdog messages intact.
+
+endmenu
+
 menu "Buzzer Configuration"
 
 config BUZZER_ENABLED

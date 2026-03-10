@@ -604,6 +604,12 @@ CONFIG_DIAG_NOTIFY_INTERVAL_SEC=30
 # end of BLE Configuration
 
 #
+# GPS Configuration
+#
+# CONFIG_GPS_DIAG_LOG is not set
+# end of GPS Configuration
+
+#
 # Buzzer Configuration
 #
 CONFIG_BUZZER_ENABLED=y

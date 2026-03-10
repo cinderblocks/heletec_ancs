@@ -94,6 +94,24 @@ public:
     /// Returns true on success, false on error/timeout.
     bool transmit(const uint8_t* data, uint8_t len);
 
+    /**
+     * Broadcast a POSITION_APP packet with the supplied GPS fix data.
+     * lat/lng in decimal degrees, altM in metres above MSL,
+     * pdop_x100 = PDOP × 100 (e.g. 120 = PDOP 1.20), sats = visible sats,
+     * unixTime = UTC epoch seconds (0 → uses system clock).
+     * Must only be called from the LoRa task.  Returns true on TX success.
+     */
+    bool sendPosition(double lat, double lng, float altM,
+                      uint32_t pdop_x100, uint32_t sats,
+                      uint32_t unixTime = 0);
+
+    /**
+     * Broadcast a NODEINFO_APP packet advertising this device's identity.
+     * Uses Node.nodeId() / Node.longName() / Node.shortName().
+     * Must only be called from the LoRa task.  Returns true on TX success.
+     */
+    bool sendNodeInfo();
+
 protected:
     void run(void* data) override;
 
@@ -141,8 +159,10 @@ private:
     // Over-the-air header: [to(4), from(4), id(4), flags(1), chan(1), pad(2)]
     static constexpr size_t MESH_HDR = 16;
 
-    // PortNum::TEXT_MESSAGE_APP
-    static constexpr uint32_t PORT_TEXT = 1;
+    // PortNum values used by this firmware
+    static constexpr uint32_t PORT_TEXT     = 1;  ///< TEXT_MESSAGE_APP
+    static constexpr uint32_t PORT_POSITION = 3;  ///< POSITION_APP
+    static constexpr uint32_t PORT_NODEINFO = 67; ///< NODEINFO_APP
 
     // Meshtastic default channel AES-128 PSK.
     // Derived from the "Default" channel name; used by every out-of-box device.
@@ -162,6 +182,39 @@ private:
                     uint32_t& portnum,
                     const uint8_t*& payload, size_t& payloadLen);
 
+    // ── Protobuf encoder helpers (all static, no heap) ────────────────────
+    /// Encode a varint into buf. Returns bytes written.
+    static size_t   _pbVarint(uint8_t* buf, uint64_t val);
+    /// Zigzag-encode a signed 32-bit integer → unsigned (sint32 wire format).
+    static uint32_t _pbZigzag(int32_t val);
+    /// Write a length-delimited field (tag byte, length varint, raw bytes).
+    static size_t   _pbLenField(uint8_t* buf, uint8_t tag,
+                                const uint8_t* data, size_t dataLen);
+    /// Write a protobuf string field (length-delimited, null-terminated src).
+    static size_t   _pbString(uint8_t* buf, uint8_t tag, const char* s);
+
+    /// Encode a Meshtastic Position proto into buf. Returns bytes written.
+    static size_t _encodePosition(uint8_t* buf, size_t cap,
+                                  int32_t lat_i, int32_t lon_i, int32_t alt_m,
+                                  uint32_t pdop_x100, uint32_t sats,
+                                  uint32_t unixTime);
+
+    /// Encode a Meshtastic User (NodeInfo) proto into buf. Returns bytes written.
+    static size_t _encodeUser(uint8_t* buf, size_t cap,
+                              uint32_t nodeId,
+                              const char* longName, const char* shortName);
+
+    /// Wrap an encoded payload in a Meshtastic Data proto. Returns bytes written.
+    static size_t _encodeData(uint8_t* buf, size_t cap,
+                              uint32_t portnum,
+                              const uint8_t* payload, size_t payloadLen);
+
+    /// Build a complete encrypted OTA Meshtastic packet ready for transmit().
+    /// Writes header + AES-CTR ciphertext into out[256]. Returns false on error.
+    bool _buildTxPacket(uint8_t* out, uint8_t& outLen,
+                        uint32_t portnum,
+                        const uint8_t* payload, size_t payloadLen);
+
     // ── Thread-safe last-message store ────────────────────────────────────
     mutable portMUX_TYPE _msgLock   = portMUX_INITIALIZER_UNLOCKED;
     MeshMessage          _lastMsg   = {};
@@ -169,6 +222,9 @@ private:
     // ── Thread-safe stats store ───────────────────────────────────────────
     mutable portMUX_TYPE _statsLock = portMUX_INITIALIZER_UNLOCKED;
     LoRaStats            _stats     = {};
+
+    // ── Periodic TX state (run loop only — no locking needed) ─────────────
+    TickType_t _lastPosTxTick = 0;  ///< tick of last POSITION_APP TX (0 = never)
 };
 
 extern LoRa Lora;

@@ -396,5 +396,22 @@ uint32_t GPS::failedChecksum() const
     return _gps.failedChecksum();
 }
 
+double GPS::lat()
+{
+    return _gps.location.isValid() ? _gps.location.lat() : 0.0;
+}
+
+double GPS::lng()
+{
+    return _gps.location.isValid() ? _gps.location.lng() : 0.0;
+}
+
+float GPS::altitude()
+{
+    return _gps.altitude.isValid()
+        ? static_cast<float>(_gps.altitude.meters())
+        : 0.0f;
+}
+
 /* extern */
 GPS gps("GPS", 8192);

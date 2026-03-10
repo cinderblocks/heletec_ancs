@@ -38,6 +38,13 @@ public:
     uint32_t passedChecksum() const;  ///< cumulative passed-checksum count
     uint32_t failedChecksum() const;  ///< cumulative failed-checksum count
 
+    // ── Position accessors ────────────────────────────────────────────────
+    // Return 0.0 / 0.0f when no valid fix is available.
+    // Non-const: TinyGPSPlus does not mark its value accessors const.
+    double lat();      ///< latitude in decimal degrees  (e.g. 37.774929)
+    double lng();      ///< longitude in decimal degrees (e.g. -122.419416)
+    float  altitude(); ///< altitude in metres above MSL (0 if invalid)
+
 private:
     void run(void *data) override;
 

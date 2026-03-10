@@ -16,7 +16,9 @@
  */
 
 #include "lora.h"
+#include "gps.h"
 #include "hardware.h"
+#include "meshnode.h"
 #include "sdkconfig.h"
 
 #include <esp_log.h>
@@ -29,9 +31,23 @@
 #include <cinttypes>
 #include <cstring>
 #include <cstdio>
+#include <ctime>
 #include <algorithm>
 
 static const char* TAG = "lora";
+
+// ── Kconfig fallback defaults ─────────────────────────────────────────────
+// Guard every symbol that has been added incrementally so the file compiles
+// correctly even when sdkconfig hasn't been regenerated yet.
+#ifndef CONFIG_LORA_TX_ENABLED
+#  define CONFIG_LORA_TX_ENABLED 1
+#endif
+#ifndef CONFIG_LORA_TX_POWER_DBM
+#  define CONFIG_LORA_TX_POWER_DBM 22
+#endif
+#ifndef CONFIG_LORA_POSITION_TX_INTERVAL_SEC
+#  define CONFIG_LORA_POSITION_TX_INTERVAL_SEC 300
+#endif
 
 // ── Meshtastic default channel PSK ────────────────────────────────────────
 // AES-128 key for the "Default" / LongFast channel used by every factory
@@ -80,6 +96,26 @@ static constexpr uint16_t IRQ_TIMEOUT      = (1u << 9);
 static constexpr uint16_t IRQ_RX_MASK      = IRQ_RX_DONE | IRQ_HEADER_ERR |
                                               IRQ_CRC_ERROR | IRQ_TIMEOUT;
 static constexpr uint16_t IRQ_TX_MASK      = IRQ_TX_DONE | IRQ_TIMEOUT;
+
+// ── Meshtastic OTA TX constants ───────────────────────────────────────────
+//
+// DEFAULT_CHAN_HASH: 1-byte channel hash placed in the OTA header byte [13].
+// Computed as: (sum of all DEFAULT_PSK bytes) & 0xFF.
+// The default channel has an empty name (""), so only the PSK is summed:
+//   0xD4+0xF1+0xBB+0x3A+0x20+0x29+0x07+0x59+
+//   0xF0+0xBC+0xFF+0xAB+0xCF+0x4E+0x69+0x01 = 0x840 → 0x40
+// Receivers use this as a quick filter; a mismatch causes them to skip the
+// packet without attempting decryption.  Must match real Meshtastic devices.
+static constexpr uint8_t DEFAULT_CHAN_HASH = 0x40;
+
+// HW_MODEL: Meshtastic HardwareModel enum value for this board.
+// meshtastic_HardwareModel_HELTEC_WIRELESS_TRACKER = 87 (mesh.proto 2.5+)
+static constexpr uint32_t HW_MODEL = 87;
+
+// FLAGS_BROADCAST: OTA header flags byte for a normal originating broadcast.
+// Bit layout: [hop_start(5:7)] [via_mqtt(4)] [want_ack(3)] [hop_limit(0:2)]
+// hop_limit=3, hop_start=3, want_ack=0, via_mqtt=0 → 0b01100011 = 0x63
+static constexpr uint8_t FLAGS_BROADCAST = 0x63;
 
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -595,6 +631,306 @@ bool LoRa::_parseData(const uint8_t* data, size_t len,
     return portnum != 0;
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Protobuf encoder helpers
+// All functions write directly into caller-supplied buffers.  Buffers must
+// be sized by the caller; sizes are documented per function.
+// ─────────────────────────────────────────────────────────────────────────
+
+// ── _pbVarint ─────────────────────────────────────────────────────────────
+// Encode a 64-bit unsigned value as a protobuf base-128 varint.
+// Returns the number of bytes written (1–10).
+/* static */ size_t LoRa::_pbVarint(uint8_t* buf, uint64_t val)
+{
+    size_t n = 0;
+    while (val > 0x7F)
+    {
+        buf[n++] = static_cast<uint8_t>((val & 0x7F) | 0x80);
+        val >>= 7;
+    }
+    buf[n++] = static_cast<uint8_t>(val & 0x7F);
+    return n;
+}
+
+// ── _pbZigzag ─────────────────────────────────────────────────────────────
+// Zigzag-encode a signed 32-bit integer for protobuf sint32 wire format.
+// Maps: 0→0, -1→1, 1→2, -2→3, 2→4 …  Formula: (n<<1) ^ (n>>31).
+/* static */ uint32_t LoRa::_pbZigzag(int32_t val)
+{
+    return (static_cast<uint32_t>(val) << 1) ^ static_cast<uint32_t>(val >> 31);
+}
+
+// ── _pbLenField ───────────────────────────────────────────────────────────
+// Write a length-delimited protobuf field: tag byte, length varint, raw data.
+// tag must be pre-computed as (fieldNum << 3) | 2.
+// buf must have at least 1 + 5 + dataLen bytes available.
+/* static */ size_t LoRa::_pbLenField(uint8_t* buf, uint8_t tag,
+                                       const uint8_t* data, size_t dataLen)
+{
+    size_t n = 0;
+    buf[n++] = tag;
+    n += _pbVarint(buf + n, dataLen);
+    memcpy(buf + n, data, dataLen);
+    n += dataLen;
+    return n;
+}
+
+// ── _pbString ─────────────────────────────────────────────────────────────
+// Write a protobuf string field (length-delimited, from a null-terminated src).
+/* static */ size_t LoRa::_pbString(uint8_t* buf, uint8_t tag, const char* s)
+{
+    const size_t sLen = (s != nullptr) ? strlen(s) : 0;
+    return _pbLenField(buf, tag,
+                       reinterpret_cast<const uint8_t*>(s ? s : ""), sLen);
+}
+
+// ── _encodePosition ───────────────────────────────────────────────────────
+// Encode a Meshtastic Position proto (meshtastic/mesh.proto).
+//
+//   Field  1 (lat_i,    sint32): zigzag varint — degrees × 1e7
+//   Field  2 (lon_i,    sint32): zigzag varint — degrees × 1e7
+//   Field  3 (altitude,  int32): plain varint  — metres above MSL
+//   Field  6 (PDOP,    uint32):  plain varint  — PDOP × 100
+//   Field  7 (sats,    uint32):  plain varint  — satellites in view
+//   Field  9 (time,    uint32):  plain varint  — UTC Unix timestamp (seconds)
+//
+// buf must be at least 80 bytes.  Returns bytes written.
+/* static */ size_t LoRa::_encodePosition(uint8_t* buf, size_t /*cap*/,
+                                           int32_t lat_i, int32_t lon_i,
+                                           int32_t alt_m,
+                                           uint32_t pdop_x100, uint32_t sats,
+                                           uint32_t unixTime)
+{
+    size_t n = 0;
+
+    // Field 1: latitude_i (sint32, zigzag) — always present
+    buf[n++] = 0x08;
+    n += _pbVarint(buf + n, _pbZigzag(lat_i));
+
+    // Field 2: longitude_i (sint32, zigzag) — always present
+    buf[n++] = 0x10;
+    n += _pbVarint(buf + n, _pbZigzag(lon_i));
+
+    // Field 3: altitude (int32, plain varint) — skip if zero
+    if (alt_m != 0)
+    {
+        buf[n++] = 0x18;
+        // Cast via int64 for correct sign extension of negative altitudes
+        n += _pbVarint(buf + n, static_cast<uint64_t>(static_cast<int64_t>(alt_m)));
+    }
+
+    // Field 6: PDOP × 100 (uint32)
+    if (pdop_x100 != 0)
+    {
+        buf[n++] = 0x30;
+        n += _pbVarint(buf + n, pdop_x100);
+    }
+
+    // Field 7: sats_in_view (uint32)
+    if (sats != 0)
+    {
+        buf[n++] = 0x38;
+        n += _pbVarint(buf + n, sats);
+    }
+
+    // Field 9: timestamp (uint32 unix seconds)
+    if (unixTime != 0)
+    {
+        buf[n++] = 0x48;
+        n += _pbVarint(buf + n, unixTime);
+    }
+
+    return n;
+}
+
+// ── _encodeUser ───────────────────────────────────────────────────────────
+// Encode a Meshtastic User proto (NODEINFO_APP payload).
+//
+//   Field 1 (id,         string): "!xxxxxxxx"  (node ID as hex string)
+//   Field 2 (long_name,  string): up to 32 chars
+//   Field 3 (short_name, string): up to 4 chars
+//   Field 8 (hw_model,   uint32): HardwareModel enum value
+//
+// buf must be at least 80 bytes.  Returns bytes written.
+/* static */ size_t LoRa::_encodeUser(uint8_t* buf, size_t /*cap*/,
+                                       uint32_t nodeId,
+                                       const char* longName,
+                                       const char* shortName)
+{
+    size_t n = 0;
+
+    // Field 1: id — "!xxxxxxxx"
+    char idStr[12] = {};
+    snprintf(idStr, sizeof(idStr), "!%08" PRIx32, nodeId);
+    n += _pbString(buf + n, 0x0A, idStr);
+
+    // Field 2: long_name
+    n += _pbString(buf + n, 0x12, longName);
+
+    // Field 3: short_name
+    n += _pbString(buf + n, 0x1A, shortName);
+
+    // Field 8: hw_model (varint)
+    buf[n++] = 0x40;
+    n += _pbVarint(buf + n, HW_MODEL);
+
+    return n;
+}
+
+// ── _encodeData ───────────────────────────────────────────────────────────
+// Wrap an encoded application payload in a Meshtastic Data proto.
+//
+//   Field 1 (portnum,  uint32): plain varint — PortNum enum value
+//   Field 2 (payload,  bytes):  length-delimited raw bytes
+//
+// buf must be at least payloadLen + 16 bytes.  Returns bytes written.
+/* static */ size_t LoRa::_encodeData(uint8_t* buf, size_t /*cap*/,
+                                       uint32_t portnum,
+                                       const uint8_t* payload, size_t payloadLen)
+{
+    size_t n = 0;
+
+    // Field 1: portnum (varint)
+    buf[n++] = 0x08;
+    n += _pbVarint(buf + n, portnum);
+
+    // Field 2: payload (length-delimited bytes)
+    n += _pbLenField(buf + n, 0x12, payload, payloadLen);
+
+    return n;
+}
+
+// ── _buildTxPacket ────────────────────────────────────────────────────────
+// Build a complete, encrypted, ready-to-transmit Meshtastic OTA packet.
+//
+// Layout of out[]:
+//   [0..15]  16-byte OTA header (plaintext)
+//   [16..]   AES-128-CTR encrypted Data proto
+//
+// The packet ID is drawn from Node.nextPacketId() and becomes part of the
+// AES-CTR nonce, so every call produces a different ciphertext even for
+// identical payloads — safe to call back-to-back.
+//
+// out must be at least 256 bytes.  Returns false only on encoding error.
+bool LoRa::_buildTxPacket(uint8_t* out, uint8_t& outLen,
+                           uint32_t portnum,
+                           const uint8_t* payload, size_t payloadLen)
+{
+    if (payload == nullptr || payloadLen == 0 || payloadLen > 220) return false;
+
+    const uint32_t packetId = Node.nextPacketId();
+    const uint32_t fromNode = Node.nodeId();
+
+    // 1. Encode Data proto (portnum + payload) into a stack buffer
+    //    Max size: 2 (portnum field) + 2 (payload len) + 220 = 224 bytes
+    uint8_t dataBuf[240] = {};
+    const size_t dataLen = _encodeData(dataBuf, sizeof(dataBuf),
+                                        portnum, payload, payloadLen);
+    if (dataLen == 0 || dataLen > 239) return false; // won't fit after header
+
+    // 2. Encrypt Data proto in-place with AES-128-CTR
+    //    _decrypt() is CTR-mode: encryption == decryption, same function.
+    uint8_t cipherBuf[240] = {};
+    if (!_decrypt(dataBuf, dataLen, packetId, fromNode, cipherBuf))
+    {
+        ESP_LOGW(TAG, "_buildTxPacket: AES-CTR encrypt failed");
+        return false;
+    }
+
+    // 3. Build 16-byte OTA header
+    // to: 0xFFFFFFFF = broadcast
+    out[0] = 0xFF; out[1] = 0xFF; out[2] = 0xFF; out[3] = 0xFF;
+    // from: this node's ID (little-endian)
+    out[4] = static_cast<uint8_t>(fromNode);
+    out[5] = static_cast<uint8_t>(fromNode >>  8);
+    out[6] = static_cast<uint8_t>(fromNode >> 16);
+    out[7] = static_cast<uint8_t>(fromNode >> 24);
+    // id: packet ID (little-endian)
+    out[8]  = static_cast<uint8_t>(packetId);
+    out[9]  = static_cast<uint8_t>(packetId >>  8);
+    out[10] = static_cast<uint8_t>(packetId >> 16);
+    out[11] = static_cast<uint8_t>(packetId >> 24);
+    // flags: hop_limit=3, hop_start=3
+    out[12] = FLAGS_BROADCAST;
+    // channel hash
+    out[13] = DEFAULT_CHAN_HASH;
+    // padding
+    out[14] = 0x00;
+    out[15] = 0x00;
+
+    // 4. Append ciphertext
+    memcpy(out + MESH_HDR, cipherBuf, dataLen);
+    outLen = static_cast<uint8_t>(MESH_HDR + dataLen);
+
+    return true;
+}
+
+// ── sendPosition ──────────────────────────────────────────────────────────
+bool LoRa::sendPosition(double lat, double lng, float altM,
+                         uint32_t pdop_x100, uint32_t sats, uint32_t unixTime)
+{
+#if !CONFIG_LORA_TX_ENABLED
+    return false;
+#endif
+
+    // If no timestamp supplied, use the system clock (synced via BLE CTS or GPS)
+    if (unixTime == 0)
+    {
+        unixTime = static_cast<uint32_t>(time(nullptr));
+    }
+
+    // Convert decimal degrees to Meshtastic integer format (degrees × 1e7)
+    const int32_t lat_i = static_cast<int32_t>(lat * 1e7);
+    const int32_t lon_i = static_cast<int32_t>(lng * 1e7);
+    const int32_t alt_m = static_cast<int32_t>(altM);
+
+    // Encode Position proto (max ~80 bytes for our fields)
+    uint8_t posBuf[80] = {};
+    const size_t posLen = _encodePosition(posBuf, sizeof(posBuf),
+                                           lat_i, lon_i, alt_m,
+                                           pdop_x100, sats, unixTime);
+    if (posLen == 0) return false;
+
+    // Build and transmit the complete OTA packet
+    uint8_t pkt[256] = {};
+    uint8_t pktLen   = 0;
+    if (!_buildTxPacket(pkt, pktLen, PORT_POSITION, posBuf, posLen)) return false;
+
+    ESP_LOGI(TAG, "TX POSITION lat=%.6f lon=%.6f alt=%dm sats=%" PRIu32
+             " pdop=%.2f ts=%" PRIu32,
+             lat, lng, (int)altM, sats, (double)pdop_x100 / 100.0, unixTime);
+
+    return transmit(pkt, pktLen);
+}
+
+// ── sendNodeInfo ──────────────────────────────────────────────────────────
+bool LoRa::sendNodeInfo()
+{
+#if !CONFIG_LORA_TX_ENABLED
+    return false;
+#endif
+
+    // Encode User proto (id + long_name + short_name + hw_model, ≤80 bytes)
+    uint8_t userBuf[80] = {};
+    const size_t userLen = _encodeUser(userBuf, sizeof(userBuf),
+                                        Node.nodeId(),
+                                        Node.longName(),
+                                        Node.shortName());
+    if (userLen == 0) return false;
+
+    // Build and transmit the complete OTA packet
+    uint8_t pkt[256] = {};
+    uint8_t pktLen   = 0;
+    if (!_buildTxPacket(pkt, pktLen, PORT_NODEINFO, userBuf, userLen)) return false;
+
+    ESP_LOGI(TAG, "TX NODEINFO id=%s long=\"%s\" short=\"%s\" hw=%u",
+             Node.nodeIdStr(), Node.longName(), Node.shortName(),
+             (unsigned)HW_MODEL);
+
+    return transmit(pkt, pktLen);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // ── _processPacket ────────────────────────────────────────────────────────
 // Parse the raw LoRa payload, attempt decryption, decode the Meshtastic
 // Data protobuf, and store text messages.
@@ -785,6 +1121,15 @@ void LoRa::run(void* /*data*/)
 
     TickType_t lastDiagTick = xTaskGetTickCount();
 
+#if CONFIG_LORA_TX_ENABLED
+    // Position broadcast interval — computed once from Kconfig.
+    // Initialise _lastPosTxTick to (now - interval) so the first broadcast
+    // fires as soon as a fix is available, not after one full interval.
+    const TickType_t posTxInterval = pdMS_TO_TICKS(
+        (uint32_t)CONFIG_LORA_POSITION_TX_INTERVAL_SEC * 1000UL);
+    _lastPosTxTick = xTaskGetTickCount() - posTxInterval;
+#endif
+
     // ── Receive loop ──────────────────────────────────────────────────────
     while (true)
     {
@@ -873,6 +1218,29 @@ void LoRa::run(void* /*data*/)
 
         // Re-enter RX — required after every RX_DONE or error
         _setRx();
+
+#if CONFIG_LORA_TX_ENABLED
+        // ── Periodic GPS position broadcast ───────────────────────────────
+        // now was sampled before the diag log check above; re-read to keep
+        // the interval accurate regardless of how long processing took.
+        if ((xTaskGetTickCount() - _lastPosTxTick) >= posTxInterval)
+        {
+            _lastPosTxTick = xTaskGetTickCount();
+            if (gps.isFixed())
+            {
+                // HDOP × 100 as a PDOP approximation (we only have HDOP from
+                // TinyGPS++; Meshtastic accepts this field as an unsigned int).
+                const uint32_t pdop_x100 =
+                    static_cast<uint32_t>(gps.hdop() * 100.0f);
+                sendPosition(gps.lat(), gps.lng(), gps.altitude(),
+                             pdop_x100, gps.satellites());
+            }
+            else
+            {
+                ESP_LOGD(TAG, "Position TX skipped — no GPS fix");
+            }
+        }
+#endif
     }
 }
 

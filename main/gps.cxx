@@ -291,23 +291,23 @@ void GPS::run(void* /*data*/)
             }
             else
             {
-                ESP_LOGI(TAG,
-                    "DIAG: chars=%" PRIu32 "  ok=%" PRIu32 "  fail=%" PRIu32
-                    "  sats=%" PRIu32 "  HDOP=%.1f  fixed=%s  baud=%s%d  rx_buf=%u",
-                    chars, passed, failed, sats, hdop,
-                    fixed ? "YES" : "no",
-                    baudLocked ? "" : "~",  // ~ prefix = still probing
-                    BAUD_CANDIDATES[baudIdx],
-                    (unsigned)rxBuf);
+                //ESP_LOGI(TAG,
+                //    "DIAG: chars=%" PRIu32 "  ok=%" PRIu32 "  fail=%" PRIu32
+                //    "  sats=%" PRIu32 "  HDOP=%.1f  fixed=%s  baud=%s%d  rx_buf=%u",
+                //    chars, passed, failed, sats, hdop,
+                //    fixed ? "YES" : "no",
+                //    baudLocked ? "" : "~",  // ~ prefix = still probing
+                //    BAUD_CANDIDATES[baudIdx],
+                //    (unsigned)rxBuf);
 
                 if (failed > 0 && !baudLocked)
                     ESP_LOGW(TAG,
                         "DIAG: %" PRIu32 " checksum failure(s) — baud probe in progress",
                         failed);
-                if (!fixed && passed > 0)
-                    ESP_LOGI(TAG,
-                        "DIAG: sentences parsing OK — acquiring satellite fix"
-                        " (normal during cold start)");
+                //if (!fixed && passed > 0)
+                //    ESP_LOGI(TAG,
+                //        "DIAG: sentences parsing OK — acquiring satellite fix"
+                //        " (normal during cold start)");
             }
         }
 

@@ -1,3 +1,4 @@
 dependencies:
   h2zero/esp-nimble-cpp:
-    version: "2.*"
+    version: 2.*
+  cinderblocks/esp_tinygpsplusplus: ^1.1.1

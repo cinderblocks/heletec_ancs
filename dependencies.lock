@@ -1,4 +1,21 @@
 dependencies:
+  cinderblocks/esp_tinygpsplusplus:
+    component_hash: 4dd01357b3536696b0e3132dd68cbbd9a41536f9618cb65eec9c86efaedab76f
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    targets:
+    - esp32s3
+    - esp32s2
+    - esp32
+    - esp32c3
+    - esp32c6
+    - esp32h2
+    version: 1.1.1
   h2zero/esp-nimble-cpp:
     component_hash: ecdcabe83333948495103f9d62e4ecb651bff866fce123d00bfc106baa383e54
     dependencies:
@@ -28,8 +45,8 @@ dependencies:
       type: idf
     version: 5.5.1
 direct_dependencies:
+- cinderblocks/esp_tinygpsplusplus
 - h2zero/esp-nimble-cpp
-- idf
-manifest_hash: c3f449eb316503bbefab9969b0afd649ec92062e355446d82312d308061e7e6d
+manifest_hash: c9388dd3d0db6c85646727e7cf82f00eed42794396e7327b9ad4f05f1b9d487d
 target: esp32s3
 version: 2.0.0

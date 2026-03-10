@@ -59,10 +59,26 @@ ApplicationList::~ApplicationList()
 // ── NVS persistence ───────────────────────────────────────────────────────
 void ApplicationList::_loadFromNvs()
 {
+    // This may be called from the global constructor before app_main, so NVS
+    // may not have been initialised yet.  nvs_flash_init() is idempotent —
+    // calling it here is safe even if app_main calls it again later.
+    esp_err_t initErr = nvs_flash_init();
+    if (initErr == ESP_ERR_NVS_NO_FREE_PAGES ||
+        initErr == ESP_ERR_NVS_NEW_VERSION_FOUND)
+    {
+        nvs_flash_erase();
+        initErr = nvs_flash_init();
+    }
+    if (initErr != ESP_OK) {
+        ESP_LOGW(TAG, "nvs_flash_init: %s — skipping NVS load",
+                 esp_err_to_name(initErr));
+        return;
+    }
+
     nvs_handle_t handle;
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle);
     if (err == ESP_ERR_NVS_NOT_FOUND) {
-        return;
+        return;  // namespace not yet created — first boot, nothing to load
     }
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "nvs_open(r): %s", esp_err_to_name(err));

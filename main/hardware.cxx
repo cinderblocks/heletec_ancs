@@ -19,6 +19,7 @@
 
 #include "bitmaps.h"
 #include "bleservice.h"
+#include "buzzer.h"
 #include "notificationservice.h"
 #include <algorithm>
 #include <driver/gpio.h>
@@ -106,6 +107,8 @@ void Hardware::begin()
     // instead, both cores would be issuing SPI commands simultaneously.
     // The draw task's init block will call showBatteryLevel(mBatteryLevel) for us.
     mBatteryLevel = getBatteryLevel();
+
+    Buzzer::init();
 
     xTaskCreatePinnedToCore(&Hardware::startDrawing,
         "DrawTask", 10000, this, 3, &mDrawTask, 0);
@@ -265,6 +268,10 @@ void Hardware::notifyDraw(uint32_t events)
 
 void Hardware::showNotification(notification_def const& notification)
 {
+    // Start the 5-second audio alert immediately — the melody runs in its own
+    // task so display drawing and the buzzer overlap without blocking each other.
+    Buzzer::play(notification.isCall());
+
     char timestamp[8];
     struct tm timeinfo;
     localtime_r(&notification.time, &timeinfo);

@@ -4,6 +4,7 @@ set(SOURCE_FILES
     applist.cxx
     applistservice.cxx
     bleservice.cxx
+    buzzer.cxx
     diag.cxx
     fonts.cxx
     gps.cxx
@@ -23,6 +24,7 @@ set(REQUIRES
     esp_driver_uart
     esp_driver_spi
     esp_driver_gpio
+    esp_driver_ledc
     esp_adc
 )
 

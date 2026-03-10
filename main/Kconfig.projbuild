@@ -26,3 +26,18 @@ config DIAG_NOTIFY_INTERVAL_SEC
         works on demand at any interval.
 
 endmenu
+
+menu "Buzzer Configuration"
+
+config BUZZER_ENABLED
+    bool "Enable passive buzzer audio alerts"
+    default y
+    help
+        Play a 5-second audio alert on GPIO 45 when a notification or
+        incoming call is received.  Uses the LEDC PWM peripheral to drive
+        the passive buzzer at the correct frequency — do NOT use with an
+        active (self-oscillating) buzzer wired to this pin.
+        Disable to silence the buzzer entirely without affecting display
+        or BLE behaviour.
+
+endmenu

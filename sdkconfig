@@ -604,6 +604,12 @@ CONFIG_DIAG_NOTIFY_INTERVAL_SEC=30
 # end of BLE Configuration
 
 #
+# Buzzer Configuration
+#
+CONFIG_BUZZER_ENABLED=y
+# end of Buzzer Configuration
+
+#
 # Compiler options
 #
 CONFIG_COMPILER_OPTIMIZATION_DEBUG=y

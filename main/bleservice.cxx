@@ -29,6 +29,8 @@
 #include <host/ble_store.h>
 #include <sys/time.h>
 #include <climits>
+#include <cinttypes>
+#include <esp_random.h>
 
 static const char* TAG = "heltec";
 
@@ -94,7 +96,16 @@ void BleService::startServer(const char* appName)
     NimBLEDevice::setSecurityIOCap(BLE_HS_IO_DISPLAY_YESNO);
     NimBLEDevice::setSecurityInitKey(BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID);
     NimBLEDevice::setSecurityRespKey(BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID);
-    NimBLEDevice::setSecurityPasskey(420420);
+
+    // Generate a cryptographically random 6-digit passkey (100000–999999) at
+    // every boot using the ESP32-S3 hardware RNG.  This is only used in the
+    // legacy-pairing fallback path (onPassKeyDisplay) — the normal Secure
+    // Connections numeric-comparison flow (onConfirmPassKey) generates its own
+    // dynamic pin from the BLE stack and ignores this value entirely.
+    // A fresh random value each boot is strictly more secure than a fixed code.
+    const uint32_t passkey = 100000u + (esp_random() % 900000u);
+    NimBLEDevice::setSecurityPasskey(passkey);
+    ESP_LOGI(TAG, "BLE passkey (legacy fallback): %06" PRIu32, passkey);
 
     // Log stored bonds for diagnostics — confirms NVS persistence is working.
     ESP_LOGI(TAG, "Stored bonds: %d", NimBLEDevice::getNumBonds());

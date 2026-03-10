@@ -76,7 +76,9 @@ size_t Diag::buildReport(char* buf, size_t bufSize)
 #if CONFIG_LORA_ENABLED
         "\"lora\":{\"state\":\"%s\",\"rx\":%" PRIu32 ",\"crc_err\":%" PRIu32 ","
                   "\"hdr_err\":%" PRIu32 ",\"decrypt\":%" PRIu32 ","
-                  "\"text\":%" PRIu32 ",\"rssi\":%d,\"snr\":%.1f},"
+                  "\"text\":%" PRIu32 ",\"tx\":%" PRIu32 ","
+                  "\"tx_err\":%" PRIu32 ",\"tx_timeout\":%" PRIu32 ","
+                  "\"rssi\":%d,\"snr\":%.1f},"
 #endif
         "\"notif\":%u,"
         "\"bonds\":%d"
@@ -87,7 +89,9 @@ size_t Diag::buildReport(char* buf, size_t bufSize)
 #if CONFIG_LORA_ENABLED
         loraState, ls.rxPackets, ls.crcErrors,
         ls.headerErrors, ls.decryptOk,
-        ls.textMessages, (int)ls.lastRssi, (double)ls.lastSnr,
+        ls.textMessages, ls.txPackets,
+        ls.txErrors, ls.txTimeouts,
+        (int)ls.lastRssi, (double)ls.lastSnr,
 #endif
         notif, bonds);
 

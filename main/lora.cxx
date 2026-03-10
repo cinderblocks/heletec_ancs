@@ -58,6 +58,7 @@ static constexpr uint8_t CMD_CLEAR_IRQ           = 0x02;
 static constexpr uint8_t CMD_GET_RX_BUF_STATUS   = 0x13;
 static constexpr uint8_t CMD_GET_PKT_STATUS      = 0x14;
 static constexpr uint8_t CMD_READ_BUFFER         = 0x1E;
+static constexpr uint8_t CMD_WRITE_BUFFER        = 0x0E;
 static constexpr uint8_t CMD_WRITE_REGISTER      = 0x0D;
 static constexpr uint8_t CMD_READ_REGISTER       = 0x1D;
 static constexpr uint8_t CMD_SET_REGULATOR_MODE  = 0x96;
@@ -71,12 +72,14 @@ static constexpr uint16_t REG_LORA_SYNC_MSB = 0x0740; // LoRa sync word byte 0
 static constexpr uint16_t REG_LORA_SYNC_LSB = 0x0741; // LoRa sync word byte 1
 
 // ── IRQ bit masks ─────────────────────────────────────────────────────────
+static constexpr uint16_t IRQ_TX_DONE      = (1u << 0);
 static constexpr uint16_t IRQ_RX_DONE      = (1u << 1);
 static constexpr uint16_t IRQ_HEADER_ERR   = (1u << 5);
 static constexpr uint16_t IRQ_CRC_ERROR    = (1u << 6);
 static constexpr uint16_t IRQ_TIMEOUT      = (1u << 9);
 static constexpr uint16_t IRQ_RX_MASK      = IRQ_RX_DONE | IRQ_HEADER_ERR |
                                               IRQ_CRC_ERROR | IRQ_TIMEOUT;
+static constexpr uint16_t IRQ_TX_MASK      = IRQ_TX_DONE | IRQ_TIMEOUT;
 
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -234,6 +237,144 @@ void LoRa::_clearIrq(uint16_t mask)
     _transact(tx, nullptr, sizeof(tx));
 }
 
+// ── _writeBuffer ──────────────────────────────────────────────────────────
+// Write data into the SX1262 data buffer starting at `offset`.
+// SX1262 WriteBuffer layout: [0x0E, offset, data0, data1, …]
+void LoRa::_writeBuffer(uint8_t offset, const uint8_t* data, uint8_t len)
+{
+    // 2-byte header + up to 255 payload bytes
+    uint8_t tx[2 + 255] = { CMD_WRITE_BUFFER, offset };
+    memcpy(tx + 2, data, len);
+    _transact(tx, nullptr, 2 + len);
+}
+
+// ── _setRxIrq ─────────────────────────────────────────────────────────────
+// Configure DIO1 IRQ mask for receive: RX_DONE | HEADER_ERR | CRC_ERROR | TIMEOUT.
+void LoRa::_setRxIrq()
+{
+    const uint16_t mask = IRQ_RX_MASK;
+    uint8_t t[] = { CMD_SET_DIO_IRQ,
+                    static_cast<uint8_t>(mask >> 8), static_cast<uint8_t>(mask),  // global
+                    static_cast<uint8_t>(mask >> 8), static_cast<uint8_t>(mask),  // DIO1
+                    0x00, 0x00,   // DIO2
+                    0x00, 0x00 }; // DIO3
+    _transact(t, nullptr, sizeof(t));
+}
+
+// ── _setTxIrq ─────────────────────────────────────────────────────────────
+// Configure DIO1 IRQ mask for transmit: TX_DONE | TIMEOUT.
+void LoRa::_setTxIrq()
+{
+    const uint16_t mask = IRQ_TX_MASK;
+    uint8_t t[] = { CMD_SET_DIO_IRQ,
+                    static_cast<uint8_t>(mask >> 8), static_cast<uint8_t>(mask),  // global
+                    static_cast<uint8_t>(mask >> 8), static_cast<uint8_t>(mask),  // DIO1
+                    0x00, 0x00,   // DIO2
+                    0x00, 0x00 }; // DIO3
+    _transact(t, nullptr, sizeof(t));
+}
+
+// ── transmit ──────────────────────────────────────────────────────────────
+// Transmit a raw LoRa payload.  Sequences:
+//   1. Standby(STBY_RC)
+//   2. Update packet params with the actual payload length
+//   3. WriteBuffer at TX_BASE (offset 0)
+//   4. Switch DIO1 IRQ to TX_DONE | TIMEOUT
+//   5. Clear any pending task notifications (prevent stale RX wakeup)
+//   6. SetTx with 5-second timeout
+//   7. Wait for DIO1 (TX_DONE or TIMEOUT)
+//   8. Restore RX IRQ mask and re-enter RX
+// Must only be called from the LoRa task.
+bool LoRa::transmit(const uint8_t* data, uint8_t len)
+{
+#if !CONFIG_LORA_TX_ENABLED
+    return false;
+#endif
+
+    if (len == 0 || data == nullptr) return false;
+
+    ESP_LOGD(TAG, "TX: %u bytes", len);
+
+    // 1. Enter standby so we can write the buffer and reconfigure
+    { uint8_t t[] = { CMD_SET_STANDBY, 0x00 }; _transact(t, nullptr, sizeof(t)); }
+
+    // 2. Update packet params with exact payload length (preamble & other
+    //    params stay the same as _initSx1262 configured them)
+    { uint8_t t[] = { CMD_SET_PKT_PARAMS,
+                      0x00, 0x10, // preamble = 16
+                      0x00,       // explicit header
+                      len,        // actual payload length
+                      0x01,       // CRC on
+                      0x00 };     // IQ normal
+      _transact(t, nullptr, sizeof(t)); }
+
+    // 3. Write payload into SX1262 data buffer at offset 0 (TX_BASE)
+    _writeBuffer(0x00, data, len);
+
+    // 4. Switch DIO1 IRQ to TX mode
+    _setTxIrq();
+
+    // 5. Drain any stale task-notification from a prior RX DIO1 ISR
+    ulTaskNotifyTake(pdTRUE, 0);
+
+    // 6. Clear any lingering IRQ flags
+    _clearIrq(0xFFFF);
+
+    // 7. SetTx — timeout = 5 seconds = 5000 ms × 15.625 µs per tick
+    //    SX1262 timeout unit = 15.625 µs; 5 s = 320000 ticks = 0x04E200
+    { uint8_t t[] = { CMD_SET_TX,
+                      0x04, 0xE2, 0x00 };
+      _transact(t, nullptr, sizeof(t)); }
+
+    // 8. Wait for DIO1 (TX_DONE or TIMEOUT) — block up to 6 s
+    const uint32_t notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(6000));
+
+    // 9. Read and clear IRQ status
+    const uint16_t irq = _getIrqStatus();
+    _clearIrq(0xFFFF);
+
+    // 10. Restore RX IRQ mask and packet params (max payload for RX)
+    _setRxIrq();
+    { uint8_t t[] = { CMD_SET_PKT_PARAMS,
+                      0x00, 0x10, // preamble = 16
+                      0x00,       // explicit header
+                      0xFF,       // max payload (RX)
+                      0x01,       // CRC on
+                      0x00 };     // IQ normal
+      _transact(t, nullptr, sizeof(t)); }
+
+    // 11. Evaluate result
+    bool ok = false;
+    if (notified == 0)
+    {
+        // No DIO1 notification within 6 seconds — hard timeout
+        ESP_LOGE(TAG, "TX timeout — no DIO1 notification in 6 s");
+        portENTER_CRITICAL(&_statsLock);
+        _stats.txTimeouts++;
+        portEXIT_CRITICAL(&_statsLock);
+    }
+    else if (irq & IRQ_TX_DONE)
+    {
+        ESP_LOGI(TAG, "TX complete (%u bytes)", len);
+        portENTER_CRITICAL(&_statsLock);
+        _stats.txPackets++;
+        portEXIT_CRITICAL(&_statsLock);
+        ok = true;
+    }
+    else
+    {
+        ESP_LOGW(TAG, "TX failed — IRQ=0x%04x", irq);
+        portENTER_CRITICAL(&_statsLock);
+        _stats.txErrors++;
+        portEXIT_CRITICAL(&_statsLock);
+    }
+
+    // 12. Re-enter RX
+    _setRx();
+
+    return ok;
+}
+
 // ── _initSx1262 ───────────────────────────────────────────────────────────
 bool LoRa::_initSx1262()
 {
@@ -273,13 +414,22 @@ bool LoRa::_initSx1262()
     // ── RF frequency ─────────────────────────────────────────────────────
     _setFrequency(CONFIG_LORA_FREQUENCY_HZ);
 
-    // ── PA config for +22 dBm (HP PA on SX1262) ──────────────────────────
+    // ── PA config for HP PA on SX1262 ──────────────────────────────────────
     // paDutyCycle=4, hpMax=7, deviceSel=0 (SX1262), paLut=1
     { uint8_t t[] = { CMD_SET_PA_CONFIG, 0x04, 0x07, 0x00, 0x01 };
       _transact(t, nullptr, sizeof(t)); }
 
-    // ── TX output power +22 dBm, ramp time 200 µs ────────────────────────
-    { uint8_t t[] = { CMD_SET_TX_PARAMS, 0x16, 0x04 }; _transact(t, nullptr, sizeof(t)); }
+    // ── TX output power + ramp time 200 µs ──────────────────────────────
+    // SX1262 SetTxParams power byte is signed: -9 to +22 dBm.
+    // Cast via int8_t to handle negative values correctly in the SPI byte.
+#if CONFIG_LORA_TX_ENABLED
+    static constexpr int8_t txPow = static_cast<int8_t>(CONFIG_LORA_TX_POWER_DBM);
+#else
+    static constexpr int8_t txPow = 22; // irrelevant for RX-only, but must be valid
+#endif
+    { uint8_t t[] = { CMD_SET_TX_PARAMS,
+                      static_cast<uint8_t>(txPow), 0x04 };
+      _transact(t, nullptr, sizeof(t)); }
 
     // ── Modem preset (SF, BW, CR, LDRO) ──────────────────────────────────
 #if   defined(CONFIG_LORA_PRESET_LONG_FAST)
@@ -304,8 +454,9 @@ bool LoRa::_initSx1262()
                       0x00 };     // IQ normal (not inverted)
       _transact(t, nullptr, sizeof(t)); }
 
-    // ── Buffer base addresses (TX=0, RX=0 — RX-only, no overlap issue) ───
-    { uint8_t t[] = { CMD_SET_BUF_BASE_ADDR, 0x00, 0x00 };
+    // ── Buffer base addresses (TX=0, RX=128 — separate regions to prevent
+    //    overlap during the TX→RX transition) ────────────────────────────────
+    { uint8_t t[] = { CMD_SET_BUF_BASE_ADDR, 0x00, 0x80 };
       _transact(t, nullptr, sizeof(t)); }
 
     // ── LoRa sync word = Meshtastic private (0x12 in RadioLib = 0x1424 in regs)
@@ -313,13 +464,7 @@ bool LoRa::_initSx1262()
     _writeReg(REG_LORA_SYNC_LSB, SYNC_LO);
 
     // ── DIO1 IRQ: RX_DONE | HEADER_ERR | CRC_ERROR | TIMEOUT ────────────
-    { const uint16_t mask = IRQ_RX_MASK;
-      uint8_t t[] = { CMD_SET_DIO_IRQ,
-                      static_cast<uint8_t>(mask >> 8), static_cast<uint8_t>(mask),  // global mask
-                      static_cast<uint8_t>(mask >> 8), static_cast<uint8_t>(mask),  // DIO1
-                      0x00, 0x00,   // DIO2 (used by RF switch, managed by chip)
-                      0x00, 0x00 }; // DIO3 (TCXO)
-      _transact(t, nullptr, sizeof(t)); }
+    _setRxIrq();
 
     // ── Verify the sync word was written correctly ────────────────────────
     const uint8_t s0 = _readReg(REG_LORA_SYNC_MSB);
@@ -648,7 +793,7 @@ void LoRa::run(void* /*data*/)
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(30000));
 
         const uint16_t irq = _getIrqStatus();
-        _clearIrq(IRQ_RX_MASK);
+        _clearIrq(IRQ_RX_MASK | IRQ_TX_MASK);
 
         if (irq & IRQ_RX_DONE)
         {
@@ -718,9 +863,11 @@ void LoRa::run(void* /*data*/)
             ESP_LOGI(TAG,
                 "DIAG: rx=%" PRIu32 "  crc_err=%" PRIu32
                 "  hdr_err=%" PRIu32 "  decrypt_ok=%" PRIu32
-                "  text=%" PRIu32 "  last_rssi=%d  last_snr=%.1f",
+                "  text=%" PRIu32 "  tx=%" PRIu32 "  tx_err=%" PRIu32
+                "  tx_timeout=%" PRIu32 "  last_rssi=%d  last_snr=%.1f",
                 s.rxPackets, s.crcErrors, s.headerErrors,
                 s.decryptOk, s.textMessages,
+                s.txPackets, s.txErrors, s.txTimeouts,
                 s.lastRssi, (double)s.lastSnr);
         }
 
@@ -730,4 +877,4 @@ void LoRa::run(void* /*data*/)
 }
 
 /* extern */
-LoRa Lora("LoRa", 8192);
+LoRa Lora("LoRa", 10240);

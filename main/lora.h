@@ -49,6 +49,11 @@ struct LoRaStats {
     uint32_t decryptOk    = 0; ///< packets that survived AES decryption
     uint32_t textMessages = 0; ///< TEXT_MESSAGE_APP packets displayed
 
+    // TX counters (cumulative since boot)
+    uint32_t txPackets    = 0; ///< successful TX_DONE events
+    uint32_t txErrors     = 0; ///< TX attempts that failed (not TX_DONE)
+    uint32_t txTimeouts   = 0; ///< TX attempts that timed out waiting for DIO1
+
     // Last received packet signal quality
     int16_t lastRssi = 0;
     float   lastSnr  = 0.f;
@@ -76,13 +81,18 @@ struct LoRaStats {
 class LoRa : public Task
 {
 public:
-    explicit LoRa(const char* name, uint16_t stackSize = 8192);
+    explicit LoRa(const char* name, uint16_t stackSize = 10240);
 
     /// Return a copy of the most recently received text message.  Thread-safe.
     MeshMessage lastMessage() const;
 
     /// Return a snapshot of LoRa counters and state.  Thread-safe.
     LoRaStats stats() const;
+
+    /// Transmit a raw LoRa payload.  Blocks until TX_DONE or timeout.
+    /// Must only be called from the LoRa task (run loop).
+    /// Returns true on success, false on error/timeout.
+    bool transmit(const uint8_t* data, uint8_t len);
 
 protected:
     void run(void* data) override;
@@ -113,6 +123,7 @@ private:
     void _transact(const uint8_t* tx, uint8_t* rx, size_t len);
     void _writeReg(uint16_t addr, uint8_t val);
     uint8_t _readReg(uint16_t addr);
+    void _writeBuffer(uint8_t offset, const uint8_t* data, uint8_t len);
 
     // ── SX1262 init & config ──────────────────────────────────────────────
     bool _initSx1262();
@@ -120,6 +131,8 @@ private:
     void _calibrateImage(uint32_t freqHz);
     void _setModulation(uint8_t sf, uint8_t bw, uint8_t cr, uint8_t ldro);
     void _setRx();
+    void _setRxIrq();
+    void _setTxIrq();
 
     uint16_t _getIrqStatus();
     void     _clearIrq(uint16_t mask);

@@ -111,6 +111,24 @@ config LORA_TX_POWER_DBM
         US ISM 915 MHz: FCC Part 15.247 allows up to +30 dBm EIRP.
         EU 868 MHz: ETSI EN 300 220 limits to +14 dBm ERP (≈+16 dBm EIRP).
 
+config MESH_NODE_SHORT_NAME
+    string "Meshtastic node short name (1–4 chars)"
+    default "YIFF"
+    depends on LORA_ENABLED
+    help
+        Short name broadcast in NODEINFO_APP packets and shown on other
+        Meshtastic devices.  Must be 1–4 printable ASCII characters.
+        Can be overridden at runtime via NVS (persisted across reboots).
+
+config MESH_NODE_LONG_NAME
+    string "Meshtastic node long name (up to 32 chars)"
+    default "HatefulBlue"
+    depends on LORA_ENABLED
+    help
+        Human-readable name broadcast in NODEINFO_APP packets.
+        Up to 32 UTF-8 characters.
+        Can be overridden at runtime via NVS (persisted across reboots).
+
 endmenu
 
 menu "Buzzer Configuration"

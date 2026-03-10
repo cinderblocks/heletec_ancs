@@ -11,6 +11,7 @@ set(SOURCE_FILES
     hardware.cxx
     lora.cxx
     main.cxx
+    meshnode.cxx
     notificationservice.cxx
     task.cxx
     tft.cxx

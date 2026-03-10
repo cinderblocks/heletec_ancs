@@ -31,11 +31,13 @@
  * Service UUID:        BA5EBA11-0000-D1A6-0000-000000000001
  * Characteristic UUID: BA5EBA11-0000-D1A6-0000-000000000002
  *
- * Example report (≈ 250 bytes):
- *   {"up":3600,"heap":142080,"heap_min":98304,"ble":1,"bat":85,
+ * Example report (≈ 280 bytes):
+ *   {"node_id":"!deadbeef","short_name":"YIFF",
+ *    "up":3600,"heap":142080,"heap_min":98304,"ble":1,"bat":85,
  *    "gps":{"fix":1,"sats":8,"hdop":1.2,"ok":142,"fail":0},
  *    "lora":{"state":"listening","rx":12,"crc_err":0,"hdr_err":0,
- *            "decrypt":10,"text":3,"rssi":-87,"snr":7.5},
+ *            "decrypt":10,"text":3,"tx":2,"tx_err":0,"tx_timeout":0,
+ *            "rssi":-87,"snr":7.5},
  *    "notif":2,"bonds":1}
  *
  * Usage:

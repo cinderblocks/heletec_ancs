@@ -21,6 +21,7 @@
 #include "hardware.h"
 #include "bleservice.h"
 #include "lora.h"
+#include "meshnode.h"
 #include "notificationservice.h"
 #include "task.h"
 
@@ -52,6 +53,7 @@ extern "C" void app_main(void)
     NotificationReceiver.start();
     gps.start();
 #if CONFIG_LORA_ENABLED
+    Node.init();
     Lora.start();
 #endif
     static MainServerCallback serverCallback(&Heltec);

@@ -19,6 +19,7 @@
 #include "bleservice.h"
 #include "gps.h"
 #include "hardware.h"
+#include "lora.h"
 #include "notificationservice.h"
 #include "sdkconfig.h"
 
@@ -56,6 +57,13 @@ size_t Diag::buildReport(char* buf, size_t bufSize)
     const uint32_t gpsOk    = gps.passedChecksum();
     const uint32_t gpsFail  = gps.failedChecksum();
 
+#if CONFIG_LORA_ENABLED
+    const LoRaStats ls = Lora.stats();
+    const char* loraState =
+        ls.state == LoRaStats::State::Listening  ? "listening"   :
+        ls.state == LoRaStats::State::InitFailed ? "init_failed" : "disabled";
+#endif
+
     int n = snprintf(buf, bufSize,
         "{"
         "\"up\":%" PRIu32 ","
@@ -65,16 +73,25 @@ size_t Diag::buildReport(char* buf, size_t bufSize)
         "\"bat\":%u,"
         "\"gps\":{\"fix\":%d,\"sats\":%" PRIu32 ",\"hdop\":%.1f,"
                  "\"ok\":%" PRIu32 ",\"fail\":%" PRIu32 "},"
+#if CONFIG_LORA_ENABLED
+        "\"lora\":{\"state\":\"%s\",\"rx\":%" PRIu32 ",\"crc_err\":%" PRIu32 ","
+                  "\"hdr_err\":%" PRIu32 ",\"decrypt\":%" PRIu32 ","
+                  "\"text\":%" PRIu32 ",\"rssi\":%d,\"snr\":%.1f},"
+#endif
         "\"notif\":%u,"
         "\"bonds\":%d"
         "}",
         upSec, heap, heapMin,
         bleConn, bat,
         gpsFix, gpsSats, (double)gpsHdop, gpsOk, gpsFail,
+#if CONFIG_LORA_ENABLED
+        loraState, ls.rxPackets, ls.crcErrors,
+        ls.headerErrors, ls.decryptOk,
+        ls.textMessages, (int)ls.lastRssi, (double)ls.lastSnr,
+#endif
         notif, bonds);
 
     if (n < 0 || (size_t)n >= bufSize) {
-        // Truncation — null-terminate and return what we have.
         buf[bufSize - 1] = '\0';
         return bufSize - 1;
     }
@@ -85,7 +102,7 @@ size_t Diag::buildReport(char* buf, size_t bufSize)
 void Diag::CharCallbacks::onRead(NimBLECharacteristic* pChar,
                                  NimBLEConnInfo& /*connInfo*/)
 {
-    char buf[256];
+    char buf[384];
     const size_t len = Diag::buildReport(buf, sizeof(buf));
     pChar->setValue(reinterpret_cast<const uint8_t*>(buf), len);
     ESP_LOGD(TAG, "Read (%zu B): %s", len, buf);
@@ -112,7 +129,7 @@ void Diag::_notifyTimerCb(TimerHandle_t /*xTimer*/)
 {
     if (!_pChar || !Ble.isConnected()) { return; }
 
-    char buf[256];
+    char buf[384];
     const size_t len = buildReport(buf, sizeof(buf));
     _pChar->setValue(reinterpret_cast<const uint8_t*>(buf), len);
     _pChar->notify();
@@ -137,7 +154,7 @@ void Diag::registerService(NimBLEServer* pServer)
 
     // Prime the characteristic with an initial value so the very first READ
     // never returns an empty payload.
-    char buf[256];
+    char buf[384];
     const size_t len = buildReport(buf, sizeof(buf));
     _pChar->setValue(reinterpret_cast<const uint8_t*>(buf), len);
 

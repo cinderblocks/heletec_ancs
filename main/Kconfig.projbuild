@@ -42,6 +42,54 @@ config GPS_DIAG_LOG
 
 endmenu
 
+menu "LoRa / Meshtastic Configuration"
+
+config LORA_ENABLED
+    bool "Enable LoRa Meshtastic receive"
+    default y
+    help
+        Listen on the configured frequency for Meshtastic packets.
+        Received text messages are decrypted with the default channel PSK
+        and shown on the display for 5 seconds.
+        Uses the SX1262 on SPI2 (NSS=GPIO8, SCK=9, MOSI=10, MISO=11,
+        RST=12, BUSY=13, DIO1=14) — Heltec Wireless Tracker 1.1 schematic.
+
+config LORA_FREQUENCY_HZ
+    int "Channel centre frequency (Hz)"
+    default 906875000
+    depends on LORA_ENABLED
+    help
+        Centre frequency in Hz for the Meshtastic channel to monitor.
+          906875000 = US LongFast default channel (US_915 region)
+          869525000 = EU LongFast default channel (EU_868 region)
+          433175000 = EU_433 region default channel
+          470000000 = CN_470 region default channel
+        Must match the region and channel of the Meshtastic nodes nearby.
+
+choice LORA_MODEM_PRESET
+    prompt "Meshtastic modem preset"
+    depends on LORA_ENABLED
+    default LORA_PRESET_LONG_FAST
+    help
+        Select the LoRa modem parameters to match the Meshtastic nodes
+        in your area.  LongFast is the factory default for all regions.
+
+    config LORA_PRESET_LONG_FAST
+        bool "LongFast  (SF11 / BW 250 kHz / CR 4/5) — factory default"
+
+    config LORA_PRESET_LONG_SLOW
+        bool "LongSlow  (SF12 / BW 125 kHz / CR 4/8)"
+
+    config LORA_PRESET_MEDIUM_SLOW
+        bool "MediumSlow (SF10 / BW 250 kHz / CR 4/5)"
+
+    config LORA_PRESET_SHORT_FAST
+        bool "ShortFast  (SF7  / BW 250 kHz / CR 4/5)"
+
+endchoice
+
+endmenu
+
 menu "Buzzer Configuration"
 
 config BUZZER_ENABLED

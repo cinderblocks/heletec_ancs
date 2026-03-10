@@ -610,6 +610,17 @@ CONFIG_DIAG_NOTIFY_INTERVAL_SEC=30
 # end of GPS Configuration
 
 #
+# LoRa / Meshtastic Configuration
+#
+CONFIG_LORA_ENABLED=y
+CONFIG_LORA_FREQUENCY_HZ=906875000
+CONFIG_LORA_PRESET_LONG_FAST=y
+# CONFIG_LORA_PRESET_LONG_SLOW is not set
+# CONFIG_LORA_PRESET_MEDIUM_SLOW is not set
+# CONFIG_LORA_PRESET_SHORT_FAST is not set
+# end of LoRa / Meshtastic Configuration
+
+#
 # Buzzer Configuration
 #
 CONFIG_BUZZER_ENABLED=y

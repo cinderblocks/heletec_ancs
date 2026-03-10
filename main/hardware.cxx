@@ -20,8 +20,10 @@
 #include "bitmaps.h"
 #include "bleservice.h"
 #include "buzzer.h"
+#include "lora.h"
 #include "notificationservice.h"
 #include <algorithm>
+#include <cinttypes>
 #include <driver/gpio.h>
 #include <esp_adc/adc_oneshot.h>
 #include <freertos/task.h>
@@ -230,6 +232,21 @@ void Hardware::startDrawing(void* pvParameters)
             // xTaskNotifyWait to return immediately on the next iteration and
             // preventing IDLE0 from ever running — which triggers the task WDT.
             vTaskDelay(pdMS_TO_TICKS(20));
+        }
+
+        if (bits & DRAW_LORA)
+        {
+#if CONFIG_LORA_ENABLED
+            MeshMessage msg = Lora.lastMessage();
+            if (msg.valid)
+            {
+                h->showLoraMessage(msg);
+                h->glow(true);
+                vTaskDelay(pdMS_TO_TICKS(5000));
+                h->glow(false);
+                h->standby();
+            }
+#endif
         }
     }
     ESP_LOGI(TAG, "Ending Draw task");
@@ -472,6 +489,27 @@ void Hardware::showGpsState(bool fixed)
     mGpsFixed = fixed;
     portEXIT_CRITICAL(&mHardwareLock);
     notifyDraw(DRAW_GPS);
+}
+
+void Hardware::showLoraMessage(MeshMessage const& msg)
+{
+    blank();
+    mDisplay.fillRectangle(0, 20, mDisplay.width(), mDisplay.height() - 20, TFT::Color::WHITE);
+
+    // Header row: "Mesh" label + node ID in hex
+    char nodeStr[12];
+    snprintf(nodeStr, sizeof(nodeStr), "%08" PRIx32, msg.fromNode);
+    mDisplay.drawStr(0, 21, "Mesh", Font_7x10, TFT::Color::BLACK, TFT::Color::WHITE);
+    mDisplay.drawStr(mDisplay.width() - 56, 21, nodeStr, Font_7x10,
+                     TFT::Color::BLACK, TFT::Color::WHITE);
+
+    // Message text (up to two Font_11x18 lines)
+    mDisplay.drawStr(0, 44, msg.text, Font_11x18, TFT::Color::BLACK, TFT::Color::WHITE);
+
+    // RSSI / SNR in small text at the bottom
+    char sigStr[24];
+    snprintf(sigStr, sizeof(sigStr), "%d dBm  %.1f dB", msg.rssi, (double)msg.snr);
+    mDisplay.drawStr(0, 100, sigStr, Font_7x10, TFT::Color::BLACK, TFT::Color::WHITE);
 }
 
 void Hardware::glow(bool on)

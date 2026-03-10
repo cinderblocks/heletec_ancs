@@ -20,6 +20,7 @@
 #include "gps.h"
 #include "hardware.h"
 #include "bleservice.h"
+#include "lora.h"
 #include "notificationservice.h"
 #include "task.h"
 
@@ -50,6 +51,9 @@ extern "C" void app_main(void)
     Ble.startServer(CONFIG_BLE_DEVICE_NAME);
     NotificationReceiver.start();
     gps.start();
+#if CONFIG_LORA_ENABLED
+    Lora.start();
+#endif
     static MainServerCallback serverCallback(&Heltec);
     Ble.setServerCallback(&serverCallback);
 

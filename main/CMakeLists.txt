@@ -9,6 +9,7 @@ set(SOURCE_FILES
     fonts.cxx
     gps.cxx
     hardware.cxx
+    lora.cxx
     main.cxx
     notificationservice.cxx
     task.cxx
@@ -26,6 +27,7 @@ set(REQUIRES
     esp_driver_gpio
     esp_driver_ledc
     esp_adc
+    mbedtls
 )
 
 idf_component_register(SRCS ${SOURCE_FILES} REQUIRES ${REQUIRES} INCLUDE_DIRS ".")

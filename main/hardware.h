@@ -67,6 +67,7 @@ public:
     static constexpr uint32_t DRAW_BATTERY = (1u << 2); // battery level check
     static constexpr uint32_t DRAW_TIME    = (1u << 3); // CTS clock updated
     static constexpr uint32_t DRAW_GPS     = (1u << 4); // GPS fix state changed
+    static constexpr uint32_t DRAW_LORA    = (1u << 5); // Meshtastic message received
 
     Hardware();
     ~Hardware();
@@ -79,6 +80,7 @@ public:
     void showCallState(bool active);
     void showGpsState(bool fixed);
     void glow(bool on);
+    void showLoraMessage(struct MeshMessage const& msg);
     /**
      * Called from the CTS TimeCallback after the system clock has been synced.
      * Stores the UTC offset, immediately updates the header clock, and starts

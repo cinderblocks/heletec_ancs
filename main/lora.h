@@ -218,10 +218,11 @@ private:
     static constexpr size_t MESH_HDR = 16;
 
     // PortNum values used by this firmware
-    static constexpr uint32_t PORT_TEXT      = 1;  ///< TEXT_MESSAGE_APP
-    static constexpr uint32_t PORT_POSITION  = 3;  ///< POSITION_APP
-    static constexpr uint32_t PORT_NODEINFO  = 4;  ///< NODEINFO_APP  (was 67 = TELEMETRY_APP — wrong!)
-    static constexpr uint32_t PORT_TELEMETRY = 67; ///< TELEMETRY_APP (kept for RX dispatch if needed)
+    static constexpr uint32_t PORT_TEXT       = 1;  ///< TEXT_MESSAGE_APP
+    static constexpr uint32_t PORT_POSITION   = 3;  ///< POSITION_APP
+    static constexpr uint32_t PORT_NODEINFO   = 4;  ///< NODEINFO_APP  (was 67 = TELEMETRY_APP — wrong!)
+    static constexpr uint32_t PORT_TELEMETRY  = 67; ///< TELEMETRY_APP (kept for RX dispatch if needed)
+    static constexpr uint32_t PORT_TRACEROUTE = 70; ///< TRACEROUTE_APP — route discovery
 
     // Meshtastic default channel AES-128 PSK.
     // Derived from the "Default" channel name; used by every out-of-box device.

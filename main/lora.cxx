@@ -2240,7 +2240,10 @@ void LoRa::_processPacket(const uint8_t* buf, uint8_t pktLen,
             return;
         }
     }
-    if (payload == nullptr || payloadLen == 0)
+    // An empty payload is valid for TRACEROUTE_APP — an empty RouteDiscovery proto
+    // means a direct traceroute request with no intermediate hops yet.
+    // All other portnums require a payload.
+    if ((payload == nullptr || payloadLen == 0) && portnum != PORT_TRACEROUTE)
     {
         ESP_LOGI(TAG, "Decrypt OK but no payload in Data proto for pkt 0x%08" PRIx32
                  " from 0x%08" PRIx32 " portnum=%u",
@@ -2532,6 +2535,161 @@ void LoRa::_processPacket(const uint8_t* buf, uint8_t pktLen,
         {
             ESP_LOGD(TAG, "NodeInfo parse failed for pkt 0x08" PRIx32, pktId);
         }
+    }
+    else if (portnum == PORT_TRACEROUTE && to == Node.nodeId())
+    {
+        // ── Traceroute destination response ───────────────────────────────
+        //
+        // Meshtastic TRACEROUTE_APP (portnum 70) protocol (firmware 2.3+):
+        //
+        // Forward phase: the initiating app sends a RouteDiscovery proto with
+        // an empty `route` field to the destination node.  Each intermediate
+        // router appends its own node ID (and the received SNR) to `route` /
+        // `snr_towards` before relaying.
+        //
+        // Destination phase (this code): we are the final `to` target.
+        // We append our node ID to `route` and our received SNR to
+        // `snr_towards`, then unicast the RouteDiscovery back to `from`
+        // with request_id = incoming pktId so the app can correlate it.
+        //
+        // Return phase (handled by the mesh): intermediate routers append to
+        // `route_back` / `snr_back` on the journey back to the initiator.
+        //
+        // RouteDiscovery proto wire format (meshtastic/mesh.proto):
+        //   Field 1 (route,        repeated fixed32):  tag 0x0D per element
+        //   Field 2 (snr_towards,  repeated sint32):   tag 0x10 per element (zigzag)
+        //   Field 3 (route_back,   repeated fixed32):  tag 0x1D per element
+        //   Field 4 (snr_back,     repeated sint32):   tag 0x20 per element (zigzag)
+
+        static constexpr size_t TRACEROUTE_MAX = 8; // max hop count
+
+        // ── Parse incoming RouteDiscovery ─────────────────────────────────
+        uint32_t route[TRACEROUTE_MAX] = {};
+        int32_t  snrTowards[TRACEROUTE_MAX] = {};   // already zigzag-encoded uint32
+        size_t   routeLen = 0;
+        size_t   snrLen   = 0;
+
+        // payload may be nullptr/empty when the initiator sent a direct traceroute
+        // with no intermediate hops — the RouteDiscovery proto is empty in that case.
+        if (payload != nullptr && payloadLen > 0)
+        {
+            const uint8_t* rp  = payload;
+            const uint8_t* end = payload + payloadLen;
+            while (rp < end)
+            {
+                // Read tag byte (all RouteDiscovery field numbers < 16 → single byte)
+                uint8_t tagByte = *rp++;
+                uint8_t field   = tagByte >> 3;
+                uint8_t wt      = tagByte & 0x07;
+
+                if (field == 1 && wt == 5)          // route: fixed32
+                {
+                    if (rp + 4 > end) break;
+                    uint32_t id = (uint32_t)rp[0]
+                                | (uint32_t)rp[1] <<  8
+                                | (uint32_t)rp[2] << 16
+                                | (uint32_t)rp[3] << 24;
+                    if (routeLen < TRACEROUTE_MAX) route[routeLen++] = id;
+                    rp += 4;
+                }
+                else if (field == 2 && wt == 0)     // snr_towards: zigzag sint32
+                {
+                    uint32_t zz = 0; int sh = 0;
+                    while (rp < end) {
+                        uint8_t b = *rp++;
+                        zz |= (uint32_t)(b & 0x7F) << sh;
+                        if (!(b & 0x80)) break;
+                        sh += 7;
+                    }
+                    if (snrLen < TRACEROUTE_MAX) snrTowards[snrLen++] = (int32_t)zz; // store raw zigzag
+                    (void)zz;
+                }
+                else if (wt == 5) { if (rp + 4 <= end) rp += 4; else break; }
+                else if (wt == 0) { while (rp < end && (*rp & 0x80)) rp++; if (rp < end) rp++; }
+                else if (wt == 1) { if (rp + 8 <= end) rp += 8; else break; }
+                else if (wt == 2)
+                {
+                    uint32_t l = 0; int sh = 0;
+                    while (rp < end) {
+                        uint8_t b = *rp++;
+                        l |= (uint32_t)(b & 0x7F) << sh;
+                        if (!(b & 0x80)) break;
+                        sh += 7;
+                    }
+                    if (rp + l <= end) rp += l; else break;
+                }
+                else break;
+            }
+        }
+
+        // ── Append our own node ID and received SNR ───────────────────────
+        if (routeLen < TRACEROUTE_MAX)
+            route[routeLen++] = Node.nodeId();
+
+        // Convert received SNR (float dB) to Meshtastic's 0.25 dB integer units,
+        // then zigzag-encode it for the sint32 wire format.
+        const int32_t ourSnrRaw  = static_cast<int32_t>(snr * 4.0f);
+        const uint32_t ourSnrZz  = _pbZigzag(ourSnrRaw);
+        if (snrLen < TRACEROUTE_MAX)
+            snrTowards[snrLen++] = static_cast<int32_t>(ourSnrZz); // store as zigzag uint
+
+        // ── Log ───────────────────────────────────────────────────────────
+        {
+            char routeStr[12 * TRACEROUTE_MAX + 1] = {};
+            size_t rs = 0;
+            for (size_t i = 0; i < routeLen; i++)
+                rs += snprintf(routeStr + rs, sizeof(routeStr) - rs,
+                               "!%08" PRIx32 " ", route[i]);
+            ESP_LOGI(TAG, "TRACEROUTE from 0x%08" PRIx32 " → route: %s(rssi=%d snr=%.1f)",
+                     from, routeStr, rssi, (double)snr);
+        }
+
+        // ── Encode response RouteDiscovery ────────────────────────────────
+        // Field 1 (route): 5 bytes per element (tag + 4-byte fixed32)
+        // Field 2 (snr_towards): 1 tag + up to 5 varint bytes per element
+        uint8_t rdBuf[5 * TRACEROUTE_MAX + 6 * TRACEROUTE_MAX + 4] = {};
+        size_t  rdLen = 0;
+
+        // Field 1: route (repeated fixed32)
+        for (size_t i = 0; i < routeLen; i++)
+        {
+            rdBuf[rdLen++] = 0x0D; // tag: field 1, wire type 5 (fixed32)
+            rdBuf[rdLen++] = static_cast<uint8_t>(route[i]);
+            rdBuf[rdLen++] = static_cast<uint8_t>(route[i] >>  8);
+            rdBuf[rdLen++] = static_cast<uint8_t>(route[i] >> 16);
+            rdBuf[rdLen++] = static_cast<uint8_t>(route[i] >> 24);
+        }
+
+        // Field 2: snr_towards (repeated sint32, zigzag varint)
+        for (size_t i = 0; i < snrLen; i++)
+        {
+            rdBuf[rdLen++] = 0x10; // tag: field 2, wire type 0 (varint)
+            rdLen += _pbVarint(rdBuf + rdLen,
+                               static_cast<uint32_t>(snrTowards[i]));
+        }
+
+        // ── Transmit response ─────────────────────────────────────────────
+#if CONFIG_LORA_TX_ENABLED
+        {
+            uint8_t pkt[256] = {};
+            uint8_t pktLen2  = 0;
+            if (_buildTxPacket(pkt, pktLen2, PORT_TRACEROUTE,
+                               rdBuf, rdLen,
+                               /*want_response=*/false,
+                               /*to=*/from,
+                               /*requestId=*/pktId))
+            {
+                ESP_LOGI(TAG, "TX TRACEROUTE reply to 0x%08" PRIx32
+                         " req_id=0x%08" PRIx32 " route_hops=%u",
+                         from, pktId, (unsigned)routeLen);
+                transmit(pkt, pktLen2);
+            }
+            else
+            {
+                ESP_LOGW(TAG, "TRACEROUTE: _buildTxPacket failed");
+            }
+        }
+#endif
     }
     else
     {

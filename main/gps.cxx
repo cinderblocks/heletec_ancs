@@ -413,5 +413,21 @@ float GPS::altitude()
         : 0.0f;
 }
 
+float GPS::speed()
+{
+    return (_gps.speed.isValid() && _gps.location.isValid() &&
+            _gps.location.age() < FIX_MAX_AGE_MS)
+        ? static_cast<float>(_gps.speed.kmph())
+        : 0.0f;
+}
+
+float GPS::course()
+{
+    return (_gps.course.isValid() && _gps.location.isValid() &&
+            _gps.location.age() < FIX_MAX_AGE_MS)
+        ? static_cast<float>(_gps.course.deg())
+        : 0.0f;
+}
+
 /* extern */
 GPS gps("GPS", 8192);

@@ -44,6 +44,8 @@ public:
     double lat();      ///< latitude in decimal degrees  (e.g. 37.774929)
     double lng();      ///< longitude in decimal degrees (e.g. -122.419416)
     float  altitude(); ///< altitude in metres above MSL (0 if invalid)
+    float  speed();    ///< ground speed in km/h (0 if invalid/no fix)
+    float  course();   ///< heading in degrees CW from north, 0-359.99 (0 if invalid)
 
 private:
     void run(void *data) override;

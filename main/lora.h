@@ -38,11 +38,45 @@ struct MeshMessage {
 };
 
 /**
+ * A received Meshtastic position fix — plain-old-data, safe to copy across tasks.
+ */
+struct MeshPosition {
+    uint32_t  fromNode  = 0;
+    int32_t   lat_i     = 0;   ///< latitude  × 1e7 (degrees)
+    int32_t   lon_i     = 0;   ///< longitude × 1e7 (degrees)
+    int32_t   alt_m     = 0;   ///< altitude metres above MSL
+    uint32_t  sats      = 0;
+    int16_t   rssi      = 0;
+    float     snr       = 0.f;
+    uint32_t  unixTime  = 0;   ///< timestamp from Position proto (0 if absent)
+    TickType_t lastSeen = 0;   ///< xTaskGetTickCount() when last updated
+    bool      valid     = false;
+};
+
+/**
+ * A received Meshtastic node identity — plain-old-data, safe to copy across tasks.
+ */
+struct MeshUser {
+    uint32_t fromNode    = 0;
+    char     id[12]      = {}; ///< "!xxxxxxxx\0"
+    char     longName[33]= {};
+    char     shortName[5]= {};
+    uint32_t hwModel     = 0;
+    uint8_t  publicKey[32]= {}; ///< X25519 public key (field 8), needed for PKC decryption
+    bool     hasPublicKey = false;
+    int16_t  rssi        = 0;
+    float    snr         = 0.f;
+    bool     valid       = false;
+};
+
+/**
  * Counters and signal info accumulated by the LoRa receive loop.
  * Snapshot is safe to copy across tasks (taken under _statsLock).
  */
 struct LoRaStats {
     // Packet counters (cumulative since boot)
+    uint32_t preambles    = 0; ///< PREAMBLE_DETECTED events (sync word search started)
+    uint32_t headersValid = 0; ///< HEADER_VALID events (header CRC OK)
     uint32_t rxPackets    = 0; ///< raw IRQ_RX_DONE events
     uint32_t crcErrors    = 0; ///< CRC error events
     uint32_t headerErrors = 0; ///< header error events
@@ -106,11 +140,31 @@ public:
                       uint32_t unixTime = 0);
 
     /**
-     * Broadcast a NODEINFO_APP packet advertising this device's identity.
-     * Uses Node.nodeId() / Node.longName() / Node.shortName().
+     * Broadcast (or unicast) a NODEINFO_APP packet advertising this device.
+     * @param to          Destination node ID. 0xFFFFFFFF = broadcast (default).
+     * @param wantResponse Set true for initial broadcasts; false for replies.
+     * @param requestId   Packet ID of the incoming NodeInfo request being answered.
+     *                    Placed in Data proto field 6 (request_id, fixed32).
+     *                    Meshtastic Router.cpp matches this against the pending
+     *                    request and calls sendToPhone() to update the app.
+     */
+    bool sendNodeInfo(uint32_t to = 0xFFFFFFFF, bool wantResponse = true,
+                      uint32_t requestId = 0);
+
+    /**
+     * Broadcast a TELEMETRY_APP Device Metrics packet (uptime + nominal battery).
+     * Keeps this node appearing as "active" in Meshtastic app node lists.
      * Must only be called from the LoRa task.  Returns true on TX success.
      */
-    bool sendNodeInfo();
+    bool sendTelemetry();
+
+    /// Number of unique neighbour nodes seen since boot (0–8).  Thread-safe.
+    size_t neighborCount() const;
+
+    /// Copy of the neighbour entry at index idx (0-based).  Thread-safe.
+    /// Returns a zeroed MeshPosition/MeshUser if idx is out of range.
+    MeshPosition neighborPosition(size_t idx) const;
+    MeshUser     neighborUser(size_t idx) const;
 
 protected:
     void run(void* data) override;
@@ -151,26 +205,37 @@ private:
     void _setRx();
     void _setRxIrq();
     void _setTxIrq();
+    void _fixIqPolarity(); ///< SX1262 errata 15.3 — fix IQ polarity register
 
     uint16_t _getIrqStatus();
     void     _clearIrq(uint16_t mask);
+    uint8_t  _getChipMode();    ///< bits [6:4] of GetStatus: 2=STBY_RC 5=RX 6=TX
+    uint16_t _getDeviceErrors();///< opError bitmask; bit8=PA_RAMP_ERR bit6=PLL_LOCK_ERR
+    int16_t  _getInstRssi();    ///< instantaneous RSSI in RX mode (dBm); noise floor check
 
     // ── Meshtastic constants ──────────────────────────────────────────────
     // Over-the-air header: [to(4), from(4), id(4), flags(1), chan(1), pad(2)]
     static constexpr size_t MESH_HDR = 16;
 
     // PortNum values used by this firmware
-    static constexpr uint32_t PORT_TEXT     = 1;  ///< TEXT_MESSAGE_APP
-    static constexpr uint32_t PORT_POSITION = 3;  ///< POSITION_APP
-    static constexpr uint32_t PORT_NODEINFO = 67; ///< NODEINFO_APP
+    static constexpr uint32_t PORT_TEXT      = 1;  ///< TEXT_MESSAGE_APP
+    static constexpr uint32_t PORT_POSITION  = 3;  ///< POSITION_APP
+    static constexpr uint32_t PORT_NODEINFO  = 4;  ///< NODEINFO_APP  (was 67 = TELEMETRY_APP — wrong!)
+    static constexpr uint32_t PORT_TELEMETRY = 67; ///< TELEMETRY_APP (kept for RX dispatch if needed)
 
     // Meshtastic default channel AES-128 PSK.
     // Derived from the "Default" channel name; used by every out-of-box device.
     static const uint8_t DEFAULT_PSK[16];
 
-    // Private mesh LoRa sync word (RadioLib 0x12 → SX1262 registers 0x1424).
-    static constexpr uint8_t SYNC_HI = 0x14;
-    static constexpr uint8_t SYNC_LO = 0x24;
+    // Meshtastic LoRa sync word.
+    // Meshtastic firmware uses RadioLib setSyncWord(0x2B), NOT the generic
+    // LoRa private sync word 0x12.  RadioLib converts 0x2B to SX1262
+    // register values via: MSB=(sw & 0xF0)|0x04, LSB=((sw & 0x0F)<<4)|0x04
+    //   → MSB = 0x24, LSB = 0xB4  (registers 0x0740:0x0741)
+    // The old value 0x1424 was the generic LoRa private sync word (0x12 in
+    // RadioLib), causing preamble detection but zero sync word matches.
+    static constexpr uint8_t SYNC_HI = 0x24;
+    static constexpr uint8_t SYNC_LO = 0xB4;
 
     // ── Meshtastic packet processing ──────────────────────────────────────
     void _processPacket(const uint8_t* buf, uint8_t len,
@@ -180,7 +245,17 @@ private:
                   uint8_t* plaintext);
     bool _parseData(const uint8_t* data, size_t len,
                     uint32_t& portnum,
-                    const uint8_t*& payload, size_t& payloadLen);
+                    const uint8_t*& payload, size_t& payloadLen,
+                    bool& wantResponse);
+
+    /// Decode a Meshtastic Position proto payload into pos.
+    static bool _parsePosition(const uint8_t* data, size_t len, MeshPosition& pos);
+    /// Decode a Meshtastic User proto payload into user.
+    static bool _parseUser(const uint8_t* data, size_t len, MeshUser& user);
+    /// Insert or update the neighbour table entry for fromNode.
+    void _upsertNeighbor(uint32_t fromNode,
+                         const MeshPosition* pos,  // nullptr = no update
+                         const MeshUser*     user); // nullptr = no update
 
     // ── Protobuf encoder helpers (all static, no heap) ────────────────────
     /// Encode a varint into buf. Returns bytes written.
@@ -197,23 +272,62 @@ private:
     static size_t _encodePosition(uint8_t* buf, size_t cap,
                                   int32_t lat_i, int32_t lon_i, int32_t alt_m,
                                   uint32_t pdop_x100, uint32_t sats,
-                                  uint32_t unixTime);
+                                  uint32_t unixTime,
+                                  uint32_t speed_cm_s = 0,
+                                  uint32_t track_x100 = 0);
 
     /// Encode a Meshtastic User (NodeInfo) proto into buf. Returns bytes written.
     static size_t _encodeUser(uint8_t* buf, size_t cap,
                               uint32_t nodeId,
                               const char* longName, const char* shortName);
 
+    /// Encode a Meshtastic Telemetry (Device Metrics) proto. Returns bytes written.
+    static size_t _encodeTelemetry(uint8_t* buf, size_t cap,
+                                   uint32_t unixTime, uint32_t uptimeSec,
+                                   uint8_t batteryLevel, float batteryVoltage);
+
     /// Wrap an encoded payload in a Meshtastic Data proto. Returns bytes written.
+    /// dest is fixed32 (field 4). requestId is fixed32 (field 6 = request_id).
+    /// Confirmed from live traffic: Meshtastic uses field 6 (request_id) in
+    /// responses, not field 7 (reply_id). Router.cpp matches on request_id.
     static size_t _encodeData(uint8_t* buf, size_t cap,
                               uint32_t portnum,
-                              const uint8_t* payload, size_t payloadLen);
+                              const uint8_t* payload, size_t payloadLen,
+                              bool want_response = false,
+                              uint32_t dest = 0,
+                              uint32_t source = 0,
+                              uint32_t requestId = 0);
+
+    /// Send our NodeInfo to fromNode with want_response=true, requesting they send
+    /// back their NodeInfo so we can cache their public key.  Rate-limited per node
+    /// (60 s) using NeighborEntry::nodeInfoRequestedTick.
+    void _requestNodeInfoFrom(uint32_t fromNode);
+
+    /// Decrypt a PKC (ch=0x00) packet using X25519 ECDH + AES-256-CTR.
+    /// Looks up the sender's public key in the neighbor table, computes the
+    /// X25519 shared secret with our private key, then decrypts.
+    /// @param retrying      true when called as a retry after the pubkey was just learned;
+    ///                      suppresses buffering and NodeInfo request side-effects.
+    /// @param useHashedKey  When true, use SHA-256(raw_shared_secret) as the AES key instead
+    ///                      of the raw X25519 output.  Some Meshtastic builds hash the shared
+    ///                      secret before use; we try both to maximise compatibility.
+    /// @return true if shared key was found and AES-256-CTR succeeded.
+    bool _decryptPKC(const uint8_t* ciphertext, size_t len,
+                     uint32_t packetId, uint32_t fromNode,
+                     uint8_t* plaintext, bool retrying = false,
+                     bool useHashedKey = false);
 
     /// Build a complete encrypted OTA Meshtastic packet ready for transmit().
-    /// Writes header + AES-CTR ciphertext into out[256]. Returns false on error.
+    /// @param to        Destination node ID (0xFFFFFFFF = broadcast).
+    /// @param requestId Incoming pktId for unicast NodeInfo responses (0 = none).
+    ///                  Placed in Data field 6 (request_id, fixed32) so the
+    ///                  receiving firmware can correlate the response.
     bool _buildTxPacket(uint8_t* out, uint8_t& outLen,
                         uint32_t portnum,
-                        const uint8_t* payload, size_t payloadLen);
+                        const uint8_t* payload, size_t payloadLen,
+                        bool want_response = false,
+                        uint32_t to = 0xFFFFFFFF,
+                        uint32_t requestId = 0);
 
     // ── Thread-safe last-message store ────────────────────────────────────
     mutable portMUX_TYPE _msgLock   = portMUX_INITIALIZER_UNLOCKED;
@@ -224,7 +338,47 @@ private:
     LoRaStats            _stats     = {};
 
     // ── Periodic TX state (run loop only — no locking needed) ─────────────
-    TickType_t _lastPosTxTick = 0;  ///< tick of last POSITION_APP TX (0 = never)
+    TickType_t _lastPosTxTick       = 0; ///< tick of last POSITION_APP TX
+    TickType_t _lastNodeInfoTxTick  = 0; ///< tick of last NODEINFO_APP TX
+    TickType_t _lastTelemetryTxTick = 0; ///< tick of last TELEMETRY_APP TX
+    uint8_t    _nodeInfoBootCount   = 0; ///< NodeInfo broadcasts sent since boot
+
+    // ── Adaptive position broadcast state ────────────────────────────────
+    // Track last sent lat/lon to detect significant movement and trigger
+    // an early broadcast. A movement of ~50m (0.0005°) triggers an early send
+    // but only if at least MIN_POS_TX_INTERVAL_SEC has elapsed to prevent
+    // flooding the channel while moving continuously.
+    static constexpr uint32_t MIN_POS_TX_INTERVAL_SEC = 30;  ///< minimum between any two TX
+    int32_t _lastTxLat_i = 0;   ///< latitude_i × 1e7 of last sent position
+    int32_t _lastTxLon_i = 0;   ///< longitude_i × 1e7 of last sent position
+    bool    _hasTxPos    = false;///< true once we've sent at least one position
+
+    // ── Neighbour table ───────────────────────────────────────────────────
+    static constexpr size_t NEIGHBOR_MAX = 8;
+    struct NeighborEntry {
+        MeshPosition pos  = {};
+        MeshUser     user = {};
+        TickType_t   nodeInfoRequestedTick = 0; ///< last time we sent them a NodeInfo request
+        bool         occupied = false;
+    };
+    mutable portMUX_TYPE _neighborLock = portMUX_INITIALIZER_UNLOCKED;
+    NeighborEntry        _neighbors[NEIGHBOR_MAX] = {};
+
+    /// One buffered PKC DM awaiting the sender's public key.
+    /// When their NodeInfo arrives, we retry decryption automatically.
+    struct PendingPkcDm {
+        uint32_t fromNode = 0;
+        uint32_t packetId = 0;
+        uint8_t  data[256] = {};
+        uint8_t  len      = 0;
+        bool     valid    = false;
+    };
+    PendingPkcDm _pendingPkc = {};
+
+    // ── Packet deduplication ring (Phase 6) ───────────────────────────────
+    static constexpr size_t SEEN_IDS_MAX = 16;
+    uint32_t _seenIds[SEEN_IDS_MAX] = {};
+    size_t   _seenCursor            = 0;
 };
 
 extern LoRa Lora;

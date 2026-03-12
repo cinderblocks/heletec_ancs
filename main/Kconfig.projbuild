@@ -54,17 +54,34 @@ config LORA_ENABLED
         Uses the SX1262 on SPI2 (NSS=GPIO8, SCK=9, MOSI=10, MISO=11,
         RST=12, BUSY=13, DIO1=14) — Heltec Wireless Tracker 1.1 schematic.
 
-config LORA_FREQUENCY_HZ
-    int "Channel centre frequency (Hz)"
-    default 906875000
+config LORA_CHANNEL_NUM
+    int "Meshtastic channel slot number (0 = auto from name hash)"
+    default 0
+    range 0 104
     depends on LORA_ENABLED
     help
-        Centre frequency in Hz for the Meshtastic channel to monitor.
-          906875000 = US LongFast default channel (US_915 region)
-          869525000 = EU LongFast default channel (EU_868 region)
-          433175000 = EU_433 region default channel
-          470000000 = CN_470 region default channel
-        Must match the region and channel of the Meshtastic nodes nearby.
+        Meshtastic frequency slot number, matching the "channel_num" field
+        in the LoRa configuration of nearby Meshtastic nodes.
+
+        0 = derive from channel name hash (matches Meshtastic factory default).
+        1–104 = explicit slot number (1-based, same as Meshtastic config).
+
+        The frequency is computed as:
+          freq = 902.0 MHz + bw/2 + (slot - 1) * bw
+        where bw = 250 kHz for LongFast.
+
+        If your nearby Meshtastic node uses the default "LongFast" preset
+        with no custom channel_num, leave this at 0.
+
+config LORA_FREQUENCY_HZ
+    int "Channel centre frequency override (Hz, 0 = auto)"
+    default 0
+    depends on LORA_ENABLED
+    help
+        Expert override: set a specific centre frequency in Hz.
+        When non-zero, this overrides the channel_num-based calculation.
+        Leave at 0 for normal operation (auto-computed from channel_num).
+          Example: 906875000 for slot 20 of US LongFast.
 
 choice LORA_MODEM_PRESET
     prompt "Meshtastic modem preset"
@@ -125,9 +142,29 @@ config LORA_POSITION_TX_INTERVAL_SEC
         timer still advances while waiting for a fix so the first broadcast
         fires promptly once a fix is acquired.
 
+config LORA_NODEINFO_TX_INTERVAL_SEC
+    int "NodeInfo broadcast interval (seconds)"
+    default 1800
+    range 60 86400
+    depends on LORA_TX_ENABLED
+    help
+        How often to re-broadcast a NODEINFO_APP packet (node identity).
+        The first broadcast happens immediately after SX1262 init succeeds.
+        Default is 1800 s (30 minutes), matching Meshtastic firmware behaviour.
+
+config LORA_TELEMETRY_TX_INTERVAL_SEC
+    int "Device telemetry broadcast interval (seconds)"
+    default 600
+    range 60 3600
+    depends on LORA_TX_ENABLED
+    help
+        How often to broadcast a TELEMETRY_APP Device Metrics packet.
+        Sends uptime and a nominal battery level so the device appears
+        active in Meshtastic app node lists.  Default 600 s (10 minutes).
+
 config MESH_NODE_SHORT_NAME
     string "Meshtastic node short name (1–4 chars)"
-    default "YIFF"
+    default "BLUE"
     depends on LORA_ENABLED
     help
         Short name broadcast in NODEINFO_APP packets and shown on other

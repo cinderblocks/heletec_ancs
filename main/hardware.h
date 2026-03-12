@@ -67,7 +67,9 @@ public:
     static constexpr uint32_t DRAW_BATTERY = (1u << 2); // battery level check
     static constexpr uint32_t DRAW_TIME    = (1u << 3); // CTS clock updated
     static constexpr uint32_t DRAW_GPS     = (1u << 4); // GPS fix state changed
-    static constexpr uint32_t DRAW_LORA    = (1u << 5); // Meshtastic message received
+    static constexpr uint32_t DRAW_LORA    = (1u << 5); // Meshtastic text message
+    static constexpr uint32_t DRAW_LORA_POS  = (1u << 6); // Meshtastic position received
+    static constexpr uint32_t DRAW_LORA_NODE = (1u << 7); // Meshtastic nodeinfo received
 
     Hardware();
     ~Hardware();
@@ -81,6 +83,8 @@ public:
     void showGpsState(bool fixed);
     void glow(bool on);
     void showLoraMessage(struct MeshMessage const& msg);
+    void showPositionMessage(struct MeshPosition const& pos);
+    void showNodeInfoMessage(struct MeshUser const& user);
     /**
      * Called from the CTS TimeCallback after the system clock has been synced.
      * Stores the UTC offset, immediately updates the header clock, and starts
@@ -90,11 +94,27 @@ public:
 
     uint8_t getBatteryLevel();
 
+    /**
+     * Read the current battery voltage in volts via the ADC voltage divider.
+     * Reads ADC once (averaged), updates both level and voltage caches.
+     * Thread-safe: may block ~100 ms while the rail settles.
+     */
+    float getBatteryVoltage();
+
+    /** Return the last cached battery percentage (updated every 30 s). */
+    uint8_t cachedBatteryLevel()  const { return mBatteryLevel;  }
+
+    /** Return the last cached battery voltage in volts (updated every 30 s). */
+    float   cachedBatteryVoltage() const { return mBatteryVoltage; }
+
 private:
     static void startDrawing(void* pvParameters);
     static void batteryTimerCallback(TimerHandle_t xTimer);
     static void clockTimerCallback(TimerHandle_t xTimer);
     void showNotification(notification_def const& notification);
+
+    /** Read ADC once and update mBatteryLevel + mBatteryVoltage. */
+    void _updateBatteryCache();
 
     void blank();
     void drawIcon(uint16_t x, uint16_t y, uint8_t const* xbm, uint16_t color = TFT::Color::WHITE);
@@ -108,7 +128,8 @@ private:
     conn_state_def mBleState = BLE_DISCONNECTED;
     bool mCallState = false;
     bool mGpsFixed  = false;
-    uint8_t mBatteryLevel = 0;
+    uint8_t mBatteryLevel   = 0;
+    float   mBatteryVoltage = 0.0f;
     int32_t mUtcOffsetSeconds = INT32_MIN;  // INT32_MIN = not yet synced
     // Fixed-size arrays instead of String to allow safe writes from non-draw tasks
     // (BTC task writes mMessage; GPS task writes mTimestamp).  Both are protected

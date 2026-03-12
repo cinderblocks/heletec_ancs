@@ -108,7 +108,7 @@ void Hardware::begin()
     // xTaskCreatePinnedToCore returns.  If we called showBatteryLevel() here
     // instead, both cores would be issuing SPI commands simultaneously.
     // The draw task's init block will call showBatteryLevel(mBatteryLevel) for us.
-    mBatteryLevel = getBatteryLevel();
+    _updateBatteryCache();
 
     Buzzer::init();
 
@@ -142,13 +142,11 @@ void Hardware::startDrawing(void* pvParameters)
         if (bits & DRAW_BATTERY)
         {
             // Safe to block here — we are in the draw task, not the timer service task.
-            uint8_t level = h->getBatteryLevel();
-            if (level != h->mBatteryLevel)
-            {
-                h->mBatteryLevel = level;
-                h->showBatteryLevel(level);
-                Ble.setBatteryLevel(level);
-            }
+            // Read ADC once and update both level and voltage caches.
+            h->_updateBatteryCache();
+            const uint8_t level = h->mBatteryLevel;
+            h->showBatteryLevel(level);
+            Ble.setBatteryLevel(level);
         }
 
         // Update BLE icon in header — safe here because we're in the draw task.
@@ -248,6 +246,44 @@ void Hardware::startDrawing(void* pvParameters)
             }
 #endif
         }
+
+        if (bits & DRAW_LORA_POS)
+        {
+#if CONFIG_LORA_ENABLED
+            // Display the most recently updated neighbour position (index 0).
+            // Future enhancement: cycle through all neighbours on button press.
+            if (Lora.neighborCount() > 0)
+            {
+                MeshPosition pos = Lora.neighborPosition(0);
+                if (pos.valid)
+                {
+                    h->showPositionMessage(pos);
+                    h->glow(true);
+                    vTaskDelay(pdMS_TO_TICKS(5000));
+                    h->glow(false);
+                    h->standby();
+                }
+            }
+#endif
+        }
+
+        if (bits & DRAW_LORA_NODE)
+        {
+#if CONFIG_LORA_ENABLED
+            if (Lora.neighborCount() > 0)
+            {
+                MeshUser user = Lora.neighborUser(0);
+                if (user.valid)
+                {
+                    h->showNodeInfoMessage(user);
+                    h->glow(true);
+                    vTaskDelay(pdMS_TO_TICKS(5000));
+                    h->glow(false);
+                    h->standby();
+                }
+            }
+#endif
+        }
     }
     ESP_LOGI(TAG, "Ending Draw task");
     h->mDrawTask = nullptr;
@@ -303,20 +339,66 @@ void Hardware::showNotification(notification_def const& notification)
     mDisplay.drawStr(0, 62, notification.message, Font_11x18, TFT::Color::BLACK, TFT::Color::WHITE);
 }
 
-uint8_t Hardware::getBatteryLevel()
+// ── _updateBatteryCache ───────────────────────────────────────────────────
+// Enable the ADC voltage divider, read ADC1_CH0 (averaged over 4 samples),
+// then disable the divider.  Updates both mBatteryLevel and mBatteryVoltage
+// atomically so callers never see a level/voltage mismatch.
+//
+// Heltec Wireless Tracker 1.1 battery ADC calibration:
+//   GPIO2 (ADC_CTRL) controls a P-FET that enables a 100K/100K voltage divider
+//   between VBAT and GND.  GPIO1 (VBAT_READ = ADC1_CH0) reads the mid-point.
+//
+//   Empirically calibrated raw-count endpoints:
+//     raw 680  → LiPo empty (≈ 3.2 V)   → 0 %
+//     raw 1023 → LiPo full  (≈ 4.2 V)   → 100 %
+//
+//   Corresponding voltage mapping (linear interpolation):
+//     V_batt = 3.2 + clamp((raw - 680) / 343, 0, 1) * 1.0
+void Hardware::_updateBatteryCache()
 {
-    // Enable battery voltage divider by driving ADC_CTRL high via internal pull-up.
+    // Enable the voltage divider.
     gpio_set_pull_mode(static_cast<gpio_num_t>(ADC_CTRL), GPIO_PULLUP_ONLY);
     vTaskDelay(pdMS_TO_TICKS(100));  // wait for rail to settle
 
-    int raw = 0;
-    adc_oneshot_read(mAdcHandle, ADC_CHANNEL_0, &raw);
+    // Average 4 samples to reduce noise.
+    int rawSum = 0;
+    constexpr int kSamples = 4;
+    for (int i = 0; i < kSamples; i++)
+    {
+        int raw = 0;
+        adc_oneshot_read(mAdcHandle, ADC_CHANNEL_0, &raw);
+        rawSum += raw;
+    }
 
-    // Disable divider — pull ADC_CTRL low to stop current through the resistor network.
+    // Disable the voltage divider.
     gpio_set_pull_mode(static_cast<gpio_num_t>(ADC_CTRL), GPIO_PULLDOWN_ONLY);
 
-    return static_cast<uint8_t>(
-        std::clamp(((raw - 680.f) / 343.f) * 100.f, 0.f, 100.f));
+    const float rawAvg = static_cast<float>(rawSum) / kSamples;
+
+    // Level: 0–100 %
+    mBatteryLevel = static_cast<uint8_t>(
+        std::clamp(((rawAvg - 680.f) / 343.f) * 100.f, 0.f, 100.f));
+
+    // Voltage: linear interpolation from the same calibration endpoints.
+    //   0 %  →  3.2 V (LiPo empty)
+    //   100% →  4.2 V (LiPo full)
+    const float pct = std::clamp((rawAvg - 680.f) / 343.f, 0.f, 1.f);
+    mBatteryVoltage = 3.2f + pct * 1.0f;
+
+    ESP_LOGD(TAG, "Battery: raw=%.0f  level=%u%%  voltage=%.2fV",
+             (double)rawAvg, mBatteryLevel, (double)mBatteryVoltage);
+}
+
+uint8_t Hardware::getBatteryLevel()
+{
+    _updateBatteryCache();
+    return mBatteryLevel;
+}
+
+float Hardware::getBatteryVoltage()
+{
+    _updateBatteryCache();
+    return mBatteryVoltage;
 }
 
 void Hardware::standby()
@@ -510,6 +592,58 @@ void Hardware::showLoraMessage(MeshMessage const& msg)
     char sigStr[24];
     snprintf(sigStr, sizeof(sigStr), "%d dBm  %.1f dB", msg.rssi, (double)msg.snr);
     mDisplay.drawStr(0, 100, sigStr, Font_7x10, TFT::Color::BLACK, TFT::Color::WHITE);
+}
+
+void Hardware::showPositionMessage(MeshPosition const& pos)
+{
+    blank();
+    mDisplay.fillRectangle(0, 20, mDisplay.width(), mDisplay.height() - 20, TFT::Color::WHITE);
+
+    // Header: "Pos" + 8-char node ID
+    char nodeStr[12];
+    snprintf(nodeStr, sizeof(nodeStr), "%08" PRIx32, pos.fromNode);
+    mDisplay.drawStr(0, 21, "Pos", Font_7x10, TFT::Color::BLACK, TFT::Color::WHITE);
+    mDisplay.drawStr(mDisplay.width() - 56, 21, nodeStr,
+                     Font_7x10, TFT::Color::BLACK, TFT::Color::WHITE);
+
+    // Lat / Lon to 4 decimal places
+    char latStr[20], lonStr[20];
+    snprintf(latStr, sizeof(latStr),  "%.4f", (double)pos.lat_i / 1e7);
+    snprintf(lonStr, sizeof(lonStr), "%.4f", (double)pos.lon_i / 1e7);
+    mDisplay.drawStr(0, 34, latStr, Font_7x10, TFT::Color::BLACK, TFT::Color::WHITE);
+    mDisplay.drawStr(0, 46, lonStr, Font_7x10, TFT::Color::BLACK, TFT::Color::WHITE);
+
+    // Alt + sats on one line
+    char altStr[24];
+    snprintf(altStr, sizeof(altStr), "%dm  %usat", (int)pos.alt_m, (unsigned)pos.sats);
+    mDisplay.drawStr(0, 58, altStr, Font_7x10, TFT::Color::BLACK, TFT::Color::WHITE);
+
+    // RSSI / SNR
+    char sigStr[24];
+    snprintf(sigStr, sizeof(sigStr), "%d dBm  %.1f dB", pos.rssi, (double)pos.snr);
+    mDisplay.drawStr(0, 70, sigStr, Font_7x10, TFT::Color::BLACK, TFT::Color::WHITE);
+}
+
+void Hardware::showNodeInfoMessage(MeshUser const& user)
+{
+    blank();
+    mDisplay.fillRectangle(0, 20, mDisplay.width(), mDisplay.height() - 20, TFT::Color::WHITE);
+
+    // Header: "Node" + short name
+    mDisplay.drawStr(0, 21, "Node", Font_7x10, TFT::Color::BLACK, TFT::Color::WHITE);
+    mDisplay.drawStr(mDisplay.width() - 28, 21, user.shortName,
+                     Font_7x10, TFT::Color::BLACK, TFT::Color::WHITE);
+
+    // Node ID string ("!xxxxxxxx")
+    mDisplay.drawStr(0, 34, user.id, Font_7x10, TFT::Color::BLACK, TFT::Color::WHITE);
+
+    // Long name (may be truncated by drawStr to display width)
+    mDisplay.drawStr(0, 48, user.longName, Font_7x10, TFT::Color::BLACK, TFT::Color::WHITE);
+
+    // RSSI / SNR
+    char sigStr[24];
+    snprintf(sigStr, sizeof(sigStr), "%d dBm  %.1f dB", user.rssi, (double)user.snr);
+    mDisplay.drawStr(0, 62, sigStr, Font_7x10, TFT::Color::BLACK, TFT::Color::WHITE);
 }
 
 void Hardware::glow(bool on)

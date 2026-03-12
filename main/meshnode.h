@@ -38,7 +38,7 @@
  *   Node.init();                // call once in app_main
  *   Node.nodeId();              // → 0xdeadbeef
  *   Node.nodeIdStr();           // → "!deadbeef"
- *   Node.shortName();           // → "YIFF"
+ *   Node.shortName();           // → "BLUE"
  *   Node.longName();            // → "HatefulBlue"
  *   Node.nextPacketId();        // → random uint32_t
  */
@@ -82,6 +82,30 @@ public:
     const char* longName() const { return _longName; }
 
     /**
+     * 6-byte Bluetooth MAC address (same source as node ID derivation).
+     * Used for User proto field 4 (macaddr) for compatibility with older
+     * Meshtastic firmware.
+     */
+    const uint8_t* macaddr() const { return _mac; }
+
+    /**
+     * 32-byte X25519 public key for Meshtastic PKC (Public Key Cryptography).
+     * Generated once on first boot and persisted in NVS.  Required by
+     * Meshtastic 2.5+ for the node to appear in the app UI.
+     * This is the ACTUAL X25519 public key derived from the private key.
+     */
+    const uint8_t* publicKey() const { return _publicKey; }
+
+    /**
+     * Compute X25519 shared secret: X25519(our_private_key, their_public_key).
+     * Used for PKC (ch=0x00) packet decryption.
+     * @param theirPub32  32-byte X25519 public key of the sender (little-endian).
+     * @param out32       Output buffer, receives 32-byte shared secret.
+     * @return true on success.
+     */
+    bool sharedSecret(const uint8_t* theirPub32, uint8_t* out32) const;
+
+    /**
      * Persist a new short name to NVS and update the in-memory cache.
      * @param name  Must be 1–4 printable ASCII characters; silently
      *              truncated to 4 chars.  nullptr is ignored.
@@ -103,10 +127,13 @@ public:
     uint32_t nextPacketId() const;
 
 private:
-    uint32_t _nodeId       = 0;
-    char     _nodeIdStr[12]= {};   // "!xxxxxxxx\0" — 10 chars + NUL
-    char     _shortName[5] = {};   // max 4 chars + NUL
-    char     _longName[33] = {};   // max 32 chars + NUL
+    uint32_t _nodeId        = 0;
+    uint8_t  _mac[6]       = {};   // Bluetooth MAC
+    uint8_t  _privateKey[32]= {};  // X25519 private key (clamped, never exposed)
+    uint8_t  _publicKey[32] = {};  // X25519 public key (derived from private)
+    char     _nodeIdStr[12] = {};  // "!xxxxxxxx\0" — 10 chars + NUL
+    char     _shortName[5]  = {};  // max 4 chars + NUL
+    char     _longName[33]  = {};  // max 32 chars + NUL
 };
 
 extern MeshNode Node;

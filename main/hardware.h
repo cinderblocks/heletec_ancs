@@ -67,9 +67,10 @@ public:
     static constexpr uint32_t DRAW_BATTERY = (1u << 2); // battery level check
     static constexpr uint32_t DRAW_TIME    = (1u << 3); // CTS clock updated
     static constexpr uint32_t DRAW_GPS     = (1u << 4); // GPS fix state changed
-    static constexpr uint32_t DRAW_LORA    = (1u << 5); // Meshtastic text message
+    static constexpr uint32_t DRAW_LORA      = (1u << 5); // Meshtastic text message
     static constexpr uint32_t DRAW_LORA_POS  = (1u << 6); // Meshtastic position received
     static constexpr uint32_t DRAW_LORA_NODE = (1u << 7); // Meshtastic nodeinfo received
+    static constexpr uint32_t DRAW_LORA_MESH = (1u << 8); // LoRa mesh connection state changed
 
     Hardware();
     ~Hardware();
@@ -81,6 +82,7 @@ public:
     void showTime(const char* timestamp);
     void showCallState(bool active);
     void showGpsState(bool fixed);
+    void showLoraState(bool connected);
     void glow(bool on);
     void showLoraMessage(struct MeshMessage const& msg);
     void showPositionMessage(struct MeshPosition const& pos);
@@ -128,6 +130,7 @@ private:
     conn_state_def mBleState = BLE_DISCONNECTED;
     bool mCallState = false;
     bool mGpsFixed  = false;
+    bool mLoraConnected = false;
     uint8_t mBatteryLevel   = 0;
     float   mBatteryVoltage = 0.0f;
     int32_t mUtcOffsetSeconds = INT32_MIN;  // INT32_MIN = not yet synced

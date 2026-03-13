@@ -190,6 +190,23 @@ void Hardware::startDrawing(void* pvParameters)
             }
         }
 
+        if (bits & DRAW_LORA_MESH)
+        {
+            bool connected;
+            portENTER_CRITICAL(&h->mHardwareLock);
+            connected = h->mLoraConnected;
+            portEXIT_CRITICAL(&h->mHardwareLock);
+
+            if (connected)
+            {
+                h->drawIcon(h->mDisplay.width()-67, 1, Bitmaps::LoRaMesh, TFT::Color::WHITE);
+            }
+            else
+            {
+                h->mDisplay.fillRectangle(h->mDisplay.width()-67, 1, 16, 16, HEADER_COLOR);
+            }
+        }
+
         if (bits & (DRAW_NOTIFY | DRAW_STATE))
         {
             // Update call icon in header bar first
@@ -557,11 +574,11 @@ void Hardware::showCallState(bool active)
     mCallState = active;
     if (active)
     {
-        drawIcon(mDisplay.width()-67, 1, Bitmaps::PhoneCall, TFT::Color::GREEN);
+        drawIcon(mDisplay.width()-84, 1, Bitmaps::PhoneCall, TFT::Color::GREEN);
     }
     else
     {
-        mDisplay.fillRectangle(mDisplay.width()-67, 1, 16, 16, HEADER_COLOR);
+        mDisplay.fillRectangle(mDisplay.width()-84, 1, 16, 16, HEADER_COLOR);
     }
 }
 
@@ -571,6 +588,14 @@ void Hardware::showGpsState(bool fixed)
     mGpsFixed = fixed;
     portEXIT_CRITICAL(&mHardwareLock);
     notifyDraw(DRAW_GPS);
+}
+
+void Hardware::showLoraState(bool connected)
+{
+    portENTER_CRITICAL(&mHardwareLock);
+    mLoraConnected = connected;
+    portEXIT_CRITICAL(&mHardwareLock);
+    notifyDraw(DRAW_LORA_MESH);
 }
 
 void Hardware::showLoraMessage(MeshMessage const& msg)

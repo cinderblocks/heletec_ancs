@@ -2426,6 +2426,19 @@ void LoRa::_processPacket(const uint8_t* buf, uint8_t pktLen,
 
     if (portnum == PORT_TEXT)
     {
+        // Only surface text messages that are direct DMs to us or channel
+        // broadcasts (group messages). Drop messages addressed to other nodes
+        // that we overheard as mesh relays — they are not meant for us.
+        const bool isDirect   = (to == Node.nodeId());
+        const bool isBroadcast = (to == 0xFFFFFFFFu);
+        if (!isDirect && !isBroadcast)
+        {
+            ESP_LOGI(TAG, "Text from 0x%08" PRIx32 " to 0x%08" PRIx32
+                     " — not addressed to us, suppressing notification",
+                     from, to);
+            return;
+        }
+
         MeshMessage msg;
         msg.fromNode = from;
         msg.rssi     = rssi;
@@ -2435,8 +2448,8 @@ void LoRa::_processPacket(const uint8_t* buf, uint8_t pktLen,
         memcpy(msg.text, payload, copyLen);
         msg.text[copyLen] = '\0';
 
-        ESP_LOGI(TAG, "Text from 0x%08" PRIx32 " (rssi=%d snr=%.1f): %s",
-                 from, rssi, (double)snr, msg.text);
+        ESP_LOGI(TAG, "Text from 0x%08" PRIx32 " (rssi=%d snr=%.1f) [%s]: %s",
+                 from, rssi, (double)snr, isDirect ? "DM" : "CH", msg.text);
 
         portENTER_CRITICAL(&_statsLock);
         _stats.textMessages++;
@@ -2638,6 +2651,8 @@ void LoRa::_processPacket(const uint8_t* buf, uint8_t pktLen,
 
                     if (rPortnum == PORT_TEXT)
                     {
+                        // PKC DMs are always to == Node.nodeId() (filtered at recv) — no need
+                        // to check isDirect/isBroadcast here; this is always a direct message.
                         MeshMessage msg;
                         msg.fromNode = from;
                         msg.rssi     = rssi;
@@ -2948,6 +2963,7 @@ void LoRa::run(void* /*data*/)
         portENTER_CRITICAL(&_statsLock);
         _stats.state = LoRaStats::State::InitFailed;
         portEXIT_CRITICAL(&_statsLock);
+        Heltec.showLoraState(false);
         return;
     }
 
@@ -2969,6 +2985,7 @@ void LoRa::run(void* /*data*/)
     portENTER_CRITICAL(&_statsLock);
     _stats.state = LoRaStats::State::Listening;
     portEXIT_CRITICAL(&_statsLock);
+    Heltec.showLoraState(true);
 
     ESP_LOGI(TAG, "Listening on %u Hz (slot=%u, chip mode=0x%02x)",
              (unsigned)LORA_FREQ_HZ,

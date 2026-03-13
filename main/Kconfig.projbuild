@@ -180,6 +180,77 @@ config MESH_NODE_LONG_NAME
         Up to 32 UTF-8 characters.
         Can be overridden at runtime via NVS (persisted across reboots).
 
+choice MESH_NODE_ROLE_SEL
+    prompt "Meshtastic node role"
+    depends on LORA_ENABLED
+    default MESH_ROLE_TRACKER
+    help
+        The role announced in NODEINFO_APP (User.role, field 7).
+        Meshtastic uses this to assign icons and tune Smart Position
+        behaviour in the app.
+
+        CLIENT  — standard node (no icon, default position interval).
+        TRACKER — GPS tracker icon, Smart Position enabled.  Best choice
+                  for this hardware since it has an onboard GPS module.
+
+    config MESH_ROLE_CLIENT
+        bool "CLIENT (0) — standard Meshtastic node"
+
+    config MESH_ROLE_TRACKER
+        bool "TRACKER (5) — GPS tracker (tracker icon, Smart Position)"
+
+endchoice
+
+config MESH_NODE_ROLE
+    int
+    default 0 if MESH_ROLE_CLIENT
+    default 5 if MESH_ROLE_TRACKER
+
+choice LORA_REGION
+    prompt "LoRa region"
+    depends on LORA_ENABLED
+    default LORA_REGION_US
+    help
+        Meshtastic RegionCode sent in MAP_REPORT_APP packets.  Must match
+        the region configured on nearby Meshtastic nodes.
+
+    config LORA_REGION_US
+        bool "US — 915 MHz ISM band"
+
+    config LORA_REGION_EU_868
+        bool "EU_868 — 868 MHz ISM band"
+
+    config LORA_REGION_ANZ
+        bool "ANZ — Australia/New Zealand 915 MHz"
+
+    config LORA_REGION_IN
+        bool "IN — India 865 MHz"
+
+    config LORA_REGION_SG_923
+        bool "SG_923 — Singapore 923 MHz"
+
+endchoice
+
+config LORA_REGION_CODE
+    int
+    default 1  if LORA_REGION_US
+    default 3  if LORA_REGION_EU_868
+    default 6  if LORA_REGION_ANZ
+    default 10 if LORA_REGION_IN
+    default 18 if LORA_REGION_SG_923
+
+config LORA_MAP_REPORT_TX_INTERVAL_SEC
+    int "MAP_REPORT broadcast interval (seconds, 0 = disabled)"
+    default 1800
+    range 0 86400
+    depends on LORA_TX_ENABLED
+    help
+        How often to broadcast a MAP_REPORT_APP (port 73) packet.
+        Map reports announce this node to MQTT bridges and the public
+        Meshtastic map (meshtastic.network/map) by carrying the node's
+        name, hardware model, region, modem preset, and current GPS fix.
+        Set to 0 to disable.  Default 1800 s (30 minutes).
+
 endmenu
 
 menu "Buzzer Configuration"

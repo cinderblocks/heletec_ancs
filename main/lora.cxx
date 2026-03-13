@@ -55,11 +55,20 @@ static const char* TAG = "lora";
 #ifndef CONFIG_LORA_TELEMETRY_TX_INTERVAL_SEC
 #  define CONFIG_LORA_TELEMETRY_TX_INTERVAL_SEC 600
 #endif
+#ifndef CONFIG_LORA_MAP_REPORT_TX_INTERVAL_SEC
+#  define CONFIG_LORA_MAP_REPORT_TX_INTERVAL_SEC 1800
+#endif
 #ifndef CONFIG_LORA_CHANNEL_NUM
 #  define CONFIG_LORA_CHANNEL_NUM 0
 #endif
 #ifndef CONFIG_LORA_FREQUENCY_HZ
 #  define CONFIG_LORA_FREQUENCY_HZ 0
+#endif
+#ifndef CONFIG_MESH_NODE_ROLE
+#  define CONFIG_MESH_NODE_ROLE 5   // TRACKER — matches hardware purpose
+#endif
+#ifndef CONFIG_LORA_REGION_CODE
+#  define CONFIG_LORA_REGION_CODE 1 // US
 #endif
 
 // ── Meshtastic frequency computation ──────────────────────────────────────
@@ -1044,18 +1053,35 @@ bool LoRa::_decryptPKC(const uint8_t* ciphertext, size_t len,
         }
     }
 
-    // 4. Build nonce (identical layout to PSK decryption)
+    // 4. Build nonce — PKC layout differs from PSK!
+    //
+    // Meshtastic CryptoEngine::initNonce(fromNode, packetId, extraNonce):
+    //   bytes  [0:7]   = packetId (uint64_t LE; upper 4 bytes = 0 for 32-bit IDs)
+    //   bytes  [8:11]  = fromNode (LE)
+    //   bytes [12:15]  = extraNonce (LE)
+    //
+    // For PSK (channel) decryption:  extraNonce = 0
+    // For PKC (X25519) decryption:   extraNonce = toNode (destination node ID)
+    //
+    // *** BUG HISTORY: nonce[12:15] was 0 (same as PSK), but Meshtastic sets
+    // extraNonce = toNode for PKC.  Since PKC packets are always addressed to
+    // us, toNode = Node.nodeId().  The zero nonce produced the wrong AES-CTR
+    // keystream, causing every PKC decrypt to yield garbage plaintext. ***
+    const uint32_t toNode = Node.nodeId();
     uint8_t nonce[16] = {};
     nonce[0]  = static_cast<uint8_t>(packetId);
     nonce[1]  = static_cast<uint8_t>(packetId >>  8);
     nonce[2]  = static_cast<uint8_t>(packetId >> 16);
     nonce[3]  = static_cast<uint8_t>(packetId >> 24);
-    // nonce[4:7] = 0
+    // nonce[4:7] = 0 (upper 32 bits of 64-bit packetId — always 0)
     nonce[8]  = static_cast<uint8_t>(fromNode);
     nonce[9]  = static_cast<uint8_t>(fromNode >>  8);
     nonce[10] = static_cast<uint8_t>(fromNode >> 16);
     nonce[11] = static_cast<uint8_t>(fromNode >> 24);
-    // nonce[12:15] = 0
+    nonce[12] = static_cast<uint8_t>(toNode);
+    nonce[13] = static_cast<uint8_t>(toNode >>  8);
+    nonce[14] = static_cast<uint8_t>(toNode >> 16);
+    nonce[15] = static_cast<uint8_t>(toNode >> 24);
 
     // 5. AES-256-CTR decrypt
     if (!retrying)
@@ -1328,23 +1354,20 @@ bool LoRa::_parseData(const uint8_t* data, size_t len,
 // Encode a Meshtastic User proto (NODEINFO_APP payload).
 //
 // meshtastic/mesh.proto User message fields sent:
-//   Field 1 (id,         string): "!xxxxxxxx"
-//   Field 2 (long_name,  string): up to 32 chars
-//   Field 3 (short_name, string): up to 4 chars
-//   Field 4 (macaddr,    bytes):  6-byte BT MAC
-//   Field 5 (hw_model,   enum):   HardwareModel varint (tag 0x28)
-//   Field 8 (public_key, bytes):  32-byte key from NVS (tag 0x42)
+//   Field 1 (id,           string):  "!xxxxxxxx"
+//   Field 2 (long_name,    string):  up to 32 chars
+//   Field 3 (short_name,   string):  up to 4 chars
+//   Field 4 (macaddr,      bytes):   6-byte BT MAC
+//   Field 5 (hw_model,     enum):    HardwareModel varint (tag 0x28)
+//   Field 7 (role,         enum):    DeviceRole varint (tag 0x38); omitted when 0 = CLIENT
+//   Field 8 (public_key,   bytes):   32-byte X25519 public key (tag 0x42)
+//   Field 9 (is_unmessageable, bool):false (tag 0x48), required by Meshtastic 2.5+
 //
-// Field 7 (role) is intentionally omitted: proto3 default = 0 = CLIENT.
-// Explicitly encoding value 1 would set CLIENT_MUTE.
+// DeviceRole enum (meshtastic/config.proto):
+//   CLIENT = 0 (proto3 default — field 7 omitted)
+//   TRACKER = 5 (GPS tracker icon, Smart Position)
 //
-// public_key (field 9) is required by Meshtastic 2.5+ app to display the node
-// in the default node list.  Nodes without it are marked "PKI-unknown" and may
-// be filtered from the UI.  The key does NOT need to be a real X25519 key for
-// basic discovery — it is stored as-is in the remote nodeDB.  We generate a
-// stable random 32-byte key on first boot and persist it in NVS (see meshnode.cxx).
-//
-// buf must be at least 100 bytes.  Returns bytes written.
+// buf must be at least 120 bytes.  Returns bytes written.
 /* static */ size_t LoRa::_encodeUser(uint8_t* buf, size_t /*cap*/,
                                        uint32_t nodeId,
                                        const char* longName,
@@ -1367,13 +1390,17 @@ bool LoRa::_parseData(const uint8_t* data, size_t len,
     n += _pbLenField(buf + n, 0x22, Node.macaddr(), 6);
 
     // Field 5: hw_model (HardwareModel enum, varint) — tag = (5<<3)|0 = 0x28
-    //
-    // *** BUG HISTORY: Was encoded as tag 0x30 = field 6 (is_licensed) instead
-    // of 0x28 = field 5 (hw_model).  nop jmp's nanopb decoder stored our
-    // hw_model=87 value into is_licensed, and hw_model defaulted to 0 (UNSET).
-    // Some Meshtastic firmware/app versions filter nodes with hw_model=UNSET. ***
     buf[n++] = 0x28;
     n += _pbVarint(buf + n, HW_MODEL);
+
+    // Field 7: role (DeviceRole enum, varint) — tag = (7<<3)|0 = 0x38
+    // Only encoded when non-zero; proto3 default (0 = CLIENT) needs no wire bytes.
+    // TRACKER = 5 shows the GPS tracker icon in the Meshtastic app and enables
+    // Smart Position behaviour on the receiving firmware.
+#if CONFIG_MESH_NODE_ROLE != 0
+    buf[n++] = 0x38;
+    n += _pbVarint(buf + n, CONFIG_MESH_NODE_ROLE);
+#endif
 
     // Field 8: public_key (bytes, 32 bytes) — tag = (8<<3)|2 = 0x42
     n += _pbLenField(buf + n, 0x42, Node.publicKey(), 32);
@@ -1719,6 +1746,146 @@ bool LoRa::sendTelemetry()
 
     ESP_LOGI(TAG, "TX TELEMETRY uptime=%us bat=%u%% %.2fV time=%" PRIu32,
              (unsigned)uptime, batLevel, (double)batVoltage, now);
+    return transmit(pkt, pktLen);
+}
+
+// ── _encodeMapReport ──────────────────────────────────────────────────────
+// Encode a Meshtastic MapReport proto (MAP_REPORT_APP payload, port 73).
+//
+// MapReport is sent periodically to MQTT bridges so this node appears on
+// the public Meshtastic map (meshtastic.network/map).  Fields verified
+// against Meshtastic firmware mesh.proto 2.5+:
+//
+//   Field  1 (long_name,          string):  tag 0x0A
+//   Field  2 (short_name,         string):  tag 0x12
+//   Field  3 (hw_model,           varint):  tag 0x18  HardwareModel enum
+//   Field  4 (firmware_version,   string):  tag 0x22  (omitted — not tracked)
+//   Field  5 (region,             varint):  tag 0x28  RegionCode enum
+//   Field  6 (modem_preset,       varint):  tag 0x30  ModemPreset enum
+//   Field  7 (has_default_channel,bool):    tag 0x38  true when using factory PSK
+//   Field  8 (latitude_i,         fixed32): tag 0x45  degrees × 1e7
+//   Field  9 (longitude_i,        fixed32): tag 0x4D  degrees × 1e7
+//   Field 10 (altitude,           varint):  tag 0x50  metres above MSL
+//   Field 11 (position_precision, varint):  tag 0x58  32 = full GPS precision
+//   Field 12 (num_online_local_nodes,varint):tag 0x60 neighbour count
+//
+// ModemPreset enum (config.proto): LONG_FAST=0, LONG_SLOW=1, MEDIUM_SLOW=3, SHORT_FAST=6
+// RegionCode enum  (config.proto): US=1, EU_868=3, ANZ=6, IN=10, SG_923=18
+//
+// buf must be at least 120 bytes.  Returns bytes written.
+/* static */ size_t LoRa::_encodeMapReport(uint8_t* buf, size_t /*cap*/,
+                                            const char* longName,
+                                            const char* shortName,
+                                            int32_t lat_i, int32_t lon_i,
+                                            int32_t alt_m,
+                                            uint32_t numNeighbors)
+{
+    size_t n = 0;
+
+    // Helper: write a fixed32 field (tag + 4 bytes LE)
+    auto writeFixed32 = [&](uint8_t tag, uint32_t val) {
+        buf[n++] = tag;
+        buf[n++] = static_cast<uint8_t>(val);
+        buf[n++] = static_cast<uint8_t>(val >>  8);
+        buf[n++] = static_cast<uint8_t>(val >> 16);
+        buf[n++] = static_cast<uint8_t>(val >> 24);
+    };
+
+    // Field 1: long_name (string)
+    n += _pbString(buf + n, 0x0A, longName);
+
+    // Field 2: short_name (string)
+    n += _pbString(buf + n, 0x12, shortName);
+
+    // Field 3: hw_model (varint)
+    buf[n++] = 0x18;
+    n += _pbVarint(buf + n, HW_MODEL);
+
+    // Field 5: region (RegionCode varint) — from CONFIG_LORA_REGION_CODE
+    buf[n++] = 0x28;
+    n += _pbVarint(buf + n, static_cast<uint64_t>(CONFIG_LORA_REGION_CODE));
+
+    // Field 6: modem_preset (ModemPreset varint) — derived from Kconfig choice
+    // LONG_FAST=0, LONG_SLOW=1, MEDIUM_SLOW=3, SHORT_FAST=6
+#if   defined(CONFIG_LORA_PRESET_LONG_FAST)
+    static constexpr uint32_t MODEM_PRESET = 0;
+#elif defined(CONFIG_LORA_PRESET_LONG_SLOW)
+    static constexpr uint32_t MODEM_PRESET = 1;
+#elif defined(CONFIG_LORA_PRESET_MEDIUM_SLOW)
+    static constexpr uint32_t MODEM_PRESET = 3;
+#elif defined(CONFIG_LORA_PRESET_SHORT_FAST)
+    static constexpr uint32_t MODEM_PRESET = 6;
+#else
+    static constexpr uint32_t MODEM_PRESET = 0; // default LongFast
+#endif
+    buf[n++] = 0x30;
+    n += _pbVarint(buf + n, MODEM_PRESET);
+
+    // Field 7: has_default_channel (bool) — true, we use the factory LongFast PSK
+    buf[n++] = 0x38;
+    buf[n++] = 0x01;
+
+    // Fields 8 & 9: latitude_i, longitude_i (sfixed32)
+    writeFixed32(0x45, static_cast<uint32_t>(lat_i));
+    writeFixed32(0x4D, static_cast<uint32_t>(lon_i));
+
+    // Field 10: altitude (int32 varint)
+    if (alt_m != 0)
+    {
+        buf[n++] = 0x50;
+        n += _pbVarint(buf + n, static_cast<uint64_t>(static_cast<int64_t>(alt_m)));
+    }
+
+    // Field 11: position_precision = 32 (full GPS precision)
+    buf[n++] = 0x58;
+    n += _pbVarint(buf + n, 32);
+
+    // Field 12: num_online_local_nodes (neighbour count from our table)
+    if (numNeighbors > 0)
+    {
+        buf[n++] = 0x60;
+        n += _pbVarint(buf + n, numNeighbors);
+    }
+
+    return n;
+}
+
+// ── sendMapReport ─────────────────────────────────────────────────────────
+// Broadcast a MAP_REPORT_APP (port 73) packet for public mesh map visibility.
+bool LoRa::sendMapReport()
+{
+#if !CONFIG_LORA_TX_ENABLED
+    return false;
+#endif
+#if CONFIG_LORA_MAP_REPORT_TX_INTERVAL_SEC == 0
+    return false; // disabled via Kconfig
+#endif
+
+    if (!gps.isFixed())
+    {
+        ESP_LOGD(TAG, "MAP_REPORT skipped — no GPS fix");
+        return false;
+    }
+
+    const int32_t lat_i = static_cast<int32_t>(gps.lat() * 1e7);
+    const int32_t lon_i = static_cast<int32_t>(gps.lng() * 1e7);
+    const int32_t alt_m = static_cast<int32_t>(gps.altitude());
+
+    uint8_t mrBuf[160] = {};
+    const size_t mrLen = _encodeMapReport(mrBuf, sizeof(mrBuf),
+                                           Node.longName(), Node.shortName(),
+                                           lat_i, lon_i, alt_m,
+                                           neighborCount());
+    if (mrLen == 0) return false;
+
+    uint8_t pkt[256] = {};
+    uint8_t pktLen   = 0;
+    if (!_buildTxPacket(pkt, pktLen, PORT_MAP_REPORT, mrBuf, mrLen,
+                        /*want_response=*/false)) return false;
+
+    ESP_LOGI(TAG, "TX MAP_REPORT lat=%.6f lon=%.6f alt=%dm neighbors=%u role=%u",
+             (double)lat_i / 1e7, (double)lon_i / 1e7, (int)alt_m,
+             (unsigned)neighborCount(), (unsigned)CONFIG_MESH_NODE_ROLE);
     return transmit(pkt, pktLen);
 }
 
@@ -2837,6 +3004,14 @@ void LoRa::run(void* /*data*/)
     _lastTelemetryTxTick = xTaskGetTickCount()
                          - telemetryInterval
                          + pdMS_TO_TICKS(15 * 1000UL);
+
+    // MAP_REPORT interval — first TX fires 30 s after boot (after position settles)
+    // Disabled at compile time when CONFIG_LORA_MAP_REPORT_TX_INTERVAL_SEC == 0.
+    const TickType_t mapReportInterval = pdMS_TO_TICKS(
+        (uint32_t)CONFIG_LORA_MAP_REPORT_TX_INTERVAL_SEC * 1000UL);
+    _lastMapReportTxTick = xTaskGetTickCount()
+                         - mapReportInterval
+                         + pdMS_TO_TICKS(30 * 1000UL);
 #endif
 
     // ── Receive loop ──────────────────────────────────────────────────────
@@ -3093,6 +3268,18 @@ void LoRa::run(void* /*data*/)
             _lastTelemetryTxTick = xTaskGetTickCount();
             sendTelemetry();
         }
+
+        // ── Periodic MAP_REPORT broadcast (GPS_APP / GPS_TRACKER_APP) ─────
+        // MAP_REPORT_APP (port 73) announces this node to MQTT bridges so it
+        // appears on the public Meshtastic map (meshtastic.network/map).
+        // Only sent when a GPS fix is available and the interval is enabled.
+#if CONFIG_LORA_MAP_REPORT_TX_INTERVAL_SEC > 0
+        if ((xTaskGetTickCount() - _lastMapReportTxTick) >= mapReportInterval)
+        {
+            _lastMapReportTxTick = xTaskGetTickCount();
+            sendMapReport(); // silently skips when no GPS fix
+        }
+#endif
 #endif
     }
 }

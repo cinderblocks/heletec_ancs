@@ -158,6 +158,16 @@ public:
      */
     bool sendTelemetry();
 
+    /**
+     * Broadcast a MAP_REPORT_APP (port 73) packet for public mesh map visibility.
+     * Announces this node's identity, hardware model, region, modem preset, and
+     * current GPS fix to any MQTT bridge in range.  Bridges forward it to
+     * meshtastic.network/map so the node appears on the public map.
+     * Only sent when a GPS fix is available.
+     * Must only be called from the LoRa task.  Returns true on TX success.
+     */
+    bool sendMapReport();
+
     /// Number of unique neighbour nodes seen since boot (0–8).  Thread-safe.
     size_t neighborCount() const;
 
@@ -218,11 +228,12 @@ private:
     static constexpr size_t MESH_HDR = 16;
 
     // PortNum values used by this firmware
-    static constexpr uint32_t PORT_TEXT       = 1;  ///< TEXT_MESSAGE_APP
-    static constexpr uint32_t PORT_POSITION   = 3;  ///< POSITION_APP
-    static constexpr uint32_t PORT_NODEINFO   = 4;  ///< NODEINFO_APP  (was 67 = TELEMETRY_APP — wrong!)
-    static constexpr uint32_t PORT_TELEMETRY  = 67; ///< TELEMETRY_APP (kept for RX dispatch if needed)
-    static constexpr uint32_t PORT_TRACEROUTE = 70; ///< TRACEROUTE_APP — route discovery
+    static constexpr uint32_t PORT_TEXT        = 1;  ///< TEXT_MESSAGE_APP
+    static constexpr uint32_t PORT_POSITION    = 3;  ///< POSITION_APP
+    static constexpr uint32_t PORT_NODEINFO    = 4;  ///< NODEINFO_APP
+    static constexpr uint32_t PORT_TELEMETRY   = 67; ///< TELEMETRY_APP
+    static constexpr uint32_t PORT_TRACEROUTE  = 70; ///< TRACEROUTE_APP — route discovery
+    static constexpr uint32_t PORT_MAP_REPORT  = 73; ///< MAP_REPORT_APP — public mesh map visibility
 
     // Meshtastic default channel AES-128 PSK.
     // Derived from the "Default" channel name; used by every out-of-box device.
@@ -287,6 +298,14 @@ private:
                                    uint32_t unixTime, uint32_t uptimeSec,
                                    uint8_t batteryLevel, float batteryVoltage);
 
+    /// Encode a Meshtastic MapReport proto (MAP_REPORT_APP payload).
+    /// Carries node identity, region, modem preset, and GPS fix for the public map.
+    /// Returns bytes written.
+    static size_t _encodeMapReport(uint8_t* buf, size_t cap,
+                                   const char* longName, const char* shortName,
+                                   int32_t lat_i, int32_t lon_i, int32_t alt_m,
+                                   uint32_t numNeighbors);
+
     /// Wrap an encoded payload in a Meshtastic Data proto. Returns bytes written.
     /// dest is fixed32 (field 4). requestId is fixed32 (field 6 = request_id).
     /// Confirmed from live traffic: Meshtastic uses field 6 (request_id) in
@@ -342,6 +361,7 @@ private:
     TickType_t _lastPosTxTick       = 0; ///< tick of last POSITION_APP TX
     TickType_t _lastNodeInfoTxTick  = 0; ///< tick of last NODEINFO_APP TX
     TickType_t _lastTelemetryTxTick = 0; ///< tick of last TELEMETRY_APP TX
+    TickType_t _lastMapReportTxTick = 0; ///< tick of last MAP_REPORT_APP TX
     uint8_t    _nodeInfoBootCount   = 0; ///< NodeInfo broadcasts sent since boot
 
     // ── Adaptive position broadcast state ────────────────────────────────

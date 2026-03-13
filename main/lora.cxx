@@ -208,8 +208,8 @@ static constexpr uint16_t IRQ_TX_MASK     = IRQ_TX_DONE | IRQ_TIMEOUT;
 static constexpr uint8_t DEFAULT_CHAN_HASH = 0x08;
 
 // HW_MODEL: Meshtastic HardwareModel enum value for this board.
-// meshtastic_HardwareModel_HELTEC_WIRELESS_TRACKER = 87 (mesh.proto 2.5+)
-static constexpr uint32_t HW_MODEL = 87;
+// meshtastic_HardwareModel_HELTEC_WIRELESS_TRACKER = 48 (mesh.proto)
+static constexpr uint32_t HW_MODEL = 48;
 
 // Meshtastic OTA flags byte layout (RadioLibInterface.cpp / mesh_pb.h):
 //

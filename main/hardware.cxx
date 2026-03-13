@@ -266,40 +266,16 @@ void Hardware::startDrawing(void* pvParameters)
 
         if (bits & DRAW_LORA_POS)
         {
-#if CONFIG_LORA_ENABLED
-            // Display the most recently updated neighbour position (index 0).
-            // Future enhancement: cycle through all neighbours on button press.
-            if (Lora.neighborCount() > 0)
-            {
-                MeshPosition pos = Lora.neighborPosition(0);
-                if (pos.valid)
-                {
-                    h->showPositionMessage(pos);
-                    h->glow(true);
-                    vTaskDelay(pdMS_TO_TICKS(5000));
-                    h->glow(false);
-                    h->standby();
-                }
-            }
-#endif
+            // Position updates are silent — neighbour table is updated in the LoRa
+            // task. No display interruption or glow; data is available on demand.
+            (void)0;
         }
 
         if (bits & DRAW_LORA_NODE)
         {
-#if CONFIG_LORA_ENABLED
-            if (Lora.neighborCount() > 0)
-            {
-                MeshUser user = Lora.neighborUser(0);
-                if (user.valid)
-                {
-                    h->showNodeInfoMessage(user);
-                    h->glow(true);
-                    vTaskDelay(pdMS_TO_TICKS(5000));
-                    h->glow(false);
-                    h->standby();
-                }
-            }
-#endif
+            // NodeInfo updates are silent — neighbour table is updated in the LoRa
+            // task. No display interruption or glow; data is available on demand.
+            (void)0;
         }
     }
     ESP_LOGI(TAG, "Ending Draw task");

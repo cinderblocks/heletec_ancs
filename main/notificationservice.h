@@ -101,6 +101,16 @@ public:
     notification_def* getNotificationByIndex(size_t index);
     bool takeNotificationByIndex(size_t index, notification_def& out);
 
+    /**
+     * Atomically copy all pending (unshowed, complete) non-call notifications
+     * into buf[] and mark each as showed, under a single mutex acquisition.
+     * Returns the number of notifications copied (≤ maxCount).
+     * Used by DrawTask to replace N separate takeNotificationByIndex() calls,
+     * reducing mutex churn from O(N) to O(1) and lowering context-switch
+     * pressure on CPU 0.
+     */
+    size_t takeAllPendingNotifications(notification_def* buf, size_t maxCount);
+
     // BLE callbacks — must return immediately; do NOT take any mutex or allocate heap.
     static void DataSourceNotifyCallback(NimBLERemoteCharacteristic *pCharacteristic, uint8_t *pData, size_t length, bool isNotify);
     static void NotificationSourceNotifyCallback(NimBLERemoteCharacteristic *pCharacteristic, uint8_t *pData, size_t length, bool isNotify);

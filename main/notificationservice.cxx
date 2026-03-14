@@ -291,6 +291,22 @@ bool NotificationService::takeNotificationByIndex(size_t index, notification_def
     return false;
 }
 
+size_t NotificationService::takeAllPendingNotifications(notification_def* buf, size_t maxCount)
+{
+    ScopedLock lock(mMutex);
+    size_t taken = 0;
+    for (size_t i = 0; i < notificationListSize && taken < maxCount; i++)
+    {
+        if (notificationList[i].key != 0 &&
+            !notificationList[i].showed &&
+            notificationList[i].isComplete)
+        {
+            buf[taken++] = notificationList[i];
+            notificationList[i].showed = true;
+        }
+    }
+    return taken;
+}
 bool NotificationService::exists(uint32_t uuid) const
 {
     if (callingNotification.key == uuid)

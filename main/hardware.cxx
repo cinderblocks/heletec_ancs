@@ -212,9 +212,7 @@ void Hardware::startDrawing(void* pvParameters)
             // Update call icon in header bar first
             h->showCallState(Notifications.isCallingNotification());
 
-            // Show caller ID once when the call first arrives.  takeCallingNotification
-            // atomically copies and marks showed=true; subsequent Modified re-fetches
-            // (iOS fires one per second) leave showed=true so this block is skipped.
+            // Show caller ID once when the call first arrives.
             notification_def callNotification;
             if (Notifications.takeCallingNotification(callNotification)) {
                 h->showNotification(callNotification);
@@ -223,30 +221,35 @@ void Hardware::startDrawing(void* pvParameters)
                 h->glow(false);
             }
 
-            size_t count = Notifications.getNotificationCount();
-            notification_def notification;
-            for (size_t i = 0; i < count; i++) {
-                // takeNotificationByIndex atomically copies the notification and
-                // marks it as showed under the mutex, so the slot is safe to reuse
-                // immediately — no stale pointer is held across the 15 s delay.
-                if (Notifications.takeNotificationByIndex(i, notification)) {
-                    h->showNotification(notification);
-                    h->glow(true);
-                    vTaskDelay(pdMS_TO_TICKS(15000));
-                    h->glow(false);
-                }
+            // Snapshot ALL pending notifications under a SINGLE mutex acquisition.
+            // This replaces the old pattern of getNotificationCount() + N individual
+            // takeNotificationByIndex() calls, which caused O(N) mutex acquisitions
+            // and O(N) context switches per DRAW_NOTIFY event — enough to starve
+            // IDLE0 on CPU 0 under heavy iOS ANCS load (Modified events at 1 Hz).
+            static constexpr size_t MAX_BATCH = 8;
+            notification_def pending[MAX_BATCH];
+            const size_t pendingCount =
+                Notifications.takeAllPendingNotifications(pending, MAX_BATCH);
+
+            for (size_t i = 0; i < pendingCount; i++) {
+                h->showNotification(pending[i]);
+                h->glow(true);
+                // Yield explicitly before and after the 15-second display so
+                // IDLE0 gets guaranteed CPU time even under continuous BLE load.
+                vTaskDelay(pdMS_TO_TICKS(15000));
+                h->glow(false);
+                // Brief yield between notifications to let IDLE0 feed the WDT.
+                vTaskDelay(pdMS_TO_TICKS(10));
             }
-            // Always refresh body text to reflect current BLE state after processing
+
+            // Always refresh body text to reflect current BLE state.
             h->standby();
 
-            // Yield to IDLE0 after display work.  DrawTask (priority 3) never
-            // preempts for lower-priority tasks, so IDLE0 only runs when DrawTask
-            // blocks.  Without this delay, rapid DRAW_NOTIFY / DRAW_STATE events
-            // (e.g. iOS firing EventIDNotificationModified every second for active
-            // calls) keep the task-notification bits non-zero, causing
-            // xTaskNotifyWait to return immediately on the next iteration and
-            // preventing IDLE0 from ever running — which triggers the task WDT.
-            vTaskDelay(pdMS_TO_TICKS(20));
+            // Yield to IDLE0 after display work.  Increased from 20 ms to 100 ms:
+            // the NimBLE host (priority 4) and ANCS task (priority 5) can keep
+            // higher-priority tasks ready for bursts of iOS Modified events, which
+            // prevents IDLE0 from running during the shorter 20 ms window.
+            vTaskDelay(pdMS_TO_TICKS(100));
         }
 
         if (bits & DRAW_LORA)

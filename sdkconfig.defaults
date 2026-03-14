@@ -21,3 +21,8 @@ CONFIG_MESH_NODE_LONG_NAME="HatefulBlue"
 CONFIG_MBEDTLS_ECP_C=y
 CONFIG_MBEDTLS_ECDH_C=y
 CONFIG_MBEDTLS_ECP_DP_CURVE25519_ENABLED=y
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=15
+# Do NOT panic on TWDT — log the backtrace and continue.
+# A panic-reboot from a transient load spike is worse than the starvation itself.
+CONFIG_ESP_TASK_WDT_PANIC=n
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=n

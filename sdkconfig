@@ -2258,12 +2258,6 @@ CONFIG_VFS_INITIALIZE_DEV_NULL=y
 # end of Virtual file system
 
 #
-# libsodium
-#
-CONFIG_LIBSODIUM_USE_MBEDTLS_SHA=y
-# end of libsodium
-
-#
 # ESP-NimBLE-CPP configuration
 #
 CONFIG_NIMBLE_CPP_LOG_LEVEL_NONE=y

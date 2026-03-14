@@ -89,21 +89,10 @@ public:
     const uint8_t* macaddr() const { return _mac; }
 
     /**
-     * 32-byte X25519 public key for Meshtastic PKC (Public Key Cryptography).
-     * Generated once on first boot and persisted in NVS.  Required by
-     * Meshtastic 2.5+ for the node to appear in the app UI.
-     * This is the ACTUAL X25519 public key derived from the private key.
+     * 32-byte public key field for the Meshtastic User proto.
+     * In IsLicensed (unencrypted) mode this is all-zeros — no PKC is used.
      */
     const uint8_t* publicKey() const { return _publicKey; }
-
-    /**
-     * Compute X25519 shared secret: X25519(our_private_key, their_public_key).
-     * Used for PKC (ch=0x00) packet decryption.
-     * @param theirPub32  32-byte X25519 public key of the sender (little-endian).
-     * @param out32       Output buffer, receives 32-byte shared secret.
-     * @return true on success.
-     */
-    bool sharedSecret(const uint8_t* theirPub32, uint8_t* out32) const;
 
     /**
      * Persist a new short name to NVS and update the in-memory cache.
@@ -129,8 +118,7 @@ public:
 private:
     uint32_t _nodeId        = 0;
     uint8_t  _mac[6]       = {};   // Bluetooth MAC
-    uint8_t  _privateKey[32]= {};  // X25519 private key (clamped, never exposed)
-    uint8_t  _publicKey[32] = {};  // X25519 public key (derived from private)
+    uint8_t  _publicKey[32] = {};  // All-zeros in IsLicensed (unencrypted) mode
     char     _nodeIdStr[12] = {};  // "!xxxxxxxx\0" — 10 chars + NUL
     char     _shortName[5]  = {};  // max 4 chars + NUL
     char     _longName[33]  = {};  // max 32 chars + NUL

@@ -104,11 +104,14 @@ struct LoRaStats {
  * LoRa — SX1262 driver + Meshtastic receive task.
  *
  * Continuously listens on the configured Meshtastic channel (default:
- * US LongFast @ 906.875 MHz, SF11/BW250/CR4-5, private sync word 0x1424).
+ * US LongFast @ 906.875 MHz, SF11/BW250/CR4-5, private sync word 0x2B).
  *
- * Received packets are decrypted with the Meshtastic default channel PSK
- * and, if they contain a TEXT_MESSAGE_APP Data proto, the text is stored
- * and the draw task is notified via Hardware::notifyDraw(DRAW_LORA).
+ * Uses standard AES-128-CTR channel encryption for full interoperability
+ * with the existing Meshtastic mesh.  PKC (X25519/ch=0x00 direct messages)
+ * is not supported — those packets are silently dropped.
+ *
+ * Received packets containing TEXT_MESSAGE_APP Data protos have their
+ * text stored and the draw task is notified via Hardware::notifyDraw(DRAW_LORA).
  *
  * Runs as a FreeRTOS task on core 1 (BLE / draw tasks run on core 0).
  */
@@ -235,8 +238,8 @@ private:
     static constexpr uint32_t PORT_TRACEROUTE  = 70; ///< TRACEROUTE_APP — route discovery
     static constexpr uint32_t PORT_MAP_REPORT  = 73; ///< MAP_REPORT_APP — public mesh map visibility
 
-    // Meshtastic default channel AES-128 PSK.
-    // Derived from the "Default" channel name; used by every out-of-box device.
+    // Meshtastic default channel AES-128 PSK (factory LongFast).
+    // Used for both RX decryption and TX encryption.
     static const uint8_t DEFAULT_PSK[16];
 
     // Meshtastic LoRa sync word.
@@ -252,9 +255,11 @@ private:
     // ── Meshtastic packet processing ──────────────────────────────────────
     void _processPacket(const uint8_t* buf, uint8_t len,
                         int16_t rssi, float snr);
-    bool _decrypt(const uint8_t* ciphertext, size_t len,
+    /// AES-128-CTR cipher — same function for both encrypt and decrypt (CTR is symmetric).
+    /// Nonce: [packetId LE (4B) | 0 (4B) | fromNode LE (4B) | 0 (4B)]
+    bool _decrypt(const uint8_t* in, size_t len,
                   uint32_t packetId, uint32_t fromNode,
-                  uint8_t* plaintext);
+                  uint8_t* out);
     bool _parseData(const uint8_t* data, size_t len,
                     uint32_t& portnum,
                     const uint8_t*& payload, size_t& payloadLen,
@@ -318,26 +323,8 @@ private:
                               uint32_t source = 0,
                               uint32_t requestId = 0);
 
-    /// Send our NodeInfo to fromNode with want_response=true, requesting they send
-    /// back their NodeInfo so we can cache their public key.  Rate-limited per node
-    /// (60 s) using NeighborEntry::nodeInfoRequestedTick.
-    void _requestNodeInfoFrom(uint32_t fromNode);
-
-    /// Decrypt a PKC (ch=0x00) packet using X25519 ECDH + AES-256-CTR.
-    /// Looks up the sender's public key in the neighbor table, computes the
-    /// X25519 shared secret with our private key, then decrypts.
-    /// @param retrying      true when called as a retry after the pubkey was just learned;
-    ///                      suppresses buffering and NodeInfo request side-effects.
-    /// @param useHashedKey  When true, use SHA-256(raw_shared_secret) as the AES key instead
-    ///                      of the raw X25519 output.  Some Meshtastic builds hash the shared
-    ///                      secret before use; we try both to maximise compatibility.
-    /// @return true if shared key was found and AES-256-CTR succeeded.
-    bool _decryptPKC(const uint8_t* ciphertext, size_t len,
-                     uint32_t packetId, uint32_t fromNode,
-                     uint8_t* plaintext, bool retrying = false,
-                     bool useHashedKey = false);
-
-    /// Build a complete encrypted OTA Meshtastic packet ready for transmit().
+    /// Build a complete OTA Meshtastic packet ready for transmit().
+    /// In IsLicensed mode the Data proto is sent as plaintext (no encryption).
     /// @param to        Destination node ID (0xFFFFFFFF = broadcast).
     /// @param requestId Incoming pktId for unicast NodeInfo responses (0 = none).
     ///                  Placed in Data field 6 (request_id, fixed32) so the
@@ -379,22 +366,10 @@ private:
     struct NeighborEntry {
         MeshPosition pos  = {};
         MeshUser     user = {};
-        TickType_t   nodeInfoRequestedTick = 0; ///< last time we sent them a NodeInfo request
         bool         occupied = false;
     };
     mutable portMUX_TYPE _neighborLock = portMUX_INITIALIZER_UNLOCKED;
     NeighborEntry        _neighbors[NEIGHBOR_MAX] = {};
-
-    /// One buffered PKC DM awaiting the sender's public key.
-    /// When their NodeInfo arrives, we retry decryption automatically.
-    struct PendingPkcDm {
-        uint32_t fromNode = 0;
-        uint32_t packetId = 0;
-        uint8_t  data[256] = {};
-        uint8_t  len      = 0;
-        bool     valid    = false;
-    };
-    PendingPkcDm _pendingPkc = {};
 
     // ── Packet deduplication ring (Phase 6) ───────────────────────────────
     static constexpr size_t SEEN_IDS_MAX = 16;

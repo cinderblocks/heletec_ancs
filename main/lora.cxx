@@ -23,12 +23,11 @@
 
 #include <esp_log.h>
 #include <esp_rom_sys.h>
+#include <mbedtls/aes.h>
 #include <driver/spi_master.h>
 #include <driver/gpio.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#include <mbedtls/aes.h>
-#include <mbedtls/sha256.h>
 #include <cinttypes>
 #include <cstring>
 #include <cstdio>
@@ -120,14 +119,6 @@ static uint32_t computeLoraFrequency()
 // Cached at file scope — computed once, used throughout.
 static const uint32_t LORA_FREQ_HZ = computeLoraFrequency();
 
-// ── Meshtastic default channel PSK ────────────────────────────────────────
-// AES-128 key for the "Default" / LongFast channel used by every factory
-// Meshtastic device.  Sourced from Meshtastic firmware CryptoEngine.cpp.
-/* static */ const uint8_t LoRa::DEFAULT_PSK[16] = {
-    0xd4, 0xf1, 0xbb, 0x3a, 0x20, 0x29, 0x07, 0x59,
-    0xf0, 0xbc, 0xff, 0xab, 0xcf, 0x4e, 0x69, 0x01
-};
-
 // ── SX1262 opcodes ────────────────────────────────────────────────────────
 static constexpr uint8_t CMD_SET_STANDBY         = 0x80;
 static constexpr uint8_t CMD_SET_RX              = 0x82;
@@ -188,23 +179,32 @@ static constexpr uint16_t IRQ_TX_MASK     = IRQ_TX_DONE | IRQ_TIMEOUT;
 
 // ── Meshtastic OTA TX constants ───────────────────────────────────────────
 //
+// ── Meshtastic default channel PSK ────────────────────────────────────────
+// AES-128 key for the default LongFast channel (factory default on every
+// Meshtastic device).  Used for both RX decryption and TX encryption so
+// this node interoperates with the existing encrypted mesh.
+// is_licensed affects whether OUR node *should* encrypt, but since other
+// nodes in the mesh still encrypt, we must decrypt their packets and encrypt
+// ours for end-to-end interoperability.
+/* static */ const uint8_t LoRa::DEFAULT_PSK[16] = {
+    0xd4, 0xf1, 0xbb, 0x3a, 0x20, 0x29, 0x07, 0x59,
+    0xf0, 0xbc, 0xff, 0xab, 0xcf, 0x4e, 0x69, 0x01
+};
+
 // DEFAULT_CHAN_HASH: 1-byte channel hash placed in OTA header byte [13].
 //
 // Meshtastic computes this via Channels::getHash():
-//   xorHash(name, strlen(name)) ^ xorHash(psk.bytes, psk.size)
+//   xorHash(name, strlen(name)) ^ xorHash(key.bytes, key.length)
+// where key = Channels::getKey() returns the EXPANDED PSK (not raw psk bytes).
 //
-// For the default "LongFast" primary channel (confirmed from live traffic,
-// ch=0x08 seen from a factory-default Meshtastic device):
-//   name = "LongFast"
-//   xorHash("LongFast", 8):
-//     L(0x4C)^o(0x6F)=0x23 ^n(0x6E)=0x4D ^g(0x67)=0x2A
-//     ^F(0x46)=0x6C ^a(0x61)=0x0D ^s(0x73)=0x7E ^t(0x74)=0x0A
-//   psk.bytes = expanded 16-byte key (0xD4,0xF1,...,0x01)
-//   xorHash(expanded_PSK, 16) = 0x02  (as computed previously)
+// is_licensed only disables CryptoEngine encrypt/decrypt — it does NOT
+// change the channel PSK or hash.  The channel identity stays the same
+// so IsLicensed and encrypted nodes share the same channel hash.
+//
+// Default "LongFast" channel (factory PSK {0x01} → expanded 16-byte key):
+//   xorHash("LongFast", 8) = 0x0A
+//   xorHash(expanded_default_PSK, 16) = 0x02
 //   hash = 0x0A ^ 0x02 = 0x08
-//
-// History: was 0x01 (xorHash of 1-byte {0x01} key index), then 0x02
-// (xorHash of expanded PSK without name). 0x08 matches observed traffic.
 static constexpr uint8_t DEFAULT_CHAN_HASH = 0x08;
 
 // HW_MODEL: Meshtastic HardwareModel enum value for this board.
@@ -852,268 +852,40 @@ bool LoRa::_initSx1262()
 
 // ── _decrypt ──────────────────────────────────────────────────────────────
 // Meshtastic AES-128-CTR cipher (decrypt == encrypt for CTR mode).
-// Nonce layout: [ packetId LE (4B) | zeros (4B) | fromNode LE (4B) | zeros (4B) ]
-// Matches CryptoEngine::initCounter() in Meshtastic firmware.
-bool LoRa::_decrypt(const uint8_t* ciphertext, size_t len,
+// Used for BOTH decrypting incoming packets and encrypting outgoing ones.
+//
+// Nonce layout (CryptoEngine::initCounter() in Meshtastic firmware):
+//   bytes  [0:3]  = packetId LE
+//   bytes  [4:7]  = 0x00 × 4
+//   bytes  [8:11] = fromNode LE
+//   bytes [12:15] = 0x00 × 4
+bool LoRa::_decrypt(const uint8_t* in, size_t len,
                     uint32_t packetId, uint32_t fromNode,
-                    uint8_t* plaintext)
+                    uint8_t* out)
 {
     if (len == 0) return false;
 
     uint8_t nonce[16] = {};
-    // Meshtastic AES-128-CTR nonce (CryptoEngine::initCounter() in Meshtastic fw):
-    //   bytes  [0:3]  = packetId LE  (lower 32 bits of the 64-bit packet counter)
-    //   bytes  [4:7]  = 0x00 × 4    (upper 32 bits of the 64-bit counter — always 0)
-    //   bytes  [8:11] = fromNode LE
-    //   bytes [12:15] = 0x00 × 4
-    //
-    // The previous layout had fromNode at [4:7] and zeros at [8:11] — the
-    // opposite of the correct layout.  This caused every single decrypt to
-    // produce garbage plaintext, explaining the persistent _parseData failures.
     nonce[0]  = static_cast<uint8_t>(packetId);
     nonce[1]  = static_cast<uint8_t>(packetId >>  8);
     nonce[2]  = static_cast<uint8_t>(packetId >> 16);
     nonce[3]  = static_cast<uint8_t>(packetId >> 24);
-    // nonce[4:7] = 0 (already zero-initialised)
+    // [4:7]  = 0
     nonce[8]  = static_cast<uint8_t>(fromNode);
     nonce[9]  = static_cast<uint8_t>(fromNode >>  8);
     nonce[10] = static_cast<uint8_t>(fromNode >> 16);
     nonce[11] = static_cast<uint8_t>(fromNode >> 24);
-    // nonce[12:15] = 0 (already zero-initialised)
+    // [12:15] = 0
 
     uint8_t streamBlock[16] = {};
     size_t  nc_off = 0;
 
     mbedtls_aes_context ctx;
     mbedtls_aes_init(&ctx);
-
     bool ok = false;
     if (mbedtls_aes_setkey_enc(&ctx, DEFAULT_PSK, 128) == 0)
-    {
-        ok = (mbedtls_aes_crypt_ctr(&ctx, len, &nc_off,
-                                    nonce, streamBlock,
-                                    ciphertext, plaintext) == 0);
-    }
-
+        ok = (mbedtls_aes_crypt_ctr(&ctx, len, &nc_off, nonce, streamBlock, in, out) == 0);
     mbedtls_aes_free(&ctx);
-    return ok;
-}
-
-// ── _requestNodeInfoFrom ──────────────────────────────────────────────────
-// Send our own NodeInfo to fromNode with want_response=true so they will send
-// back their NodeInfo (including public_key, field 8).  Rate-limited per node
-// to one request per 60 s.  Updates NeighborEntry::nodeInfoRequestedTick.
-void LoRa::_requestNodeInfoFrom(uint32_t fromNode)
-{
-#if !CONFIG_LORA_TX_ENABLED
-    return;
-#endif
-    constexpr TickType_t kMinIntervalTicks = pdMS_TO_TICKS(60000);
-    const TickType_t now = xTaskGetTickCount();
-
-    // Check per-node rate limit
-    portENTER_CRITICAL(&_neighborLock);
-    for (size_t i = 0; i < NEIGHBOR_MAX; i++)
-    {
-        if (_neighbors[i].occupied &&
-            (_neighbors[i].pos.fromNode == fromNode ||
-             _neighbors[i].user.fromNode == fromNode))
-        {
-            const TickType_t last = _neighbors[i].nodeInfoRequestedTick;
-            if (last != 0 && (now - last) < kMinIntervalTicks)
-            {
-                portEXIT_CRITICAL(&_neighborLock);
-                ESP_LOGD(TAG, "NodeInfo request to 0x%08" PRIx32 " rate-limited", fromNode);
-                return;
-            }
-            _neighbors[i].nodeInfoRequestedTick = now;
-            break;
-        }
-    }
-    portEXIT_CRITICAL(&_neighborLock);
-
-    ESP_LOGI(TAG, "Requesting NodeInfo from 0x%08" PRIx32
-             " (need public key for PKC)", fromNode);
-    sendNodeInfo(fromNode, /*wantResponse=*/true);
-}
-
-// ── _decryptPKC ───────────────────────────────────────────────────────────
-// Decrypt a PKC (ch=0x00) Meshtastic packet.
-//
-// Meshtastic PKC encryption scheme (from CryptoEngine.cpp):
-//   1. shared = X25519(our_priv, sender_pub) = X25519(sender_priv, our_pub)
-//   2. aes_key = shared  OR  SHA-256(shared)   [version-dependent, we try both]
-//   3. nonce   = [packetId LE 4B | 0 4B | fromNode LE 4B | 0 4B]
-//   4. cipher  = AES-256-CTR(aes_key, nonce, plaintext)
-//
-// @param useHashedKey  When false: aes_key = raw X25519 output (most common).
-//                      When true:  aes_key = SHA-256(X25519 output) (some fw versions).
-bool LoRa::_decryptPKC(const uint8_t* ciphertext, size_t len,
-                        uint32_t packetId, uint32_t fromNode,
-                        uint8_t* plaintext, bool retrying, bool useHashedKey)
-{
-    if (len == 0) return false;
-
-    // 1. Look up sender's public key in neighbor table
-    uint8_t theirPub[32] = {};
-    bool found = false;
-    bool neighborExists = false;
-    portENTER_CRITICAL(&_neighborLock);
-    for (size_t i = 0; i < NEIGHBOR_MAX && !found; i++)
-    {
-        if (_neighbors[i].occupied &&
-            (_neighbors[i].user.fromNode == fromNode ||
-             _neighbors[i].pos.fromNode  == fromNode))
-        {
-            neighborExists = true;
-            if (_neighbors[i].user.hasPublicKey)
-            {
-                memcpy(theirPub, _neighbors[i].user.publicKey, 32);
-                found = true;
-            }
-        }
-    }
-    portEXIT_CRITICAL(&_neighborLock);
-
-    if (!found)
-    {
-        if (!retrying)
-        {
-            if (neighborExists)
-                ESP_LOGW(TAG, "PKC from 0x%08" PRIx32 ": neighbor known but no public key"
-                         " — buffering DM, requesting NodeInfo", fromNode);
-            else
-                ESP_LOGW(TAG, "PKC from 0x%08" PRIx32 ": unknown neighbor"
-                         " — buffering DM, requesting NodeInfo", fromNode);
-
-            if (len <= sizeof(_pendingPkc.data))
-            {
-                _pendingPkc.fromNode = fromNode;
-                _pendingPkc.packetId = packetId;
-                _pendingPkc.len      = static_cast<uint8_t>(len);
-                memcpy(_pendingPkc.data, ciphertext, len);
-                _pendingPkc.valid    = true;
-                ESP_LOGI(TAG, "PKC DM 0x%08" PRIx32 " buffered (%u bytes)", packetId, (unsigned)len);
-            }
-            else
-            {
-                ESP_LOGW(TAG, "PKC DM too large to buffer (%u bytes)", (unsigned)len);
-            }
-
-            _requestNodeInfoFrom(fromNode);
-        }
-        else
-        {
-            ESP_LOGW(TAG, "PKC retry for 0x%08" PRIx32 ": still no public key", fromNode);
-        }
-        return false;
-    }
-
-    // 2. Compute X25519 shared secret
-    uint8_t shared[32] = {};
-    if (!Node.sharedSecret(theirPub, shared))
-    {
-        ESP_LOGW(TAG, "PKC from 0x%08" PRIx32 ": X25519 computation failed", fromNode);
-        return false;
-    }
-
-    // 3. Derive AES key — SHA-256(shared) is the Meshtastic standard (CryptoEngine.cpp)
-    uint8_t aesKey[32] = {};
-    if (!useHashedKey)
-    {
-        // Legacy / raw X25519 output as AES key (fallback only)
-        memcpy(aesKey, shared, 32);
-        ESP_LOGD(TAG,
-            "PKC raw key: our_pub=%02x%02x%02x%02x..  their_pub=%02x%02x%02x%02x.."
-            "  shared=%02x%02x%02x%02x..",
-            Node.publicKey()[0], Node.publicKey()[1],
-            Node.publicKey()[2], Node.publicKey()[3],
-            theirPub[0], theirPub[1], theirPub[2], theirPub[3],
-            shared[0],   shared[1],   shared[2],   shared[3]);
-    }
-    else
-    {
-        // Standard Meshtastic PKC: SHA-256(X25519 output) = AES-256 key
-        mbedtls_sha256_context sha;
-        mbedtls_sha256_init(&sha);
-        mbedtls_sha256_starts(&sha, /*is224=*/0);
-        mbedtls_sha256_update(&sha, shared, 32);
-        mbedtls_sha256_finish(&sha, aesKey);
-        mbedtls_sha256_free(&sha);
-        if (!retrying)
-        {
-            ESP_LOGI(TAG,
-                "PKC ECDH: our_pub=%02x%02x%02x%02x..  their_pub=%02x%02x%02x%02x.."
-                "  shared=%02x%02x%02x%02x..  aes_key=%02x%02x%02x%02x..",
-                Node.publicKey()[0], Node.publicKey()[1],
-                Node.publicKey()[2], Node.publicKey()[3],
-                theirPub[0], theirPub[1], theirPub[2], theirPub[3],
-                shared[0],   shared[1],   shared[2],   shared[3],
-                aesKey[0],   aesKey[1],   aesKey[2],   aesKey[3]);
-        }
-    }
-
-    // 4. Build nonce — PKC layout differs from PSK!
-    //
-    // Meshtastic CryptoEngine::initNonce(fromNode, packetId, extraNonce):
-    //   bytes  [0:7]   = packetId (uint64_t LE; upper 4 bytes = 0 for 32-bit IDs)
-    //   bytes  [8:11]  = fromNode (LE)
-    //   bytes [12:15]  = extraNonce (LE)
-    //
-    // For PSK (channel) decryption:  extraNonce = 0
-    // For PKC (X25519) decryption:   extraNonce = toNode (destination node ID)
-    //
-    // *** BUG HISTORY: nonce[12:15] was 0 (same as PSK), but Meshtastic sets
-    // extraNonce = toNode for PKC.  Since PKC packets are always addressed to
-    // us, toNode = Node.nodeId().  The zero nonce produced the wrong AES-CTR
-    // keystream, causing every PKC decrypt to yield garbage plaintext. ***
-    const uint32_t toNode = Node.nodeId();
-    uint8_t nonce[16] = {};
-    nonce[0]  = static_cast<uint8_t>(packetId);
-    nonce[1]  = static_cast<uint8_t>(packetId >>  8);
-    nonce[2]  = static_cast<uint8_t>(packetId >> 16);
-    nonce[3]  = static_cast<uint8_t>(packetId >> 24);
-    // nonce[4:7] = 0 (upper 32 bits of 64-bit packetId — always 0)
-    nonce[8]  = static_cast<uint8_t>(fromNode);
-    nonce[9]  = static_cast<uint8_t>(fromNode >>  8);
-    nonce[10] = static_cast<uint8_t>(fromNode >> 16);
-    nonce[11] = static_cast<uint8_t>(fromNode >> 24);
-    nonce[12] = static_cast<uint8_t>(toNode);
-    nonce[13] = static_cast<uint8_t>(toNode >>  8);
-    nonce[14] = static_cast<uint8_t>(toNode >> 16);
-    nonce[15] = static_cast<uint8_t>(toNode >> 24);
-
-    // 5. AES-256-CTR decrypt
-    if (!retrying)
-    {
-        ESP_LOGI(TAG, "PKC nonce: %02x%02x%02x%02x %02x%02x%02x%02x "
-                 "%02x%02x%02x%02x %02x%02x%02x%02x  key[0..3]=%02x%02x%02x%02x",
-                 nonce[0], nonce[1], nonce[2], nonce[3],
-                 nonce[4], nonce[5], nonce[6], nonce[7],
-                 nonce[8], nonce[9], nonce[10], nonce[11],
-                 nonce[12], nonce[13], nonce[14], nonce[15],
-                 aesKey[0], aesKey[1], aesKey[2], aesKey[3]);
-    }
-
-    uint8_t streamBlock[16] = {};
-    size_t  nc_off = 0;
-    mbedtls_aes_context ctx;
-    mbedtls_aes_init(&ctx);
-    bool ok = false;
-    if (mbedtls_aes_setkey_enc(&ctx, aesKey, 256) == 0)
-    {
-        ok = (mbedtls_aes_crypt_ctr(&ctx, len, &nc_off,
-                                    nonce, streamBlock,
-                                    ciphertext, plaintext) == 0);
-    }
-    mbedtls_aes_free(&ctx);
-
-    if (ok)
-        ESP_LOGI(TAG, "PKC decrypt OK (AES-256%s) from 0x%08" PRIx32,
-                 useHashedKey ? "+SHA256" : "", fromNode);
-    else
-        ESP_LOGW(TAG, "PKC decrypt AES-256 failed for 0x%08" PRIx32, fromNode);
-
     return ok;
 }
 
@@ -1402,13 +1174,10 @@ bool LoRa::_parseData(const uint8_t* data, size_t len,
     n += _pbVarint(buf + n, CONFIG_MESH_NODE_ROLE);
 #endif
 
-    // Field 8: public_key (bytes, 32 bytes) — tag = (8<<3)|2 = 0x42
-    n += _pbLenField(buf + n, 0x42, Node.publicKey(), 32);
+    // Field 8: public_key — omitted in IsLicensed (unencrypted) mode.
+    // No PKC keys are generated or exchanged.
 
     // Field 9: is_unmessageable (bool, varint) — tag = (9<<3)|0 = 0x48
-    // All Meshtastic 2.5+ nodes that carry public_key include this field
-    // explicitly as false (0).  We match that behaviour so our User proto
-    // is byte-for-byte structurally identical to real node packets.
     buf[n++] = 0x48;
     buf[n++] = 0x00;
 
@@ -1492,15 +1261,12 @@ bool LoRa::_parseData(const uint8_t* data, size_t len,
 }
 
 // ── _buildTxPacket ────────────────────────────────────────────────────────
-// Build a complete, encrypted, ready-to-transmit Meshtastic OTA packet.
+// Build a complete, AES-128-CTR encrypted, ready-to-transmit Meshtastic
+// OTA packet.
 //
 // Layout of out[]:
 //   [0..15]  16-byte OTA header (plaintext)
 //   [16..]   AES-128-CTR encrypted Data proto
-//
-// The packet ID is drawn from Node.nextPacketId() and becomes part of the
-// AES-CTR nonce, so every call produces a different ciphertext even for
-// identical payloads — safe to call back-to-back.
 //
 // out must be at least 256 bytes.  Returns false only on encoding error.
 bool LoRa::_buildTxPacket(uint8_t* out, uint8_t& outLen,
@@ -1538,15 +1304,7 @@ bool LoRa::_buildTxPacket(uint8_t* out, uint8_t& outLen,
         ESP_LOGI(TAG, "TX Data proto (%u bytes): %s", (unsigned)dataLen, hex);
     }
 
-    // 2. Encrypt Data proto (AES-128-CTR; encrypt == decrypt for CTR mode)
-    uint8_t cipherBuf[240] = {};
-    if (!_decrypt(dataBuf, dataLen, packetId, fromNode, cipherBuf))
-    {
-        ESP_LOGW(TAG, "_buildTxPacket: AES-CTR encrypt failed");
-        return false;
-    }
-
-    // 3. Build 16-byte OTA header
+    // 2. Build 16-byte OTA header
     out[0] = static_cast<uint8_t>(to);
     out[1] = static_cast<uint8_t>(to >>  8);
     out[2] = static_cast<uint8_t>(to >> 16);
@@ -1559,16 +1317,17 @@ bool LoRa::_buildTxPacket(uint8_t* out, uint8_t& outLen,
     out[9]  = static_cast<uint8_t>(packetId >>  8);
     out[10] = static_cast<uint8_t>(packetId >> 16);
     out[11] = static_cast<uint8_t>(packetId >> 24);
-    // Flags byte — see FLAGS_BROADCAST / FLAGS_UNICAST constants above.
-    // hop_start = hop_limit = 3, want_ack = 0 (broadcast) or 1 (unicast), via_mqtt = 0.
-    //   Broadcast: 0x63   Unicast: 0x6B
     out[12] = unicast ? FLAGS_UNICAST : FLAGS_BROADCAST;
     out[13] = DEFAULT_CHAN_HASH;
     out[14] = 0x00;
     out[15] = 0x00;
 
-    // 4. Append ciphertext
-    memcpy(out + MESH_HDR, cipherBuf, dataLen);
+    // 3. Encrypt Data proto with AES-128-CTR (encrypt == decrypt for CTR mode)
+    if (!_decrypt(dataBuf, dataLen, packetId, fromNode, out + MESH_HDR))
+    {
+        ESP_LOGW(TAG, "_buildTxPacket: AES-CTR encrypt failed");
+        return false;
+    }
     outLen = static_cast<uint8_t>(MESH_HDR + dataLen);
 
     ESP_LOGI(TAG,
@@ -2124,13 +1883,14 @@ void LoRa::_upsertNeighbor(uint32_t fromNode,
         _neighbors[slot].user          = *user;
         _neighbors[slot].user.fromNode = fromNode;
         _neighbors[slot].user.valid    = true;
+
+        portEXIT_CRITICAL(&_neighborLock);
     }
     else
     {
         _neighbors[slot].user.fromNode = fromNode;
+        portEXIT_CRITICAL(&_neighborLock);
     }
-
-    portEXIT_CRITICAL(&_neighborLock);
 }
 
 // ── neighborCount ─────────────────────────────────────────────────────────
@@ -2183,8 +1943,8 @@ MeshUser LoRa::neighborUser(size_t idx) const
 
 // ─────────────────────────────────────────────────────────────────────────
 // ── _processPacket ────────────────────────────────────────────────────────
-// Parse the raw LoRa payload, attempt decryption, decode the Meshtastic
-// Data protobuf, and store text messages.
+// Parse the raw LoRa payload, decode the Meshtastic Data protobuf
+// (plaintext — IsLicensed mode), and dispatch by portnum.
 void LoRa::_processPacket(const uint8_t* buf, uint8_t pktLen,
                            int16_t rssi, float snr)
 {
@@ -2236,58 +1996,25 @@ void LoRa::_processPacket(const uint8_t* buf, uint8_t pktLen,
         return;
     }
 
-    const uint8_t* ciphertext  = buf  + MESH_HDR;
-    const size_t   cipherLen   = pktLen - MESH_HDR;
+    // ── Decrypt payload with AES-128-CTR (channel PSK) ───────────────────
+    // AES-128-CTR is used by all standard Meshtastic nodes on ch=0x08.
+    // Decrypt and re-encrypt are the same operation (CTR mode is symmetric),
+    // so this function is shared for both RX and TX.
+    const uint8_t* ciphertext = buf + MESH_HDR;
+    const size_t   cipherLen  = pktLen - MESH_HDR;
 
-    // Decrypt — channel hash 0x00 addressed to us is always PKC (X25519 ECDH).
-    // AES-CTR never returns an error (it always "succeeds" with garbage on wrong
-    // key), so we MUST branch on chanHash BEFORE calling _decrypt, not after.
     uint8_t plain[256] = {};
-    bool    decryptedOk = false;
-    bool    isPKC       = false;
-
-    if (chanHash == 0x00 && to == Node.nodeId())
+    if (!_decrypt(ciphertext, cipherLen, pktId, from, plain))
     {
-        // Meshtastic PKC DM: ch=0x00 unicast to our node ID.
-        // Sender used our public_key (NodeInfo User field 8) with X25519 ECDH.
-        //
-        // Key derivation (from Meshtastic CryptoEngine.cpp):
-        //   shared = X25519(our_priv, sender_pub)
-        //   aes_key = SHA-256(shared)          ← standard, all modern firmware
-        //
-        // Primary attempt uses SHA-256(shared); raw shared is legacy fallback.
-        if (_decryptPKC(ciphertext, cipherLen, pktId, from, plain,
-                        /*retrying=*/false, /*useHashedKey=*/true))
-        {
-            decryptedOk = true;
-            isPKC       = true;
-        }
-        else
-        {
-            // _decryptPKC already buffered the DM and requested NodeInfo
-            // when the sender's key wasn't found.  Nothing more to do here.
-            return;
-        }
+        ESP_LOGW(TAG, "AES-CTR failed for pkt 0x%08" PRIx32, pktId);
+        return;
     }
-    else
-    {
-        // All other packets: use the default channel PSK (AES-128-CTR).
-        // This includes ch=0x08 (LongFast default), ch=0x00 broadcasts, etc.
-        if (!_decrypt(ciphertext, cipherLen, pktId, from, plain))
-        {
-            ESP_LOGW(TAG, "AES-CTR decrypt failed for pkt 0x%08" PRIx32, pktId);
-            return;
-        }
-        decryptedOk = true;
-    }
-
-    (void)decryptedOk; // always true past this point
 
     portENTER_CRITICAL(&_statsLock);
     _stats.decryptOk++;
     portEXIT_CRITICAL(&_statsLock);
 
-    // Hex dump of decrypted Data proto for wire-level comparison with our TX.
+    // Hex dump of decrypted Data proto for wire-level debugging.
     {
         char hex[120 * 3 + 1] = {};
         for (size_t i = 0; i < cipherLen && i < 120; i++)
@@ -2295,132 +2022,34 @@ void LoRa::_processPacket(const uint8_t* buf, uint8_t pktLen,
         ESP_LOGI(TAG, "RX Data proto (%u bytes): %s", (unsigned)cipherLen, hex);
     }
 
+    const size_t plainLen = cipherLen;
+
     // Decode the Data protobuf wrapper
     uint32_t       portnum    = 0;
     const uint8_t* payload    = nullptr;
     size_t         payloadLen = 0;
     bool           wantResp   = false;
 
-    if (!_parseData(plain, cipherLen, portnum, payload, payloadLen, wantResp))
+    if (!_parseData(plain, plainLen, portnum, payload, payloadLen, wantResp))
     {
-        if (isPKC)
-        {
-            // ── PKC parse failure recovery ────────────────────────────────
-            //
-            // Primary decrypt already used SHA-256(shared) — the standard
-            // Meshtastic key derivation.  If that produced garbage, try the
-            // raw X25519 output as AES key (older/non-standard firmware).
-            //
-            // If both fail → sender has our stale public key from a previous
-            // boot.  Push our current NodeInfo so they refresh their node-DB.
-            //
-            {
-                char hex[16 * 3 + 1] = {};
-                for (size_t di = 0; di < cipherLen && di < 16; di++)
-                    snprintf(hex + di * 3, 4, "%02x ", plain[di]);
-                ESP_LOGW(TAG, "PKC SHA256 plain parse FAIL — first bytes: %s (first=0x%02x)",
-                         hex, cipherLen > 0 ? plain[0] : 0);
-            }
-            ESP_LOGD(TAG, "PKC SHA256-key parse failed — retrying with raw X25519 key");
-            uint8_t plain2[256] = {};
-            uint32_t portnum2 = 0;
-            const uint8_t* payload2 = nullptr;
-            size_t payloadLen2 = 0;
-            bool wantResp2 = false;
-            bool altKeyWorked = false;
-
-            if (_decryptPKC(ciphertext, cipherLen, pktId, from,
-                            plain2, /*retrying=*/true, /*useHashedKey=*/false))
-            {
-                {
-                    char hex[16 * 3 + 1] = {};
-                    for (size_t di = 0; di < cipherLen && di < 16; di++)
-                        snprintf(hex + di * 3, 4, "%02x ", plain2[di]);
-                    ESP_LOGD(TAG, "PKC raw-key plaintext first bytes: %s", hex);
-                }
-                if (_parseData(plain2, cipherLen, portnum2, payload2, payloadLen2, wantResp2))
-                {
-                    memcpy(plain, plain2, cipherLen);
-                    portnum    = portnum2;
-                    payload    = payload2
-                               ? plain + (payload2 - plain2)
-                               : nullptr;
-                    payloadLen = payloadLen2;
-                    wantResp   = wantResp2;
-                    altKeyWorked = true;
-                    ESP_LOGI(TAG, "PKC DM 0x%08" PRIx32 " decoded with raw X25519 key"
-                             " — sender uses non-hashed key variant", pktId);
-                }
-            }
-
-            if (!altKeyWorked)
-            {
-                // Both SHA-256 and raw-key attempts produced invalid protobuf.
-                // Most likely cause: sender has our STALE public key from a
-                // previous boot/key-regen cycle.  Push our current NodeInfo
-                // so they update their node-DB and re-encrypt future DMs with
-                // the correct key.  Request their NodeInfo back (wantResponse)
-                // so we also verify we have THEIR current key.
-                //
-                // Log full public keys for side-by-side comparison.
-                {
-                    char ourHex[65] = {}, theirHex[65] = {};
-                    for (int ki = 0; ki < 32; ki++) {
-                        snprintf(ourHex   + ki*2, 3, "%02x", Node.publicKey()[ki]);
-                    }
-                    // Retrieve their stored key for logging
-                    uint8_t theirKey[32] = {};
-                    bool haveTheirKey = false;
-                    portENTER_CRITICAL(&_neighborLock);
-                    for (size_t ni = 0; ni < NEIGHBOR_MAX; ni++) {
-                        if (_neighbors[ni].occupied &&
-                            _neighbors[ni].user.fromNode == from &&
-                            _neighbors[ni].user.hasPublicKey) {
-                            memcpy(theirKey, _neighbors[ni].user.publicKey, 32);
-                            haveTheirKey = true;
-                            break;
-                        }
-                    }
-                    portEXIT_CRITICAL(&_neighborLock);
-                    if (haveTheirKey)
-                        for (int ki = 0; ki < 32; ki++)
-                            snprintf(theirHex + ki*2, 3, "%02x", theirKey[ki]);
-                    ESP_LOGW(TAG,
-                        "PKC FAIL pkt 0x%08" PRIx32 " from 0x%08" PRIx32
-                        " — stale key?  our_pub=%s  their_pub=%s",
-                        pktId, from, ourHex,
-                        haveTheirKey ? theirHex : "(none)");
-                }
-#if CONFIG_LORA_TX_ENABLED
-                sendNodeInfo(from, /*wantResponse=*/true);
-#endif
-                return;
-            }
-            // altKeyWorked == true: fall through to dispatch below
-        }
-        else
-        {
-            ESP_LOGI(TAG, "Decrypt OK but Data proto parse failed for pkt 0x%08" PRIx32
-                     " from 0x%08" PRIx32 " ch=0x%02x"
-                     " — expected for non-LongFast channels (ch!=0x08)",
-                     pktId, from, chanHash);
-            return;
-        }
+        ESP_LOGI(TAG, "Parse failed for pkt 0x%08" PRIx32
+                 " from 0x%08" PRIx32 " ch=0x%02x",
+                 pktId, from, chanHash);
+        return;
     }
     // An empty payload is valid for TRACEROUTE_APP — an empty RouteDiscovery proto
     // means a direct traceroute request with no intermediate hops yet.
     // All other portnums require a payload.
     if ((payload == nullptr || payloadLen == 0) && portnum != PORT_TRACEROUTE)
     {
-        ESP_LOGI(TAG, "Decrypt OK but no payload in Data proto for pkt 0x%08" PRIx32
+        ESP_LOGI(TAG, "No payload in Data proto for pkt 0x%08" PRIx32
                  " from 0x%08" PRIx32 " portnum=%u",
                  pktId, from, portnum);
         return;
     }
 
-    ESP_LOGI(TAG, "Decoded pkt from 0x%08" PRIx32 " portnum=%u payloadLen=%u want_resp=%d%s",
-             from, portnum, (unsigned)payloadLen, (int)wantResp,
-             isPKC ? " [PKC]" : "");
+    ESP_LOGI(TAG, "Decoded pkt from 0x%08" PRIx32 " portnum=%u payloadLen=%u want_resp=%d",
+             from, portnum, (unsigned)payloadLen, (int)wantResp);
 
     // ── Dispatch by portnum ───────────────────────────────────────────────
 
@@ -2488,29 +2117,6 @@ void LoRa::_processPacket(const uint8_t* buf, uint8_t pktLen,
 
             _upsertNeighbor(from, &pos, nullptr);
             Heltec.notifyDraw(Hardware::DRAW_LORA_POS);
-
-            // ── Proactively request NodeInfo for new neighbours ────────────
-            // If we haven't seen their NodeInfo (and public key) yet, request it
-            // now so we're ready before they send us a PKC DM.
-#if CONFIG_LORA_TX_ENABLED
-            {
-                bool haveKey = false;
-                portENTER_CRITICAL(&_neighborLock);
-                for (size_t ni = 0; ni < NEIGHBOR_MAX; ni++)
-                {
-                    if (_neighbors[ni].occupied &&
-                        (_neighbors[ni].pos.fromNode == from ||
-                         _neighbors[ni].user.fromNode == from))
-                    {
-                        haveKey = _neighbors[ni].user.hasPublicKey;
-                        break;
-                    }
-                }
-                portEXIT_CRITICAL(&_neighborLock);
-                if (!haveKey)
-                    _requestNodeInfoFrom(from);
-            }
-#endif
         }
         else
         {
@@ -2542,159 +2148,6 @@ void LoRa::_processPacket(const uint8_t* buf, uint8_t pktLen,
             _upsertNeighbor(from, nullptr, &user);
             Heltec.notifyDraw(Hardware::DRAW_LORA_NODE);
 
-            // ── Retry any buffered PKC DM from this sender ────────────────
-            // If a PKC DM arrived before we knew the sender's public key,
-            // now we have it — attempt decryption and dispatch immediately.
-            if (user.hasPublicKey && _pendingPkc.valid &&
-                _pendingPkc.fromNode == from)
-            {
-                ESP_LOGI(TAG, "Retrying buffered PKC DM 0x%08" PRIx32
-                         " from 0x%08" PRIx32 " now that pubkey is known"
-                         " (their_pub=%02x%02x%02x%02x..)",
-                         _pendingPkc.packetId, from,
-                         user.publicKey[0], user.publicKey[1],
-                         user.publicKey[2], user.publicKey[3]);
-
-                // Primary: SHA-256(shared) key — same as live-packet path
-                uint8_t retryPlain[256] = {};
-                bool retryDecryptOk = _decryptPKC(_pendingPkc.data, _pendingPkc.len,
-                                                   _pendingPkc.packetId, from,
-                                                   retryPlain, /*retrying=*/true,
-                                                   /*useHashedKey=*/true);
-                uint32_t       rPortnum    = 0;
-                const uint8_t* rPayload    = nullptr;
-                size_t         rPayloadLen = 0;
-                bool           rWantResp   = false;
-                bool           retryParsed = false;
-
-                if (retryDecryptOk)
-                {
-                    // Dump first 16 bytes of plaintext for diagnostics
-                    {
-                        char hex[16 * 3 + 1] = {};
-                        for (size_t di = 0; di < _pendingPkc.len && di < 16; di++)
-                            snprintf(hex + di * 3, 4, "%02x ", retryPlain[di]);
-                        ESP_LOGI(TAG, "PKC SHA256 plain[0..15]: %s", hex);
-                    }
-                    bool parsedOk = _parseData(retryPlain, _pendingPkc.len,
-                                               rPortnum, rPayload, rPayloadLen, rWantResp);
-                    if (parsedOk && rPayload != nullptr && rPayloadLen > 0)
-                        retryParsed = true;
-                    else if (parsedOk && rPortnum != 0)
-                    {
-                        // Proto parsed, portnum present but no payload — treat as decoded
-                        // (routing ACKs and similar have no payload field)
-                        retryParsed = true;
-                        ESP_LOGI(TAG, "PKC SHA256: proto parsed (port=%" PRIu32 ") no payload — treating as decoded", rPortnum);
-                    }
-                    else if (parsedOk)
-                        ESP_LOGW(TAG, "PKC SHA256: proto parsed (port=%" PRIu32 ") but no payload", rPortnum);
-                    else
-                        ESP_LOGW(TAG, "PKC SHA256: _parseData returned false (first byte=0x%02x)", retryPlain[0]);
-                }
-
-                // Fallback: raw X25519 shared secret (older/non-standard firmware)
-                if (!retryParsed)
-                {
-                    uint8_t retryPlain2[256] = {};
-                    if (_decryptPKC(_pendingPkc.data, _pendingPkc.len,
-                                    _pendingPkc.packetId, from,
-                                    retryPlain2, /*retrying=*/true, /*useHashedKey=*/false))
-                    {
-                        // Dump first 16 bytes of plaintext for diagnostics
-                        {
-                            char hex[16 * 3 + 1] = {};
-                            for (size_t di = 0; di < _pendingPkc.len && di < 16; di++)
-                                snprintf(hex + di * 3, 4, "%02x ", retryPlain2[di]);
-                            ESP_LOGI(TAG, "PKC raw plain[0..15]: %s", hex);
-                        }
-                        uint32_t       rPort2 = 0;
-                        const uint8_t* rPay2  = nullptr;
-                        size_t         rLen2  = 0;
-                        bool           rWR2   = false;
-                        bool parsedOk2 = _parseData(retryPlain2, _pendingPkc.len,
-                                                    rPort2, rPay2, rLen2, rWR2);
-                        if (parsedOk2 && rPay2 != nullptr && rLen2 > 0)
-                        {
-                            memcpy(retryPlain, retryPlain2, _pendingPkc.len);
-                            rPortnum    = rPort2;
-                            rPayload    = retryPlain + (rPay2 - retryPlain2);
-                            rPayloadLen = rLen2;
-                            rWantResp   = rWR2;
-                            retryParsed = true;
-                            ESP_LOGI(TAG, "Buffered PKC DM decoded with raw X25519 key");
-                        }
-                        else if (parsedOk2 && rPort2 != 0)
-                        {
-                            // No payload but proto is valid (e.g. routing ACK)
-                            memcpy(retryPlain, retryPlain2, _pendingPkc.len);
-                            rPortnum  = rPort2;
-                            rWantResp = rWR2;
-                            retryParsed = true;
-                            ESP_LOGI(TAG, "Buffered PKC DM raw key: port=%" PRIu32 " no payload", rPort2);
-                        }
-                        else if (parsedOk2)
-                            ESP_LOGW(TAG, "PKC raw: proto parsed (port=%" PRIu32 ") but no payload", rPort2);
-                        else
-                            ESP_LOGW(TAG, "PKC raw: _parseData returned false (first byte=0x%02x)", retryPlain2[0]);
-                    }
-                }
-
-                if (retryParsed)
-                {
-                    portENTER_CRITICAL(&_statsLock);
-                    _stats.decryptOk++;
-                    portEXIT_CRITICAL(&_statsLock);
-
-                    ESP_LOGI(TAG, "Buffered PKC DM portnum=%u payloadLen=%u [PKC retry]",
-                             rPortnum, (unsigned)rPayloadLen);
-
-                    if (rPortnum == PORT_TEXT)
-                    {
-                        // PKC DMs are always to == Node.nodeId() (filtered at recv) — no need
-                        // to check isDirect/isBroadcast here; this is always a direct message.
-                        MeshMessage msg;
-                        msg.fromNode = from;
-                        msg.rssi     = rssi;
-                        msg.snr      = snr;
-                        msg.valid    = true;
-                        const size_t copyLen = std::min(rPayloadLen, sizeof(msg.text) - 1);
-                        memcpy(msg.text, rPayload, copyLen);
-                        msg.text[copyLen] = '\0';
-                        ESP_LOGI(TAG, "Text (PKC retry) from 0x%08" PRIx32
-                                 " (rssi=%d snr=%.1f): %s",
-                                 from, rssi, (double)snr, msg.text);
-                        portENTER_CRITICAL(&_statsLock);
-                        _stats.textMessages++;
-                        portEXIT_CRITICAL(&_statsLock);
-                        portENTER_CRITICAL(&_msgLock);
-                        _lastMsg = msg;
-                        portEXIT_CRITICAL(&_msgLock);
-                        Heltec.notifyDraw(Hardware::DRAW_LORA);
-                    }
-                }
-                else
-                {
-                    // Log full key material for diagnostics
-                    {
-                        char ourHex[65] = {}, theirHex[65] = {};
-                        for (int ki = 0; ki < 32; ki++)
-                            snprintf(ourHex + ki*2, 3, "%02x", Node.publicKey()[ki]);
-                        for (int ki = 0; ki < 32; ki++)
-                            snprintf(theirHex + ki*2, 3, "%02x", user.publicKey[ki]);
-                        ESP_LOGW(TAG,
-                            "Buffered PKC DM: both keys failed — stale key?"
-                            "  our_pub=%s  their_pub=%s", ourHex, theirHex);
-                    }
-#if CONFIG_LORA_TX_ENABLED
-                    // Push our current NodeInfo so sender refreshes their copy
-                    // of our public key.  Request theirs back to verify ours.
-                    sendNodeInfo(from, /*wantResponse=*/true);
-#endif
-                }
-                _pendingPkc.valid = false; // consumed regardless of outcome
-            }
-
             // ── Respond to want_response NodeInfo requests ────────────────
             // Only respond if the packet was addressed to us or broadcast.
 #if CONFIG_LORA_TX_ENABLED
@@ -2703,13 +2156,6 @@ void LoRa::_processPacket(const uint8_t* buf, uint8_t pktLen,
                 ESP_LOGI(TAG, "Responding to NodeInfo request from 0x%08" PRIx32
                          " (request_id=0x%08" PRIx32 ")", from, pktId);
                 sendNodeInfo(from, /*wantResponse=*/false, /*requestId=*/pktId);
-            }
-            else if (!user.hasPublicKey)
-            {
-                // Their NodeInfo arrived without a public_key (old firmware or
-                // stripped packet).  Request again in case they have it — the
-                // rate-limit will prevent flooding.
-                _requestNodeInfoFrom(from);
             }
 #endif
         }

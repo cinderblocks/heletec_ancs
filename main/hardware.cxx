@@ -34,6 +34,16 @@ Hardware::Hardware()
 :   mDisplay(ST7735_CS, ST7735_REST, ST7735_RS, ST7735_SCLK, ST7735_MOSI, ST7735_LED, VEXT_CTRL)
 {
     portMUX_INITIALIZE(&mHardwareLock);
+    mAdcMutex = xSemaphoreCreateMutex();
+    if (mAdcMutex == nullptr)
+    {
+        // OOM at construction time — log deferred to begin() when the logging
+        // subsystem is ready.  _updateBatteryCache() will detect nullptr and
+        // proceed unguarded rather than crash (still correct, just not serialised).
+        // In practice this should never happen: the mutex is tiny and allocated
+        // before the BLE stack consumes heap.
+        ESP_EARLY_LOGE("hardware", "xSemaphoreCreateMutex failed — ADC reads unprotected");
+    }
 }
 
 /* virtual */
@@ -42,6 +52,10 @@ Hardware::~Hardware()
     if (mAdcHandle != nullptr) {
         adc_oneshot_del_unit(mAdcHandle);
         mAdcHandle = nullptr;
+    }
+    if (mAdcMutex != nullptr) {
+        vSemaphoreDelete(mAdcMutex);
+        mAdcMutex = nullptr;
     }
 }
 
@@ -353,6 +367,15 @@ void Hardware::showNotification(notification_def const& notification)
 // then disable the divider.  Updates both mBatteryLevel and mBatteryVoltage
 // atomically so callers never see a level/voltage mismatch.
 //
+// Thread safety: serialised by mAdcMutex.
+//
+// This function MUST NOT be called from an ISR or from a context where
+// blocking is prohibited (e.g. the timer service task itself), because it
+// calls vTaskDelay() for 100 ms while the divider rail settles.
+// The timer callback (batteryTimerCallback) only posts DRAW_BATTERY —
+// the actual ADC work always executes in the draw task or in a BLE
+// stack task, both of which can block freely.
+//
 // Heltec Wireless Tracker 1.1 battery ADC calibration:
 //   GPIO2 (ADC_CTRL) controls a P-FET that enables a 100K/100K voltage divider
 //   between VBAT and GND.  GPIO1 (VBAT_READ = ADC1_CH0) reads the mid-point.
@@ -365,6 +388,13 @@ void Hardware::showNotification(notification_def const& notification)
 //     V_batt = 3.2 + clamp((raw - 680) / 343, 0, 1) * 1.0
 void Hardware::_updateBatteryCache()
 {
+    // Take the ADC mutex so concurrent callers (draw task via DRAW_BATTERY,
+    // NimBLE task via diag getBatteryLevel()) never interleave their
+    // GPIO2 toggle + 100 ms settle + ADC read sequences.
+    // Null-guard: if OOM prevented mutex creation we proceed unprotected
+    // (wrong reading is preferable to a crash).
+    if (mAdcMutex) xSemaphoreTake(mAdcMutex, portMAX_DELAY);
+
     // Enable the voltage divider.
     gpio_set_pull_mode(static_cast<gpio_num_t>(ADC_CTRL), GPIO_PULLUP_ONLY);
     vTaskDelay(pdMS_TO_TICKS(100));  // wait for rail to settle
@@ -405,6 +435,11 @@ void Hardware::_updateBatteryCache()
     // isVbusIn() fallback for boards without EXT_CHRG_DETECT.
     static constexpr float kChargingThresholdV = 4.15f;
     const bool nowCharging = mBatteryVoltage > kChargingThresholdV;
+
+    if (mAdcMutex) xSemaphoreGive(mAdcMutex);
+
+    // Issue the notifyDraw() AFTER releasing the mutex so the draw task
+    // can immediately re-enter _updateBatteryCache() if it needs to.
     if (nowCharging != mIsCharging)
     {
         mIsCharging = nowCharging;

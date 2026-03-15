@@ -20,6 +20,7 @@
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/portmacro.h>
+#include <freertos/semphr.h>
 #include <esp_adc/adc_oneshot.h>
 #include <time.h>
 #include <climits>
@@ -161,7 +162,19 @@ private:
     // by mHardwareLock when crossing task boundaries.
     char mMessage[32]   = {};
     char mTimestamp[8]  = {};
-    portMUX_TYPE mHardwareLock; // initialized in Hardware() via portMUX_INITIALIZE
+    portMUX_TYPE  mHardwareLock; // initialized in Hardware() via portMUX_INITIALIZE
+    // ── ADC mutex ─────────────────────────────────────────────────────────
+    // _updateBatteryCache() holds GPIO2 (ADC_CTRL) HIGH for 100 ms while the
+    // voltage-divider rail settles, then reads ADC1_CH0.  If two tasks enter
+    // concurrently (draw task via DRAW_BATTERY and the NimBLE/diag timer task
+    // via getBatteryLevel()), one task can disable GPIO2 while the other is
+    // still settling, yielding a wrong reading.
+    //
+    // A portMUX_TYPE spinlock CANNOT be used here because it must never be
+    // held across a blocking call (vTaskDelay).  A proper FreeRTOS mutex
+    // (binary semaphore with priority inheritance) serialises callers and
+    // allows the blocked task to sleep rather than spin.
+    SemaphoreHandle_t mAdcMutex = nullptr;
     TimerHandle_t mBatteryTimer = nullptr;
     TimerHandle_t mClockTimer   = nullptr;
     adc_oneshot_unit_handle_t mAdcHandle = nullptr;

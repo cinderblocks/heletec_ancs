@@ -58,6 +58,14 @@ public:
     static constexpr uint8_t FACTORY_LED = 18;
     static constexpr uint8_t VBAT_READ  = 1;
     static constexpr uint8_t BUZZER     = 45;
+    /**
+     * TP4054 CHRG pin — active-LOW, open-drain output.
+     * LOW  = battery is actively charging.
+     * HIGH = not charging (charge complete or no USB power).
+     * The pin has an on-board pull-up, but we also enable the internal pull-up
+     * as a safety net.
+     */
+    static constexpr uint8_t CHARGE     = 6;
 
     static constexpr uint16_t HEADER_COLOR = 0x3190;
 
@@ -71,6 +79,7 @@ public:
     static constexpr uint32_t DRAW_LORA_POS  = (1u << 6); // Meshtastic position received
     static constexpr uint32_t DRAW_LORA_NODE = (1u << 7); // Meshtastic nodeinfo received
     static constexpr uint32_t DRAW_LORA_MESH = (1u << 8); // LoRa mesh connection state changed
+    static constexpr uint32_t DRAW_CHARGING  = (1u << 9); // USB charge state changed
 
     Hardware();
     ~Hardware();
@@ -109,6 +118,15 @@ public:
     /** Return the last cached battery voltage in volts (updated every 30 s). */
     float   cachedBatteryVoltage() const { return mBatteryVoltage; }
 
+    /**
+     * Return true when the TP4054 CHRG pin (GPIO6) is LOW, meaning the battery
+     * is being actively charged via USB.  Updated every time _updateBatteryCache()
+     * runs (every 30 s, or on demand via getBatteryLevel/getBatteryVoltage).
+     * Note: the battery-level percentage is unreliable while charging because the
+     * charger holds the voltage above the battery's resting level.
+     */
+    bool isCharging() const { return mIsCharging; }
+
 private:
     static void startDrawing(void* pvParameters);
     static void batteryTimerCallback(TimerHandle_t xTimer);
@@ -133,6 +151,7 @@ private:
     bool mLoraConnected = false;
     uint8_t mBatteryLevel   = 0;
     float   mBatteryVoltage = 0.0f;
+    bool    mIsCharging     = false;
     int32_t mUtcOffsetSeconds = INT32_MIN;  // INT32_MIN = not yet synced
     // Fixed-size arrays instead of String to allow safe writes from non-draw tasks
     // (BTC task writes mMessage; GPS task writes mTimestamp).  Both are protected

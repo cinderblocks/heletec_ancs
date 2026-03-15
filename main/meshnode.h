@@ -89,10 +89,35 @@ public:
     const uint8_t* macaddr() const { return _mac; }
 
     /**
-     * 32-byte public key field for the Meshtastic User proto.
+     * 32-byte X25519 public key field for the Meshtastic User proto.
      * In IsLicensed (unencrypted) mode this is all-zeros — no PKC is used.
+     * In encrypted mode this is derived from the persisted private key.
      */
     const uint8_t* publicKey() const { return _publicKey; }
+
+    /**
+     * Whether this node has a valid PKC keypair (encrypted mode only).
+     */
+    bool hasPkcKeys() const { return _hasPkcKeys; }
+
+    /**
+     * Compute an X25519 ECDH shared secret from our private key and a
+     * remote node's public key.  The 32-byte result is written to sharedOut.
+     *
+     * Input keys are little-endian (Meshtastic/RFC 7748 wire format) and
+     * are reversed internally to big-endian for the mbedtls MPI API.
+     * The shared secret output is little-endian, matching the output of
+     * Curve25519::eval() (Arduino Crypto library) that Meshtastic ESP32
+     * firmware uses directly as the AES-256 key.
+     *
+     * @param remotePubKey  Remote node's 32-byte X25519 public key
+     *                      (little-endian, as received on the wire).
+     * @param sharedOut     Output buffer — must be at least 32 bytes.
+     *                      Filled with the 32-byte little-endian shared secret.
+     * @return true on success, false if no PKC keys or ECDH failed.
+     */
+    bool computeSharedSecret(const uint8_t* remotePubKey,
+                             uint8_t* sharedOut) const;
 
     /**
      * Persist a new short name to NVS and update the in-memory cache.
@@ -119,6 +144,8 @@ private:
     uint32_t _nodeId        = 0;
     uint8_t  _mac[6]       = {};   // Bluetooth MAC
     uint8_t  _publicKey[32] = {};  // All-zeros in IsLicensed (unencrypted) mode
+    uint8_t  _privateKey[32]= {};  // X25519 private key (encrypted mode only)
+    bool     _hasPkcKeys    = false; // true when a valid keypair is loaded
     char     _nodeIdStr[12] = {};  // "!xxxxxxxx\0" — 10 chars + NUL
     char     _shortName[5]  = {};  // max 4 chars + NUL
     char     _longName[33]  = {};  // max 32 chars + NUL

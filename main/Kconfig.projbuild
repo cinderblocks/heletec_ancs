@@ -44,7 +44,7 @@ endmenu
 
 menu "LoRa / Meshtastic Configuration"
 
-config LORA_ENABLED
+menuconfig LORA_ENABLED
     bool "Enable LoRa Meshtastic receive"
     default y
     help
@@ -53,6 +53,25 @@ config LORA_ENABLED
         and shown on the display for 5 seconds.
         Uses the SX1262 on SPI2 (NSS=GPIO8, SCK=9, MOSI=10, MISO=11,
         RST=12, BUSY=13, DIO1=14) — Heltec Wireless Tracker 1.1 schematic.
+
+config LORA_IS_LICENSED
+    bool "Licensed (ham radio) mode — disable encryption"
+    default n
+    depends on LORA_ENABLED
+    help
+        When ENABLED, the device operates in licensed (ham radio) mode:
+        - TX packets are sent as plaintext (no AES channel encryption)
+        - PKC (public-key encrypted direct messages) is disabled
+        - Public key is all-zeros in NODEINFO_APP broadcasts
+        - is_licensed=true is advertised in User proto field 6
+
+        When DISABLED (default), the device operates in normal encrypted
+        mode matching stock Meshtastic behaviour:
+        - AES-128-CTR channel encryption with the default PSK
+        - X25519 keypair generated and persisted in NVS
+        - Public key broadcast in NODEINFO_APP (User proto field 8)
+        - PKC-encrypted direct messages (chanHash=0x00) can be decrypted
+          using ECDH shared secrets with AES-256-CTR
 
 config LORA_CHANNEL_NUM
     int "Meshtastic channel slot number (0 = auto from name hash)"

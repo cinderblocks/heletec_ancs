@@ -107,8 +107,10 @@ struct LoRaStats {
  * US LongFast @ 906.875 MHz, SF11/BW250/CR4-5, private sync word 0x2B).
  *
  * Uses standard AES-128-CTR channel encryption for full interoperability
- * with the existing Meshtastic mesh.  PKC (X25519/ch=0x00 direct messages)
- * is not supported — those packets are silently dropped.
+ * with the existing Meshtastic mesh.  When CONFIG_LORA_IS_LICENSED is off
+ * (default), X25519 PKC direct messages (chanHash=0x00) are also decrypted
+ * using ECDH shared secrets with AES-256-CTR.  In IsLicensed (ham radio)
+ * mode, PKC is disabled and TX packets are sent as plaintext.
  *
  * Received packets containing TEXT_MESSAGE_APP Data protos have their
  * text stored and the draw task is notified via Hardware::notifyDraw(DRAW_LORA).
@@ -260,6 +262,16 @@ private:
     bool _decrypt(const uint8_t* in, size_t len,
                   uint32_t packetId, uint32_t fromNode,
                   uint8_t* out);
+
+    /// AES-256-CTR PKC (public key cryptography) cipher for direct messages.
+    /// Uses X25519 ECDH shared secret as the 256-bit key.  Same nonce layout
+    /// as _decrypt().  chanHash=0x00 marks PKC-encrypted packets on the wire.
+    /// @param fromNode  Sender node ID — used to look up the remote public key
+    ///                  in the neighbour table and to build the CTR nonce.
+    /// @return true on success, false if no public key found or ECDH/AES failed.
+    bool _decryptPkc(const uint8_t* in, size_t len,
+                     uint32_t packetId, uint32_t fromNode,
+                     uint8_t* out);
     bool _parseData(const uint8_t* data, size_t len,
                     uint32_t& portnum,
                     const uint8_t*& payload, size_t& payloadLen,
@@ -324,7 +336,8 @@ private:
                               uint32_t requestId = 0);
 
     /// Build a complete OTA Meshtastic packet ready for transmit().
-    /// In IsLicensed mode the Data proto is sent as plaintext (no encryption).
+    /// In encrypted mode: Data proto is AES-128-CTR encrypted (channel PSK).
+    /// In IsLicensed mode: Data proto is sent as plaintext (no encryption).
     /// @param to        Destination node ID (0xFFFFFFFF = broadcast).
     /// @param requestId Incoming pktId for unicast NodeInfo responses (0 = none).
     ///                  Placed in Data field 6 (request_id, fixed32) so the
@@ -375,6 +388,43 @@ private:
     static constexpr size_t SEEN_IDS_MAX = 16;
     uint32_t _seenIds[SEEN_IDS_MAX] = {};
     size_t   _seenCursor            = 0;
+
+    // ── PKC key-request rate limiter ──────────────────────────────────────
+    // When a PKC DM arrives from a node whose public key we don't have, we
+    // send a NODEINFO request (want_response=true) so they reply with their
+    // key.  To avoid flooding, we only request once per node per 60 s.
+    static constexpr size_t   PKC_REQ_RING_MAX = 4;
+    static constexpr uint32_t PKC_REQ_COOLDOWN_MS = 60000;
+    struct PkcKeyReq {
+        uint32_t   nodeId = 0;
+        TickType_t tick   = 0;
+    };
+    PkcKeyReq _pkcKeyReqs[PKC_REQ_RING_MAX] = {};
+
+    // ── Pending PKC packet buffer ─────────────────────────────────────────
+    // Stores raw undecryptable PKC packets (missing sender public key) so
+    // they can be retried once we learn the sender's key from a NODEINFO.
+    // Entries expire after 5 minutes — stale DMs are not useful.
+    struct PendingPkcPacket {
+        uint8_t    data[256] = {};
+        uint8_t    len       = 0;
+        int16_t    rssi      = 0;
+        float      snr       = 0.f;
+        uint32_t   fromNode  = 0;
+        uint32_t   pktId     = 0;   ///< for dedup within buffer
+        TickType_t tick       = 0;
+        bool       occupied  = false;
+    };
+    static constexpr size_t   PKC_PENDING_MAX       = 4;
+    static constexpr uint32_t PKC_PENDING_EXPIRE_MS = 300000; // 5 minutes
+    PendingPkcPacket _pkcPending[PKC_PENDING_MAX] = {};
+
+    /// Buffer a raw PKC packet for later decryption (called when key is missing).
+    void _bufferPkcPacket(const uint8_t* buf, uint8_t len,
+                          int16_t rssi, float snr);
+    /// Retry decryption of any buffered PKC packets from fromNode.
+    /// Called after we learn a node's public key from their NODEINFO.
+    void _retryPkcBuffer(uint32_t fromNode);
 };
 
 extern LoRa Lora;

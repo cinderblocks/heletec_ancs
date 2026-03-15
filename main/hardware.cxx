@@ -93,21 +93,6 @@ void Hardware::begin()
         }
     }
 
-    // ── CHARGE (GPIO6) — TP4054 CHRG, active-LOW open-drain output ───────
-    // The PCB has an on-board pull-up; we also enable the internal one as a
-    // safety net.  LOW = battery actively charging; HIGH = not charging.
-    {
-        const gpio_config_t charge_conf = {
-            .pin_bit_mask  = 1ULL << CHARGE,
-            .mode          = GPIO_MODE_INPUT,
-            .pull_up_en    = GPIO_PULLUP_ENABLE,
-            .pull_down_en  = GPIO_PULLDOWN_DISABLE,
-            .intr_type     = GPIO_INTR_DISABLE,
-        };
-        gpio_config(&charge_conf);
-        mIsCharging = (gpio_get_level(static_cast<gpio_num_t>(CHARGE)) == 0);
-    }
-
     mBatteryTimer = xTimerCreate("Battery", pdMS_TO_TICKS(30000), pdTRUE, nullptr, batteryTimerCallback);
     if (mBatteryTimer == nullptr)
     {
@@ -154,18 +139,21 @@ void Hardware::startDrawing(void* pvParameters)
         // next call starts clean.
         xTaskNotifyWait(0u, 0xFFFFFFFFu, &bits, portMAX_DELAY);
 
-        if (bits & (DRAW_BATTERY | DRAW_CHARGING))
+        if (bits & DRAW_BATTERY)
         {
-            if (bits & DRAW_BATTERY)
-            {
-                // Safe to block here — we are in the draw task, not the timer service task.
-                // Read ADC once and update both level, voltage, and charging state caches.
-                h->_updateBatteryCache();
-            }
+            // Safe to block here — we are in the draw task, not the timer service task.
+            // Read ADC once and update both level and voltage caches.
+            h->_updateBatteryCache();
             const uint8_t level = h->mBatteryLevel;
             h->showBatteryLevel(level);
-            if (bits & DRAW_BATTERY)
-                Ble.setBatteryLevel(level);
+            Ble.setBatteryLevel(level);
+        }
+
+        if (bits & DRAW_CHARGING)
+        {
+            // USB VBUS state changed between battery timer ticks (detected in
+            // _updateBatteryCache).  Just redraw the icon — no ADC read needed.
+            h->showBatteryLevel(h->mBatteryLevel);
         }
 
         // Update BLE icon in header — safe here because we're in the draw task.
@@ -400,16 +388,20 @@ void Hardware::_updateBatteryCache()
     const float pct = std::clamp((rawAvg - 680.f) / 343.f, 0.f, 1.f);
     mBatteryVoltage = 3.2f + pct * 1.0f;
 
-    // ── Charging state ────────────────────────────────────────────────────
-    // TP4054 CHRG pin (GPIO6): LOW = actively charging, HIGH = not charging.
-    // Note: while charging, the ADC reads the charger-boosted voltage rather
-    // than the battery's resting level, so the percentage above is unreliable.
-    // The showBatteryLevel() display will show the charging icon instead.
-    const bool nowCharging = (gpio_get_level(static_cast<gpio_num_t>(CHARGE)) == 0);
+    // ── Charging state detection ─────────────────────────────────────────
+    // The TP4054 CHRG pin is only wired to the onboard LED, not to any ESP32
+    // GPIO.
+    //
+    // Battery voltage > charging threshold — the TP4054 holds VBAT at
+    // exactly 4.20 V during CC/CV charging, which is measurably above the
+    // resting "full" voltage (~4.10–4.15 V) of a healthy LiPo cell.
+    // 4.15 V is the same threshold Meshtastic firmware uses as its
+    // isVbusIn() fallback for boards without EXT_CHRG_DETECT.
+    static constexpr float kChargingThresholdV = 4.15f;
+    const bool nowCharging = mBatteryVoltage > kChargingThresholdV;
     if (nowCharging != mIsCharging)
     {
         mIsCharging = nowCharging;
-        // Wake the draw task so the battery icon updates immediately.
         notifyDraw(DRAW_CHARGING);
         ESP_LOGI(TAG, "Charging state changed: %s", mIsCharging ? "CHARGING" : "NOT CHARGING");
     }
@@ -504,9 +496,8 @@ void Hardware::showBLEState(conn_state_def state)
 void Hardware::showBatteryLevel(uint8_t percent)
 {
     if (mIsCharging) {
-        // TP4054 CHRG pin is LOW — battery is actively charging.
-        // Show a yellow lightning-bolt icon; the ADC percentage is unreliable
-        // while the charger is holding the voltage above the resting level.
+        // USB VBUS is present — TP4054 is actively charging.
+        // Yellow lightning bolt; the ADC voltage is unreliable while charging.
         drawIcon(mDisplay.width()-16, 1, Bitmaps::Battery_Charging, TFT::Color::YELLOW);
         return;
     }

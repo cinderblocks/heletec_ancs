@@ -58,14 +58,8 @@ public:
     static constexpr uint8_t FACTORY_LED = 18;
     static constexpr uint8_t VBAT_READ  = 1;
     static constexpr uint8_t BUZZER     = 45;
-    /**
-     * TP4054 CHRG pin — active-LOW, open-drain output.
-     * LOW  = battery is actively charging.
-     * HIGH = not charging (charge complete or no USB power).
-     * The pin has an on-board pull-up, but we also enable the internal pull-up
-     * as a safety net.
-     */
-    static constexpr uint8_t CHARGE     = 6;
+    // Note: the TP4054 CHRG pin is only wired to the onboard LED on the
+    // Heltec Wireless Tracker 1.1 — it is NOT connected to any ESP32 GPIO.
 
     static constexpr uint16_t HEADER_COLOR = 0x3190;
 
@@ -79,7 +73,7 @@ public:
     static constexpr uint32_t DRAW_LORA_POS  = (1u << 6); // Meshtastic position received
     static constexpr uint32_t DRAW_LORA_NODE = (1u << 7); // Meshtastic nodeinfo received
     static constexpr uint32_t DRAW_LORA_MESH = (1u << 8); // LoRa mesh connection state changed
-    static constexpr uint32_t DRAW_CHARGING  = (1u << 9); // USB charge state changed
+    static constexpr uint32_t DRAW_CHARGING  = (1u << 9); // USB VBUS / charge state changed
 
     Hardware();
     ~Hardware();
@@ -119,11 +113,20 @@ public:
     float   cachedBatteryVoltage() const { return mBatteryVoltage; }
 
     /**
-     * Return true when the TP4054 CHRG pin (GPIO6) is LOW, meaning the battery
-     * is being actively charged via USB.  Updated every time _updateBatteryCache()
-     * runs (every 30 s, or on demand via getBatteryLevel/getBatteryVoltage).
-     * Note: the battery-level percentage is unreliable while charging because the
-     * charger holds the voltage above the battery's resting level.
+     * Return true when the TP4054 charger is believed to be active.
+     *
+     * Detection uses two methods OR'd together (matching Meshtastic's
+     * fallback chain for this board):
+     *   1. USB Serial/JTAG VBUS sense — works if the ESP32-S3 native USB PHY
+     *      (GPIO19/20) is wired to the USB-C port.  On Heltec Wireless Tracker
+     *      1.1 the USB-C port goes through the CP2102N bridge, so this always
+     *      returns false on that hardware.
+     *   2. Battery voltage > 4.15 V — the TP4054 holds VBAT at 4.20 V during
+     *      CC/CV charging, measurably above the resting full voltage of
+     *      ~4.10–4.15 V (same threshold Meshtastic uses as its isVbusIn()
+     *      fallback for boards without EXT_CHRG_DETECT).
+     *
+     * Updated every time _updateBatteryCache() runs (every 30 s).
      */
     bool isCharging() const { return mIsCharging; }
 

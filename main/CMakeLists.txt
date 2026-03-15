@@ -12,7 +12,9 @@ set(SOURCE_FILES
     lora.cxx
     main.cxx
     meshnode.cxx
+    meshtastic_proto.cxx
     notificationservice.cxx
+    sx1262.cxx
     task.cxx
     tft.cxx
 )

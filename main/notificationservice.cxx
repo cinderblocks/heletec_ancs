@@ -32,8 +32,8 @@ static const char* TAG = "notify";
 // Ensures the mutex is always released even on early return or exception.
 // ---------------------------------------------------------------------------
 struct ScopedLock {
-    explicit ScopedLock(SemaphoreHandle_t m) : _m(m) { xSemaphoreTake(_m, portMAX_DELAY); }
-    ~ScopedLock() { xSemaphoreGive(_m); }
+    explicit ScopedLock(SemaphoreHandle_t m) : _m(m) { if (_m) xSemaphoreTake(_m, portMAX_DELAY); }
+    ~ScopedLock() { if (_m) xSemaphoreGive(_m); }
     ScopedLock(const ScopedLock&) = delete;
     ScopedLock& operator=(const ScopedLock&) = delete;
 private:

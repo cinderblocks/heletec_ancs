@@ -114,6 +114,7 @@ class BleService
         };
 
         ClientParameter *_currentClientParam = nullptr;
+        ServerCallback  *_serverCbPtr        = nullptr;
 
         std::atomic<bool> _isConnected{false};
         std::atomic<int>  _authFailStreak{0};

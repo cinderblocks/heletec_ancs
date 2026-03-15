@@ -76,6 +76,12 @@ BleService::~BleService()
         delete _hidDevice;
         _hidDevice = nullptr;
     }
+    // ServerCallback was heap-allocated in startServer(); delete it here so
+    // the object is not leaked for the lifetime of the BleService instance.
+    if (_serverCbPtr != nullptr) {
+        delete _serverCbPtr;
+        _serverCbPtr = nullptr;
+    }
 }
 
 void BleService::startServer(const char* appName)
@@ -111,7 +117,8 @@ void BleService::startServer(const char* appName)
     ESP_LOGI(TAG, "Stored bonds: %d", NimBLEDevice::getNumBonds());
 
     NimBLEServer *pServer = NimBLEDevice::createServer();
-    pServer->setCallbacks(new ServerCallback(this));
+    _serverCbPtr = new ServerCallback(this);
+    pServer->setCallbacks(_serverCbPtr);
     // Advertising restart is driven by the client task after full cleanup.
     pServer->advertiseOnDisconnect(false);
 

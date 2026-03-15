@@ -37,7 +37,13 @@ Hardware::Hardware()
 }
 
 /* virtual */
-Hardware::~Hardware() = default;
+Hardware::~Hardware()
+{
+    if (mAdcHandle != nullptr) {
+        adc_oneshot_del_unit(mAdcHandle);
+        mAdcHandle = nullptr;
+    }
+}
 
 void Hardware::begin()
 {

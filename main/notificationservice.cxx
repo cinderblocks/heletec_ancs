@@ -366,7 +366,9 @@ bool NotificationService::removeNotification(uint32_t uuid)
         notificationList[index].reset();
         notificationList[index].key = 0;
         notificationList[index].type = APP_UNKNOWN;
-        notificationCount--;
+        // Guard against underflow: notificationCount is size_t (unsigned).
+        // A duplicate remove (e.g. BLE disconnect race) must not wrap it to SIZE_MAX.
+        if (notificationCount > 0) { notificationCount--; }
     }
     return index != -1;
 }

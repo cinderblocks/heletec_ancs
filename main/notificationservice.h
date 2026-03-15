@@ -96,9 +96,7 @@ public:
     bool exists(uint32_t uuid) const;
     [[nodiscard]] bool isCallingNotification() const;
     bool takeCallingNotification(notification_def& out);
-    notification_def* getNotification(uint32_t uuid);
     size_t getNotificationCount() const;
-    notification_def* getNotificationByIndex(size_t index);
     bool takeNotificationByIndex(size_t index, notification_def& out);
 
     /**
@@ -134,6 +132,13 @@ private:
     int  findNotificationIndex(uint32_t uuid) const;
     void handleDataSourceEvent(const uint8_t* data, uint8_t length);
     void handleNotificationSourceEvent(const uint8_t* data, uint8_t length);
+
+    // ── Unsafe raw-pointer accessors (internal use only) ─────────────────
+    // These return a pointer into the notification list WITHOUT holding mMutex.
+    // Callers MUST hold mMutex for the entire lifetime of the returned pointer.
+    // Prefer the safe copy-out APIs (takeAllPendingNotifications, takeCallingNotification).
+    notification_def* getNotification(uint32_t uuid);
+    notification_def* getNotificationByIndex(size_t index);
 };
 
 class NotificationDescription final : public Task

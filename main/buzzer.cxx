@@ -33,6 +33,15 @@ static const char* TAG = "buzzer";
 constexpr Buzzer::Note Buzzer::NOTIF_MELODY[];
 constexpr Buzzer::Note Buzzer::RING_MELODY[];
 
+// ── _taskHandle thread-safety note ───────────────────────────────────────
+// _taskHandle is accessed from three places:
+//   play()     — called from the draw task (pinned to core 0)
+//   stop()     — called from the draw task (pinned to core 0)
+//   _playTask  — xTaskCreatePinnedToCore(core 0) in play()
+// All three execute on the same core, so they are strictly sequential and
+// `volatile` is sufficient to prevent compiler optimisation across the
+// task boundaries.  If any caller is ever moved off core 0, a proper
+// atomic (std::atomic<TaskHandle_t>) or critical-section guard is required.
 volatile TaskHandle_t Buzzer::_taskHandle = nullptr;
 
 // ── _silence ──────────────────────────────────────────────────────────────

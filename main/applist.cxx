@@ -23,6 +23,19 @@
 
 static const char* TAG = "applist";
 
+// ---------------------------------------------------------------------------
+// Scoped mutex guard — matches the pattern in notificationservice.cxx.
+// Null-safe: no-ops when the handle is nullptr (OOM at construction time).
+// ---------------------------------------------------------------------------
+struct ScopedLock {
+    explicit ScopedLock(SemaphoreHandle_t m) : _m(m) { if (_m) xSemaphoreTake(_m, portMAX_DELAY); }
+    ~ScopedLock() { if (_m) xSemaphoreGive(_m); }
+    ScopedLock(const ScopedLock&) = delete;
+    ScopedLock& operator=(const ScopedLock&) = delete;
+private:
+    SemaphoreHandle_t _m;
+};
+
 // NVS namespace and key names.
 static constexpr char NVS_NAMESPACE[] = "applist";
 static constexpr char NVS_KEY_COUNT[] = "cnt";
@@ -131,13 +144,12 @@ bool ApplicationList::isAllowedApplication(const char* bundleId) const
             return true;
     }
     // Custom entries
-    xSemaphoreTake(_mutex, portMAX_DELAY);
-    bool found = false;
-    for (size_t i = 0; i < _customCount && !found; i++) {
-        found = (strcmp(bundleId, _custom[i].bundleId) == 0);
+    ScopedLock lock(_mutex);
+    for (size_t i = 0; i < _customCount; i++) {
+        if (strcmp(bundleId, _custom[i].bundleId) == 0)
+            return true;
     }
-    xSemaphoreGive(_mutex);
-    return found;
+    return false;
 }
 
 application_def ApplicationList::getApplicationId(const char* bundleId) const
@@ -162,17 +174,15 @@ const char* ApplicationList::getDisplayName(application_def appId) const
 const char* ApplicationList::getDisplayName(const char* bundleId) const
 {
     // 1. Check custom entries first so the user can override a built-in name.
-    xSemaphoreTake(_mutex, portMAX_DELAY);
-    for (size_t i = 0; i < _customCount; i++) {
-        if (strcmp(bundleId, _custom[i].bundleId) == 0) {
-            // Return pointer into the fixed array — valid for the lifetime of
-            // AppList.  Caller should not hold this pointer across an add/remove.
-            const char* name = _custom[i].displayName;
-            xSemaphoreGive(_mutex);
-            return name;
+    // Copy the display name under the lock to avoid holding it across the
+    // built-in and return paths below.
+    {
+        ScopedLock lock(_mutex);
+        for (size_t i = 0; i < _customCount; i++) {
+            if (strcmp(bundleId, _custom[i].bundleId) == 0)
+                return _custom[i].displayName;
         }
-    }
-    xSemaphoreGive(_mutex);
+    } // lock released here
 
     // 2. Built-in lookup via enum.
     for (size_t i = 0; i < _builtinCount; i++) {
@@ -205,19 +215,17 @@ bool ApplicationList::addEntry(const char* bundleId, const char* displayName)
         return false;
     }
 
-    xSemaphoreTake(_mutex, portMAX_DELAY);
+    ScopedLock lock(_mutex);
 
     // Reject duplicates.
     for (size_t i = 0; i < _customCount; i++) {
         if (strcmp(bundleId, _custom[i].bundleId) == 0) {
-            xSemaphoreGive(_mutex);
             ESP_LOGW(TAG, "addEntry: '%s' already exists", bundleId);
             return false;
         }
     }
 
     if (_customCount >= MAX_CUSTOM_ENTRIES) {
-        xSemaphoreGive(_mutex);
         ESP_LOGW(TAG, "addEntry: custom list full (%zu entries)", MAX_CUSTOM_ENTRIES);
         return false;
     }
@@ -227,7 +235,6 @@ bool ApplicationList::addEntry(const char* bundleId, const char* displayName)
     strncpy(e.displayName, displayName, DISPLAY_NAME_MAX - 1); e.displayName[DISPLAY_NAME_MAX - 1] = '\0';
 
     _saveToNvs();
-    xSemaphoreGive(_mutex);
 
     ESP_LOGI(TAG, "Added '%s' (\"%s\")  total custom: %zu", bundleId, displayName, _customCount);
     return true;
@@ -240,7 +247,7 @@ bool ApplicationList::removeEntry(const char* bundleId)
         return false;
     }
 
-    xSemaphoreTake(_mutex, portMAX_DELAY);
+    ScopedLock lock(_mutex);
 
     bool found = false;
     for (size_t i = 0; i < _customCount; i++) {
@@ -261,13 +268,12 @@ bool ApplicationList::removeEntry(const char* bundleId)
         ESP_LOGW(TAG, "removeEntry: '%s' not found", bundleId);
     }
 
-    xSemaphoreGive(_mutex);
     return found;
 }
 
 void ApplicationList::resetToDefaults()
 {
-    xSemaphoreTake(_mutex, portMAX_DELAY);
+    ScopedLock lock(_mutex);
     _customCount = 0;
 
     // Erase all keys from the NVS namespace.
@@ -278,25 +284,21 @@ void ApplicationList::resetToDefaults()
         nvs_close(handle);
     }
 
-    xSemaphoreGive(_mutex);
     ESP_LOGI(TAG, "Custom list cleared — reverted to built-in defaults");
 }
 
 // ── Iteration ─────────────────────────────────────────────────────────────
 size_t ApplicationList::getCustomCount() const
 {
-    xSemaphoreTake(_mutex, portMAX_DELAY);
-    size_t n = _customCount;
-    xSemaphoreGive(_mutex);
-    return n;
+    ScopedLock lock(_mutex);
+    return _customCount;
 }
 
 bool ApplicationList::getCustomEntry(size_t idx, CustomEntry& out) const
 {
-    xSemaphoreTake(_mutex, portMAX_DELAY);
+    ScopedLock lock(_mutex);
     bool ok = (idx < _customCount);
     if (ok) out = _custom[idx];
-    xSemaphoreGive(_mutex);
     return ok;
 }
 

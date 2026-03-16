@@ -18,6 +18,7 @@
 #ifndef LORA_H_
 #define LORA_H_
 
+#include "mesh_codec.h"
 #include "task.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/portmacro.h>
@@ -25,49 +26,6 @@
 #include <driver/gpio.h>
 #include <cstdint>
 #include <cstring>
-
-/**
- * A received Meshtastic text message — plain-old-data, safe to copy across tasks.
- */
-struct MeshMessage {
-    uint32_t fromNode = 0;   ///< sender node ID (hex, e.g. 0xdeadbeef)
-    char     text[65] = {};  ///< UTF-8 text, null-terminated, max 64 chars
-    int16_t  rssi     = 0;   ///< signal strength in dBm
-    float    snr      = 0.f; ///< signal-to-noise ratio in dB
-    bool     valid    = false;
-};
-
-/**
- * A received Meshtastic position fix — plain-old-data, safe to copy across tasks.
- */
-struct MeshPosition {
-    uint32_t  fromNode  = 0;
-    int32_t   lat_i     = 0;   ///< latitude  × 1e7 (degrees)
-    int32_t   lon_i     = 0;   ///< longitude × 1e7 (degrees)
-    int32_t   alt_m     = 0;   ///< altitude metres above MSL
-    uint32_t  sats      = 0;
-    int16_t   rssi      = 0;
-    float     snr       = 0.f;
-    uint32_t  unixTime  = 0;   ///< timestamp from Position proto (0 if absent)
-    TickType_t lastSeen = 0;   ///< xTaskGetTickCount() when last updated
-    bool      valid     = false;
-};
-
-/**
- * A received Meshtastic node identity — plain-old-data, safe to copy across tasks.
- */
-struct MeshUser {
-    uint32_t fromNode    = 0;
-    char     id[12]      = {}; ///< "!xxxxxxxx\0"
-    char     longName[33]= {};
-    char     shortName[5]= {};
-    uint32_t hwModel     = 0;
-    uint8_t  publicKey[32]= {}; ///< X25519 public key (field 8), needed for PKC decryption
-    bool     hasPublicKey = false;
-    int16_t  rssi        = 0;
-    float    snr         = 0.f;
-    bool     valid       = false;
-};
 
 /**
  * Counters and signal info accumulated by the LoRa receive loop.

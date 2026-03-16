@@ -11,6 +11,7 @@ set(SOURCE_FILES
     hardware.cxx
     lora.cxx
     main.cxx
+    mesh_codec.cxx
     meshnode.cxx
     meshtastic_proto.cxx
     notificationservice.cxx

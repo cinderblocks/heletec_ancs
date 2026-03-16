@@ -35,6 +35,7 @@
 
 #include "lora.h"
 #include "lora_internal.h"
+#include "mesh_codec.h"
 #include "gps.h"
 #include "hardware.h"
 #include "meshnode.h"
@@ -342,200 +343,25 @@ void LoRa::_retryPkcBuffer(uint32_t fromNode)
 }
 
 // ── _parseData ────────────────────────────────────────────────────────────
-// Minimal protobuf decoder for the Meshtastic Data message.
-//   Field 1 (portnum):       wire type 0 (varint)
-//   Field 2 (payload):       wire type 2 (length-delimited)
-//   Field 3 (want_response): wire type 0 (varint bool)
-// Returns true when portnum was found; payload/payloadLen may be nullptr/0
-// if field 2 was absent.
 bool LoRa::_parseData(const uint8_t* data, size_t len,
                       uint32_t& portnum,
                       const uint8_t*& payload, size_t& payloadLen,
                       bool& wantResponse)
 {
-    portnum      = 0;
-    payload      = nullptr;
-    payloadLen   = 0;
-    wantResponse = false;
-
-    size_t pos = 0;
-    while (pos < len)
-    {
-        // Read varint tag
-        uint32_t tag   = 0;
-        int      shift = 0;
-        while (pos < len)
-        {
-            uint8_t b = data[pos++];
-            tag |= static_cast<uint32_t>(b & 0x7F) << shift;
-            if (!(b & 0x80)) break;
-            shift += 7;
-            if (shift > 28) return false; // malformed
-        }
-
-        const uint32_t fieldNum  = tag >> 3;
-        const uint8_t  wireType  = tag & 0x07;
-
-        if (wireType == 0) // varint
-        {
-            uint64_t val   = 0;
-            int      vshift = 0;
-            while (pos < len)
-            {
-                uint8_t b = data[pos++];
-                val |= static_cast<uint64_t>(b & 0x7F) << vshift;
-                if (!(b & 0x80)) break;
-                vshift += 7;
-                if (vshift > 63) return false;
-            }
-            if (fieldNum == 1) portnum      = static_cast<uint32_t>(val);
-            if (fieldNum == 3) wantResponse = (val != 0);
-        }
-        else if (wireType == 2) // length-delimited
-        {
-            uint32_t msgLen = 0;
-            int      lshift = 0;
-            while (pos < len)
-            {
-                uint8_t b = data[pos++];
-                msgLen |= static_cast<uint32_t>(b & 0x7F) << lshift;
-                if (!(b & 0x80)) break;
-                lshift += 7;
-                if (lshift > 28) return false;
-            }
-            if (pos + msgLen > len) return false; // truncated
-            if (fieldNum == 2)
-            {
-                payload    = data + pos;
-                payloadLen = msgLen;
-            }
-            pos += msgLen;
-        }
-        else if (wireType == 5) pos += 4; // fixed32
-        else if (wireType == 1) pos += 8; // fixed64
-        else return false; // unknown wire type
-    }
-
-    return portnum != 0;
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// Protobuf encoder helpers
-// All functions write directly into caller-supplied buffers.
-// ─────────────────────────────────────────────────────────────────────────
-
-// ── _pbVarint ─────────────────────────────────────────────────────────────
-// Encode a 64-bit unsigned value as a protobuf base-128 varint.
-// Returns the number of bytes written (1–10).
-/* static */ size_t LoRa::_pbVarint(uint8_t* buf, uint64_t val)
-{
-    size_t n = 0;
-    while (val > 0x7F)
-    {
-        buf[n++] = static_cast<uint8_t>((val & 0x7F) | 0x80);
-        val >>= 7;
-    }
-    buf[n++] = static_cast<uint8_t>(val & 0x7F);
-    return n;
-}
-
-// ── _pbZigzag ─────────────────────────────────────────────────────────────
-// Zigzag-encode a signed 32-bit integer for protobuf sint32 wire format.
-// Maps: 0→0, -1→1, 1→2, -2→3, 2→4 …  Formula: (n<<1) ^ (n>>31).
-/* static */ uint32_t LoRa::_pbZigzag(int32_t val)
-{
-    return (static_cast<uint32_t>(val) << 1) ^ static_cast<uint32_t>(val >> 31);
-}
-
-// ── _pbLenField ───────────────────────────────────────────────────────────
-// Write a length-delimited protobuf field: tag byte, length varint, raw data.
-// tag must be pre-computed as (fieldNum << 3) | 2.
-/* static */ size_t LoRa::_pbLenField(uint8_t* buf, uint8_t tag,
-                                       const uint8_t* data, size_t dataLen)
-{
-    size_t n = 0;
-    buf[n++] = tag;
-    n += _pbVarint(buf + n, dataLen);
-    memcpy(buf + n, data, dataLen);
-    n += dataLen;
-    return n;
-}
-
-// ── _pbString ─────────────────────────────────────────────────────────────
-// Write a protobuf string field (length-delimited, from a null-terminated src).
-/* static */ size_t LoRa::_pbString(uint8_t* buf, uint8_t tag, const char* s)
-{
-    const size_t sLen = (s != nullptr) ? strlen(s) : 0;
-    return _pbLenField(buf, tag,
-                       reinterpret_cast<const uint8_t*>(s ? s : ""), sLen);
+    return mc_parseData(data, len, portnum, payload, payloadLen, wantResponse);
 }
 
 // ── _encodePosition ───────────────────────────────────────────────────────
-// Encode a Meshtastic Position proto (meshtastic/mesh.proto).
-//
-// Field assignments verified against live OTA hex dumps:
-//   Field  1 (latitude_i,    sfixed32): tag 0x0D — degrees × 1e7
-//   Field  2 (longitude_i,   sfixed32): tag 0x15 — degrees × 1e7
-//   Field  3 (altitude,      int32):    tag 0x18 — metres above MSL (varint)
-//   Field  4 (time,          sfixed32): tag 0x25 — UTC Unix seconds
-//            *** Previously WRONG at field 9 (tag 0x4D). Field 9 is pos_flags.
-//            Meshtastic discards positions without a valid timestamp. ***
-//   Field  5 (location_source,varint):  tag 0x28 — PositionSource::GPS = 2
-//   Field 10 (ground_speed,   varint):  tag 0x50 — cm/s
-//   Field 11 (ground_track,   varint):  tag 0x58 — heading × 100
-//   Field 14 (sats_in_view,   varint):  tag 0x70 — satellite count
-//            *** Previously WRONG at field 7 (google_plus_code, wire type 2). ***
-//   Field 18 (precision_bits, varint):  tag 0x90 0x01 — 32 = full precision.
-//            Without this the app applies maximum privacy blur.
-//
-// buf must be at least 80 bytes.  Returns bytes written.
-/* static */ size_t LoRa::_encodePosition(uint8_t* buf, size_t /*cap*/,
+/* static */ size_t LoRa::_encodePosition(uint8_t* buf, size_t cap,
                                            int32_t lat_i, int32_t lon_i,
                                            int32_t alt_m,
-                                           uint32_t pdop_x100, uint32_t sats,
+                                           uint32_t /*pdop_x100*/, uint32_t sats,
                                            uint32_t unixTime,
                                            uint32_t speed_cm_s,
                                            uint32_t track_x100)
 {
-    size_t n = 0;
-
-    auto writeFixed32 = [&](uint8_t tag, uint32_t val) {
-        buf[n++] = tag;
-        buf[n++] = static_cast<uint8_t>(val);
-        buf[n++] = static_cast<uint8_t>(val >>  8);
-        buf[n++] = static_cast<uint8_t>(val >> 16);
-        buf[n++] = static_cast<uint8_t>(val >> 24);
-    };
-
-    auto writeVarint = [&](uint8_t tag, uint64_t val) {
-        buf[n++] = tag;
-        n += _pbVarint(buf + n, val);
-    };
-
-    writeFixed32(0x0D, static_cast<uint32_t>(lat_i));   // Field 1: latitude_i
-    writeFixed32(0x15, static_cast<uint32_t>(lon_i));   // Field 2: longitude_i
-
-    if (alt_m != 0)
-        writeVarint(0x18, static_cast<uint64_t>(static_cast<int64_t>(alt_m))); // Field 3: altitude
-
-    if (unixTime != 0)
-        writeFixed32(0x25, unixTime);                   // Field 4: time (sfixed32)
-
-    writeVarint(0x28, 2);                               // Field 5: location_source = GPS
-
-    if (speed_cm_s != 0)
-        writeVarint(0x50, speed_cm_s);                  // Field 10: ground_speed
-    if (track_x100 != 0)
-        writeVarint(0x58, track_x100);                  // Field 11: ground_track
-    if (sats != 0)
-        writeVarint(0x70, sats);                        // Field 14: sats_in_view
-
-    // Field 18: precision_bits — 2-byte tag because field > 15
-    buf[n++] = 0x90; buf[n++] = 0x01;
-    n += _pbVarint(buf + n, 32);
-
-    (void)pdop_x100;  // field 6 is altitude_source enum in current proto, not PDOP
-    return n;
+    return mc_encodePosition(buf, cap, lat_i, lon_i, alt_m, sats, unixTime,
+                              speed_cm_s, track_x100);
 }
 
 // ── _encodeUser ───────────────────────────────────────────────────────────
@@ -552,58 +378,20 @@ bool LoRa::_parseData(const uint8_t* data, size_t len,
 //   Field 9 (is_unmessageable, bool):false (tag 0x48), required by Meshtastic 2.5+
 //
 // buf must be at least 120 bytes.  Returns bytes written.
-/* static */ size_t LoRa::_encodeUser(uint8_t* buf, size_t /*cap*/,
+/* static */ size_t LoRa::_encodeUser(uint8_t* buf, size_t cap,
                                        uint32_t nodeId,
                                        const char* longName,
                                        const char* shortName)
 {
-    size_t n = 0;
-
-    // Field 1: id — "!xxxxxxxx"
-    char idStr[12] = {};
-    snprintf(idStr, sizeof(idStr), "!%08" PRIx32, nodeId);
-    n += _pbString(buf + n, 0x0A, idStr);
-
-    // Field 2: long_name
-    n += _pbString(buf + n, 0x12, longName);
-
-    // Field 3: short_name
-    n += _pbString(buf + n, 0x1A, shortName);
-
-    // Field 4: macaddr (bytes, 6 bytes) — tag = (4<<3)|2 = 0x22
-    n += _pbLenField(buf + n, 0x22, Node.macaddr(), 6);
-
-    // Field 5: hw_model (HardwareModel enum, varint) — tag = (5<<3)|0 = 0x28
-    buf[n++] = 0x28;
-    n += _pbVarint(buf + n, HW_MODEL);
-
-    // Field 7: role (DeviceRole enum, varint) — tag = (7<<3)|0 = 0x38
-    // Only encoded when non-zero; proto3 default (0 = CLIENT) needs no wire bytes.
-    // TRACKER = 5 shows the GPS tracker icon and enables Smart Position.
-#if CONFIG_MESH_NODE_ROLE != 0
-    buf[n++] = 0x38;
-    n += _pbVarint(buf + n, CONFIG_MESH_NODE_ROLE);
+    const uint8_t* pubKey = nullptr;
+#if !CONFIG_LORA_IS_LICENSED
+    if (Node.hasPkcKeys()) pubKey = Node.publicKey();
 #endif
-
-    // Field 8: public_key — omitted in IsLicensed (unencrypted) mode.
-#if CONFIG_LORA_IS_LICENSED
-    // Field 6: is_licensed (bool) — tag = (6<<3)|0 = 0x30
-    buf[n++] = 0x30;
-    buf[n++] = 0x01;
-    // No public key — PKC is disabled.
-#else
-    if (Node.hasPkcKeys())
-    {
-        // Field 8: public_key (bytes, 32 bytes) — tag = (8<<3)|2 = 0x42
-        n += _pbLenField(buf + n, 0x42, Node.publicKey(), 32);
-    }
-#endif
-
-    // Field 9: is_unmessageable (bool, varint) — tag = (9<<3)|0 = 0x48
-    buf[n++] = 0x48;
-    buf[n++] = 0x00;
-
-    return n;
+    return mc_encodeUser(buf, cap, nodeId, longName, shortName,
+                         Node.macaddr(), HW_MODEL,
+                         static_cast<uint8_t>(CONFIG_MESH_NODE_ROLE),
+                         pubKey,
+                         static_cast<bool>(CONFIG_LORA_IS_LICENSED));
 }
 
 // ── _encodeData ───────────────────────────────────────────────────────────
@@ -622,56 +410,16 @@ bool LoRa::_parseData(const uint8_t* data, size_t len,
 // Confirmed via live hex dump: "35 70 bc 3d 7d" = tag 0x35, field 6 request_id. ***
 //
 // buf must be at least payloadLen + 32 bytes.  Returns bytes written.
-/* static */ size_t LoRa::_encodeData(uint8_t* buf, size_t /*cap*/,
+/* static */ size_t LoRa::_encodeData(uint8_t* buf, size_t cap,
                                        uint32_t portnum,
                                        const uint8_t* payload, size_t payloadLen,
                                        bool want_response,
                                        uint32_t dest,
-                                       uint32_t source,
+                                       uint32_t /*source*/,
                                        uint32_t requestId)
 {
-    size_t n = 0;
-
-    auto writeFixed32 = [&](uint8_t tag, uint32_t val) {
-        buf[n++] = tag;
-        buf[n++] = static_cast<uint8_t>(val);
-        buf[n++] = static_cast<uint8_t>(val >>  8);
-        buf[n++] = static_cast<uint8_t>(val >> 16);
-        buf[n++] = static_cast<uint8_t>(val >> 24);
-    };
-
-    // Field 1: portnum (varint)
-    buf[n++] = 0x08;
-    n += _pbVarint(buf + n, portnum);
-
-    // Field 2: payload (length-delimited bytes)
-    n += _pbLenField(buf + n, 0x12, payload, payloadLen);
-
-    // Field 3: want_response — only set for broadcast requests
-    if (want_response)
-    {
-        buf[n++] = 0x18;
-        buf[n++] = 0x01;
-    }
-
-    // Field 4: dest (fixed32) — unicast destination node ID
-    if (dest != 0)
-        writeFixed32(0x25, dest);
-
-    // source (field 5) intentionally omitted — only set by relay nodes
-
-    // Field 6: request_id (fixed32) — tag = (6<<3)|5 = 0x35
-    if (requestId != 0)
-    {
-        writeFixed32(0x35, requestId);
-        // Field 9: ok_to_mqtt=false — included alongside request_id in unicast
-        // responses to indicate the packet should not be forwarded to MQTT.
-        buf[n++] = 0x48; // tag (9<<3)|0
-        buf[n++] = 0x00; // false
-    }
-
-    (void)source;
-    return n;
+    return mc_encodeData(buf, cap, portnum, payload, payloadLen,
+                         want_response, dest, requestId);
 }
 
 // ── _buildTxPacket ────────────────────────────────────────────────────────
@@ -837,41 +585,11 @@ bool LoRa::sendNodeInfo(uint32_t to, bool wantResponse, uint32_t requestId)
 //       Field 5 (uptime_seconds,uint32): varint    — tag = 0x28
 //
 // buf must be at least 32 bytes.  Returns bytes written.
-/* static */ size_t LoRa::_encodeTelemetry(uint8_t* buf, size_t /*cap*/,
+/* static */ size_t LoRa::_encodeTelemetry(uint8_t* buf, size_t cap,
                                             uint32_t unixTime, uint32_t uptimeSec,
                                             uint8_t batteryLevel, float batteryVoltage)
 {
-    auto writeFixed32 = [](uint8_t* dst, uint8_t tag, uint32_t val) -> size_t {
-        dst[0] = tag;
-        dst[1] = static_cast<uint8_t>(val);
-        dst[2] = static_cast<uint8_t>(val >> 8);
-        dst[3] = static_cast<uint8_t>(val >> 16);
-        dst[4] = static_cast<uint8_t>(val >> 24);
-        return 5;
-    };
-
-    // Inner DeviceMetrics message
-    uint8_t dm[20] = {};
-    size_t  dmn    = 0;
-
-    dm[dmn++] = 0x08; // Field 1: battery_level (uint32, varint)
-    dmn += _pbVarint(dm + dmn, batteryLevel);
-
-    { // Field 2: voltage (float, fixed32) — tag = 0x15
-        uint32_t vbits;
-        memcpy(&vbits, &batteryVoltage, sizeof(vbits));
-        dmn += writeFixed32(dm + dmn, 0x15, vbits);
-    }
-
-    dm[dmn++] = 0x28; // Field 5: uptime_seconds (varint)
-    dmn += _pbVarint(dm + dmn, uptimeSec);
-
-    size_t n = 0;
-
-    n += writeFixed32(buf + n, 0x0D, unixTime);          // Telemetry field 1: time
-    n += _pbLenField(buf + n, 0x12, dm, dmn);            // Telemetry field 2: device_metrics
-
-    return n;
+    return mc_encodeTelemetry(buf, cap, unixTime, uptimeSec, batteryLevel, batteryVoltage);
 }
 
 // ── sendTelemetry ─────────────────────────────────────────────────────────
@@ -922,69 +640,27 @@ bool LoRa::sendTelemetry()
 //   Field 12 (num_online_local_nodes,varint):tag 0x60 neighbour count
 //
 // buf must be at least 120 bytes.  Returns bytes written.
-/* static */ size_t LoRa::_encodeMapReport(uint8_t* buf, size_t /*cap*/,
+/* static */ size_t LoRa::_encodeMapReport(uint8_t* buf, size_t cap,
                                             const char* longName,
                                             const char* shortName,
                                             int32_t lat_i, int32_t lon_i,
                                             int32_t alt_m,
                                             uint32_t numNeighbors)
 {
-    size_t n = 0;
-
-    auto writeFixed32 = [&](uint8_t tag, uint32_t val) {
-        buf[n++] = tag;
-        buf[n++] = static_cast<uint8_t>(val);
-        buf[n++] = static_cast<uint8_t>(val >>  8);
-        buf[n++] = static_cast<uint8_t>(val >> 16);
-        buf[n++] = static_cast<uint8_t>(val >> 24);
-    };
-
-    n += _pbString(buf + n, 0x0A, longName);   // Field 1: long_name
-    n += _pbString(buf + n, 0x12, shortName);  // Field 2: short_name
-
-    buf[n++] = 0x18;                            // Field 3: hw_model
-    n += _pbVarint(buf + n, HW_MODEL);
-
-    buf[n++] = 0x28;                            // Field 5: region
-    n += _pbVarint(buf + n, static_cast<uint64_t>(CONFIG_LORA_REGION_CODE));
-
-    // Field 6: modem_preset — ModemPreset enum
-    // LONG_FAST=0, LONG_SLOW=1, MEDIUM_SLOW=3, SHORT_FAST=6
-#if   defined(CONFIG_LORA_PRESET_LONG_FAST)
-    static constexpr uint32_t MODEM_PRESET = 0;
-#elif defined(CONFIG_LORA_PRESET_LONG_SLOW)
-    static constexpr uint32_t MODEM_PRESET = 1;
+#if   defined(CONFIG_LORA_PRESET_LONG_SLOW)
+    static constexpr uint8_t MODEM_PRESET = 1;
 #elif defined(CONFIG_LORA_PRESET_MEDIUM_SLOW)
-    static constexpr uint32_t MODEM_PRESET = 3;
+    static constexpr uint8_t MODEM_PRESET = 3;
 #elif defined(CONFIG_LORA_PRESET_SHORT_FAST)
-    static constexpr uint32_t MODEM_PRESET = 6;
+    static constexpr uint8_t MODEM_PRESET = 6;
 #else
-    static constexpr uint32_t MODEM_PRESET = 0; // default LongFast
+    static constexpr uint8_t MODEM_PRESET = 0; // default LongFast
 #endif
-    buf[n++] = 0x30;
-    n += _pbVarint(buf + n, MODEM_PRESET);
-
-    buf[n++] = 0x38; buf[n++] = 0x01;          // Field 7: has_default_channel = true
-
-    writeFixed32(0x45, static_cast<uint32_t>(lat_i));  // Field 8: latitude_i
-    writeFixed32(0x4D, static_cast<uint32_t>(lon_i));  // Field 9: longitude_i
-
-    if (alt_m != 0)
-    {
-        buf[n++] = 0x50;                        // Field 10: altitude
-        n += _pbVarint(buf + n, static_cast<uint64_t>(static_cast<int64_t>(alt_m)));
-    }
-
-    buf[n++] = 0x58;                            // Field 11: position_precision = 32
-    n += _pbVarint(buf + n, 32);
-
-    if (numNeighbors > 0)
-    {
-        buf[n++] = 0x60;                        // Field 12: num_online_local_nodes
-        n += _pbVarint(buf + n, numNeighbors);
-    }
-
-    return n;
+    return mc_encodeMapReport(buf, cap, longName, shortName,
+                               lat_i, lon_i, alt_m, numNeighbors,
+                               HW_MODEL,
+                               static_cast<uint8_t>(CONFIG_LORA_REGION_CODE),
+                               MODEM_PRESET);
 }
 
 // ── sendMapReport ─────────────────────────────────────────────────────────
@@ -1029,160 +705,12 @@ bool LoRa::sendMapReport()
 // Neighbour table & RX decoder helpers
 // ─────────────────────────────────────────────────────────────────────────
 
-// ── _parsePosition ────────────────────────────────────────────────────────
-// Decode a Meshtastic Position proto payload.
-//
-// Verified field assignments (Meshtastic firmware 2.5+):
-//   Field  1 (latitude_i,    sfixed32): tag 0x0D — degrees × 1e7
-//   Field  2 (longitude_i,   sfixed32): tag 0x15 — degrees × 1e7
-//   Field  3 (altitude,      int32):    tag 0x18 — metres (varint)
-//   Field  4 (time,          sfixed32): tag 0x25 — UTC Unix seconds
-//            *** NOT field 9. Field 9 is pos_flags (varint). ***
-//   Field 14 (sats_in_view,  varint):   tag 0x70 — satellite count
-//            *** NOT field 7. Field 7 is google_plus_code (string). ***
-/* static */ bool LoRa::_parsePosition(const uint8_t* data, size_t len,
-                                        MeshPosition& pos)
-{
-    size_t p = 0;
-    bool gotLatLon = false;
+// ── _parsePosition / _parseUser — delegate to platform-free mc_ functions ─
+/* static */ bool LoRa::_parsePosition(const uint8_t* data, size_t len, MeshPosition& pos)
+{ return mc_parsePosition(data, len, pos); }
 
-    auto readFixed32 = [&]() -> uint32_t {
-        uint32_t v = data[p] | (uint32_t)data[p+1]<<8
-                   | (uint32_t)data[p+2]<<16 | (uint32_t)data[p+3]<<24;
-        p += 4;
-        return v;
-    };
-
-    while (p < len)
-    {
-        uint32_t tag = 0; int shift = 0;
-        while (p < len) {
-            uint8_t b = data[p++];
-            tag |= (uint32_t)(b & 0x7F) << shift;
-            if (!(b & 0x80)) break;
-            shift += 7; if (shift > 28) return false;
-        }
-        const uint32_t field    = tag >> 3;
-        const uint8_t  wireType = tag & 0x07;
-
-        if (wireType == 0) // varint
-        {
-            uint64_t val = 0; int vs = 0;
-            while (p < len) {
-                uint8_t b = data[p++];
-                val |= (uint64_t)(b & 0x7F) << vs;
-                if (!(b & 0x80)) break;
-                vs += 7; if (vs > 63) return false;
-            }
-            switch (field) {
-                case 3:  pos.alt_m = (int32_t)(int64_t)val; break;
-                case 14: pos.sats  = (uint32_t)val; break;
-                default: break;
-            }
-        }
-        else if (wireType == 5) // fixed32 / sfixed32
-        {
-            if (p + 4 > len) return false;
-            uint32_t val = readFixed32();
-            switch (field) {
-                case 1: pos.lat_i = static_cast<int32_t>(val); gotLatLon = true; break;
-                case 2: pos.lon_i = static_cast<int32_t>(val); break;
-                case 4: pos.unixTime = val; break;
-                default: break;
-            }
-        }
-        else if (wireType == 2) // length-delimited — skip
-        {
-            uint32_t msgLen = 0; int ls = 0;
-            while (p < len) {
-                uint8_t b = data[p++];
-                msgLen |= (uint32_t)(b & 0x7F) << ls;
-                if (!(b & 0x80)) break;
-                ls += 7; if (ls > 28) return false;
-            }
-            if (p + msgLen > len) return false;
-            p += msgLen;
-        }
-        else if (wireType == 1) { if (p + 8 > len) return false; p += 8; }
-        else return false;
-    }
-    return gotLatLon;
-}
-
-// ── _parseUser ────────────────────────────────────────────────────────────
-// Decode a Meshtastic User proto payload.
-//   Field 1 (id,         string): "!xxxxxxxx"
-//   Field 2 (long_name,  string): up to 32 chars
-//   Field 3 (short_name, string): up to 4 chars
-//   Field 5 (hw_model,   uint32): HardwareModel enum
-//   Field 8 (public_key, bytes):  32-byte X25519 public key
-/* static */ bool LoRa::_parseUser(const uint8_t* data, size_t len,
-                                    MeshUser& user)
-{
-    size_t p = 0;
-    bool gotId = false;
-
-    auto readVarint = [&](uint64_t& out) -> bool {
-        out = 0; int s = 0;
-        while (p < len) {
-            uint8_t b = data[p++];
-            out |= (uint64_t)(b & 0x7F) << s;
-            if (!(b & 0x80)) return true;
-            s += 7; if (s > 63) return false;
-        }
-        return false;
-    };
-
-    while (p < len)
-    {
-        uint64_t tag64 = 0;
-        if (!readVarint(tag64)) break;
-        const uint32_t field    = (uint32_t)(tag64 >> 3);
-        const uint8_t  wireType = (uint8_t)(tag64 & 0x07);
-
-        if (wireType == 2) // string / bytes
-        {
-            uint64_t slen = 0;
-            if (!readVarint(slen)) return false;
-            if (p + slen > len) return false;
-            const char* src = reinterpret_cast<const char*>(data + p);
-            switch (field) {
-                case 1: // id
-                    snprintf(user.id, sizeof(user.id), "%.*s",
-                             (int)std::min(slen, (uint64_t)(sizeof(user.id) - 1)), src);
-                    gotId = true;
-                    break;
-                case 2: // long_name
-                    snprintf(user.longName, sizeof(user.longName), "%.*s",
-                             (int)std::min(slen, (uint64_t)(sizeof(user.longName) - 1)), src);
-                    break;
-                case 3: // short_name
-                    snprintf(user.shortName, sizeof(user.shortName), "%.*s",
-                             (int)std::min(slen, (uint64_t)(sizeof(user.shortName) - 1)), src);
-                    break;
-                case 4: break; // macaddr — skip
-                case 8: // public_key (32 bytes) — needed for PKC decryption
-                    if (slen == 32) {
-                        memcpy(user.publicKey, src, 32);
-                        user.hasPublicKey = true;
-                    }
-                    break;
-                default: break;
-            }
-            p += (size_t)slen;
-        }
-        else if (wireType == 0) // varint
-        {
-            uint64_t val = 0;
-            if (!readVarint(val)) return false;
-            if (field == 5) user.hwModel = (uint32_t)val;
-        }
-        else if (wireType == 5) { p += 4; }
-        else if (wireType == 1) { p += 8; }
-        else return false;
-    }
-    return gotId;
-}
+/* static */ bool LoRa::_parseUser(const uint8_t* data, size_t len, MeshUser& user)
+{ return mc_parseUser(data, len, user); }
 
 // ── _upsertNeighbor ───────────────────────────────────────────────────────
 // Insert or update the neighbour table entry for fromNode.
@@ -1675,7 +1203,7 @@ void LoRa::_processPacket(const uint8_t* buf, uint8_t pktLen,
             route[routeLen++] = Node.nodeId();
 
         const int32_t ourSnrRaw = static_cast<int32_t>(snr * 4.0f);
-        const uint32_t ourSnrZz = _pbZigzag(ourSnrRaw);
+        const uint32_t ourSnrZz = mc_pbZigzag(ourSnrRaw);
         if (snrLen < TRACEROUTE_MAX)
             snrTowards[snrLen++] = static_cast<int32_t>(ourSnrZz);
 
@@ -1704,7 +1232,7 @@ void LoRa::_processPacket(const uint8_t* buf, uint8_t pktLen,
         for (size_t i = 0; i < snrLen; i++)
         {
             rdBuf[rdLen++] = 0x10; // field 2, wire type 0 (varint)
-            rdLen += _pbVarint(rdBuf + rdLen, static_cast<uint32_t>(snrTowards[i]));
+            rdLen += mc_pbVarint(rdBuf + rdLen, static_cast<uint32_t>(snrTowards[i]));
         }
 
 #if CONFIG_LORA_TX_ENABLED

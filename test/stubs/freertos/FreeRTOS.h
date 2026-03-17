@@ -11,7 +11,8 @@ typedef unsigned int UBaseType_t;
 #define pdFALSE ((BaseType_t)0)
 #define pdPASS  pdTRUE
 #define pdFAIL  pdFALSE
-#define portMAX_DELAY   ((TickType_t)0xFFFFFFFFU)
-#define configTICK_RATE_HZ 100
+#define portMAX_DELAY        ((TickType_t)0xFFFFFFFFU)
+#define configTICK_RATE_HZ   100
+#define pdMS_TO_TICKS(ms)    ((TickType_t)((ms) / (1000u / configTICK_RATE_HZ)))
 
 static inline TickType_t xTaskGetTickCount(void) { return 0; }

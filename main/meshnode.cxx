@@ -16,6 +16,7 @@
  */
 
 #include "meshnode.h"
+#include "mesh_crypto.h"
 #include "sdkconfig.h"
 
 #include <esp_mac.h>
@@ -23,11 +24,6 @@
 #include <esp_random.h>
 #include <nvs_flash.h>
 #include <nvs.h>
-#include <mbedtls/ecdh.h>
-#include <mbedtls/ecp.h>
-#include <mbedtls/ctr_drbg.h>
-#include <mbedtls/entropy.h>
-#include <mbedtls/platform_util.h>
 #include <cstdio>
 #include <cstring>
 #include <cinttypes>
@@ -41,25 +37,6 @@ static const char* NVS_KEY_PRIVKEY = "privkey";
 #ifndef CONFIG_LORA_IS_LICENSED
 #  define CONFIG_LORA_IS_LICENSED 0
 #endif
-
-// ── byte-reverse helper for mbedtls ↔ wire format ────────────────────────
-// Meshtastic stores X25519 scalars/points on the wire as little-endian
-// 32-byte strings (RFC 7748).  mbedtls MPI is big-endian, so every key
-// must be byte-reversed on the way in and out of the MPI API.
-static void reverseBytes32(const uint8_t* src, uint8_t* dst)
-{
-    for (int i = 0; i < 32; i++)
-        dst[i] = src[31 - i];
-}
-
-// ── Hardware RNG entropy source for mbedtls ──────────────────────────────
-static int hw_entropy_source(void* /*data*/, unsigned char* output,
-                              size_t len, size_t* olen)
-{
-    esp_fill_random(output, len);
-    *olen = len;
-    return 0;
-}
 
 // ── init ──────────────────────────────────────────────────────────────────
 void MeshNode::init()
@@ -179,89 +156,21 @@ void MeshNode::init()
         }
     }
 
-    // ── Derive public key from private key using mbedtls X25519 ──────────
-    // Meshtastic wire keys are little-endian (RFC 7748).  mbedtls MPI is
-    // big-endian, so we reverse the private key on import and the public key
-    // on export.  Curve25519 clamping is done internally by mbedtls when
-    // using mbedtls_ecp_mul on MBEDTLS_ECP_DP_CURVE25519.
+    // ── Derive public key from private key via platform-free mc_x25519PublicKey ──
+    // Keys are little-endian (RFC 7748 / Meshtastic wire format).
+    // mc_x25519PublicKey handles LE→BE reversal for mbedtls internally.
+    if (mc_x25519PublicKey(_privateKey, _publicKey))
     {
-        mbedtls_ecp_group grp;
-        mbedtls_ecp_point Q;
-        mbedtls_mpi d;
-
-        mbedtls_ecp_group_init(&grp);
-        mbedtls_ecp_point_init(&Q);
-        mbedtls_mpi_init(&d);
-
-        bool ok = false;
-        do {
-            if (mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_CURVE25519) != 0)
-                break;
-
-            // Import private key (LE wire → BE for mbedtls MPI)
-            uint8_t privBE[32];
-            reverseBytes32(_privateKey, privBE);
-            if (mbedtls_mpi_read_binary(&d, privBE, 32) != 0)
-                break;
-
-            // Set up CSPRNG for blinding
-            mbedtls_entropy_context entropy;
-            mbedtls_ctr_drbg_context ctr_drbg;
-            mbedtls_entropy_init(&entropy);
-            mbedtls_ctr_drbg_init(&ctr_drbg);
-            mbedtls_entropy_add_source(&entropy, hw_entropy_source,
-                                       nullptr, 32,
-                                       MBEDTLS_ENTROPY_SOURCE_STRONG);
-            if (mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func,
-                                       &entropy, nullptr, 0) != 0)
-            {
-                mbedtls_ctr_drbg_free(&ctr_drbg);
-                mbedtls_entropy_free(&entropy);
-                break;
-            }
-
-            // Q = d * G (base point multiplication)
-            if (mbedtls_ecp_mul(&grp, &Q, &d, &grp.G,
-                                mbedtls_ctr_drbg_random, &ctr_drbg) != 0)
-            {
-                mbedtls_ctr_drbg_free(&ctr_drbg);
-                mbedtls_entropy_free(&entropy);
-                break;
-            }
-
-            // Export public key (X coordinate only for Curve25519)
-            // mbedtls gives BE; reverse back to LE for wire/storage.
-            uint8_t pubBE[32];
-            if (mbedtls_mpi_write_binary(&Q.MBEDTLS_PRIVATE(X), pubBE, 32) != 0)
-            {
-                mbedtls_ctr_drbg_free(&ctr_drbg);
-                mbedtls_entropy_free(&entropy);
-                break;
-            }
-            reverseBytes32(pubBE, _publicKey);
-            ok = true;
-
-            mbedtls_ctr_drbg_free(&ctr_drbg);
-            mbedtls_entropy_free(&entropy);
-        } while (false);
-
-        mbedtls_mpi_free(&d);
-        mbedtls_ecp_point_free(&Q);
-        mbedtls_ecp_group_free(&grp);
-
-        if (ok)
-        {
-            _hasPkcKeys = true;
-            ESP_LOGI(TAG, "X25519 public key: %02x%02x%02x%02x...%02x%02x%02x%02x",
-                     _publicKey[0], _publicKey[1], _publicKey[2], _publicKey[3],
-                     _publicKey[28], _publicKey[29], _publicKey[30], _publicKey[31]);
-        }
-        else
-        {
-            ESP_LOGE(TAG, "X25519 key derivation failed — PKC disabled");
-            memset(_publicKey, 0, 32);
-            _hasPkcKeys = false;
-        }
+        _hasPkcKeys = true;
+        ESP_LOGI(TAG, "X25519 public key: %02x%02x%02x%02x...%02x%02x%02x%02x",
+                 _publicKey[0], _publicKey[1], _publicKey[2], _publicKey[3],
+                 _publicKey[28], _publicKey[29], _publicKey[30], _publicKey[31]);
+    }
+    else
+    {
+        ESP_LOGE(TAG, "X25519 key derivation failed — PKC disabled");
+        memset(_publicKey, 0, 32);
+        _hasPkcKeys = false;
     }
 
     ESP_LOGI(TAG, "Node ID: %s  short: \"%s\"  long: \"%s\"  (encrypted, PKC %s)",
@@ -319,104 +228,14 @@ uint32_t MeshNode::nextPacketId() const
 }
 
 // ── computeSharedSecret ───────────────────────────────────────────────────
-// X25519 ECDH: shared = ECDH(our_private, remote_public).
-//
-// Input keys are little-endian (Meshtastic/RFC 7748 wire format).  They are
-// reversed to big-endian for the mbedtls MPI API.
-//
-// Output: the 32-byte shared secret is written to sharedOut in LITTLE-ENDIAN
-// order, matching the output of Curve25519::eval() (Arduino Crypto library)
-// that Meshtastic ESP32 firmware uses directly as the AES-256 key.
+// Delegates to platform-free mc_x25519SharedSecret() in mesh_crypto.cxx.
+// See mesh_crypto.h for the full endianness and wire-format documentation.
 bool MeshNode::computeSharedSecret(const uint8_t* remotePubKey,
                                     uint8_t* sharedOut) const
 {
     if (!_hasPkcKeys || remotePubKey == nullptr || sharedOut == nullptr)
         return false;
-
-    mbedtls_ecp_group grp;
-    mbedtls_ecp_point Qr;   // remote public key point
-    mbedtls_mpi d;           // our private key scalar
-    mbedtls_mpi z;           // shared secret (X coordinate)
-
-    mbedtls_ecp_group_init(&grp);
-    mbedtls_ecp_point_init(&Qr);
-    mbedtls_mpi_init(&d);
-    mbedtls_mpi_init(&z);
-
-    bool ok = false;
-    do {
-        if (mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_CURVE25519) != 0)
-            break;
-
-        // Import our private key (LE wire → BE for mbedtls MPI)
-        uint8_t privBE[32];
-        reverseBytes32(_privateKey, privBE);
-        if (mbedtls_mpi_read_binary(&d, privBE, 32) != 0)
-            break;
-
-        // Import remote public key as the X coordinate of the point
-        // (Curve25519 uses X-only representation; LE wire → BE for MPI)
-        uint8_t remoteBE[32];
-        reverseBytes32(remotePubKey, remoteBE);
-        if (mbedtls_mpi_read_binary(&Qr.MBEDTLS_PRIVATE(X), remoteBE, 32) != 0)
-            break;
-        if (mbedtls_mpi_lset(&Qr.MBEDTLS_PRIVATE(Z), 1) != 0)
-            break;
-
-        // Set up CSPRNG for blinding
-        mbedtls_entropy_context entropy;
-        mbedtls_ctr_drbg_context ctr_drbg;
-        mbedtls_entropy_init(&entropy);
-        mbedtls_ctr_drbg_init(&ctr_drbg);
-        mbedtls_entropy_add_source(&entropy, hw_entropy_source,
-                                   nullptr, 32,
-                                   MBEDTLS_ENTROPY_SOURCE_STRONG);
-        if (mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func,
-                                   &entropy, nullptr, 0) != 0)
-        {
-            mbedtls_ctr_drbg_free(&ctr_drbg);
-            mbedtls_entropy_free(&entropy);
-            break;
-        }
-
-        // ECDH: z = d * Qr (scalar multiplication of remote point by our scalar)
-        if (mbedtls_ecdh_compute_shared(&grp, &z, &Qr, &d,
-                                         mbedtls_ctr_drbg_random,
-                                         &ctr_drbg) != 0)
-        {
-            mbedtls_ctr_drbg_free(&ctr_drbg);
-            mbedtls_entropy_free(&entropy);
-            break;
-        }
-
-        // Export shared secret.
-        // Meshtastic ESP32 firmware uses Curve25519::eval() (Arduino Crypto
-        // library, rweather/arduinolibs), which outputs a little-endian
-        // 32-byte shared secret used directly as the AES-256 key.
-        // mbedtls_mpi_write_binary produces big-endian, so reverse to LE.
-        uint8_t zBE[32] = {};
-        if (mbedtls_mpi_write_binary(&z, zBE, 32) != 0)
-        {
-            mbedtls_ctr_drbg_free(&ctr_drbg);
-            mbedtls_entropy_free(&entropy);
-            break;
-        }
-        reverseBytes32(zBE, sharedOut);  // BE → LE to match Meshtastic AES key
-        ok = true;
-
-        mbedtls_ctr_drbg_free(&ctr_drbg);
-        mbedtls_entropy_free(&entropy);
-    } while (false);
-
-    // Zeroize sensitive material
-    mbedtls_mpi_free(&z);
-    mbedtls_mpi_free(&d);
-    mbedtls_ecp_point_free(&Qr);
-    mbedtls_ecp_group_free(&grp);
-
-    if (!ok)
-        ESP_LOGW(TAG, "ECDH shared secret computation failed");
-    return ok;
+    return mc_x25519SharedSecret(_privateKey, remotePubKey, sharedOut);
 }
 
 /* extern */

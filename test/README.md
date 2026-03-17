@@ -4,6 +4,18 @@ Pure-C++ tests that run on macOS/Linux without any hardware or ESP-IDF toolchain
 Uses the [Unity](https://github.com/ThrowTheSwitch/Unity) test framework (fetched
 automatically by CMake FetchContent).
 
+`test_mesh_crypto` requires **mbedtls**.  Two sources are supported, checked in
+order:
+
+1. **ESP-IDF bundled mbedtls** (preferred) — automatically built from source when
+   `IDF_PATH` is set.  Guarantees the exact same mbedtls version the firmware
+   links against.
+2. **System mbedtls** (fallback) — used when `IDF_PATH` is not set:
+   ```bash
+   brew install mbedtls             # macOS
+   apt-get install libmbedtls-dev   # Debian/Ubuntu
+   ```
+
 ## Structure
 
 ```
@@ -11,31 +23,42 @@ test/
   CMakeLists.txt            # standalone CMake project, fetches Unity
   stubs/                    # minimal ESP-IDF / FreeRTOS header shims
     freertos/
-      FreeRTOS.h            # TickType_t, BaseType_t, configTICK_RATE_HZ
+      FreeRTOS.h            # TickType_t, pdMS_TO_TICKS, configTICK_RATE_HZ
       portmacro.h           # portMUX_TYPE, portENTER/EXIT_CRITICAL
-      semphr.h              # SemaphoreHandle_t, xSemaphoreCreateMutex …
-      queue.h               # QueueHandle_t, xQueueCreate/Send/Receive …
+      semphr.h              # SemaphoreHandle_t stub
+      queue.h               # QueueHandle_t stub
       task.h                # TaskHandle_t, TimerHandle_t, vTaskDelay …
-    esp_log.h               # ESP_LOGI/W/E/D → no-op macros
-    nvs_flash.h             # nvs_flash_init, nvs_open → stub (NOT_FOUND)
+    esp_log.h               # ESP_LOGI/W/E/D → no-ops
+    nvs_flash.h             # nvs_open → ESP_ERR_NVS_NOT_FOUND stub
     nvs.h                   # re-exports nvs_flash.h stubs
   test_mesh_codec.cxx       # 41 tests — varint, zigzag, all en/decoders
-  test_applist.cxx          # 27 tests — built-in lookup, custom entry management
+  test_mesh_crypto.cxx      # 47 tests — AES-CTR, X25519, PKC DM, OTA frames
+  test_applist.cxx          # 27 tests — built-in lookup, custom entry mgmt
   test_notification_def.cxx # 22 tests — notification_def struct logic
 ```
 
 ## Building and running
 
+With ESP-IDF installed (recommended — uses the same mbedtls as the firmware):
 ```bash
+cd test
+cmake -B build -DCMAKE_BUILD_TYPE=Debug    # picks up $IDF_PATH automatically
+cmake --build build -j$(nproc)
+ctest --test-dir build --output-on-failure
+```
+
+Without ESP-IDF (falls back to system mbedtls):
+```bash
+brew install mbedtls                        # macOS, one-time
 cd test
 cmake -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j$(nproc)
 ctest --test-dir build --output-on-failure
 ```
 
-Or run individual test binaries directly for verbose output:
-
+Run a specific suite verbosely:
 ```bash
+./build/test_mesh_crypto
 ./build/test_mesh_codec
 ./build/test_applist
 ./build/test_notification_def
@@ -43,57 +66,57 @@ Or run individual test binaries directly for verbose output:
 
 ## What is tested
 
-### `test_mesh_codec` (primary focus)
+### `test_mesh_crypto` (47 tests) — primary crypto focus
 
-Tests `mesh_codec.cxx` — the platform-free Meshtastic protobuf codec that
-contains all the logic previously inlined inside the `LoRa` class.
+Tests `mesh_crypto.cxx` — the platform-free layer holding all Meshtastic
+cryptographic primitives (mbedtls only, no ESP-IDF). The firmware delegates
+every crypto call here; these tests verify correctness against published standards.
 
-| Group | Tests |
-|---|---|
-| `mc_pbVarint` | 0, 1, 127, 128, 300, UINT32_MAX |
-| `mc_pbZigzag` | 0, ±1, ±2, INT32_MIN, INT32_MAX |
-| `mc_parseData` | portnum, payload, want_response, truncated, empty |
-| `mc_parsePosition` | **field-number regressions** (see below) |
-| `mc_parseUser` | id, long_name, public_key 32B / wrong-length, truncation |
-| Encode round-trips | Data→Position, Telemetry byte layout |
-| `mc_encodeData` | **request_id field 6 (0x35) not field 7 (0x3D)** |
+| Group | Count | Reference |
+|---|---|---|
+| `mc_buildNonce` | 6 | Meshtastic `CryptoEngine::initCounter()` |
+| `mc_aes128ctr` | 6 | NIST SP 800-38A Appendix F.5.1 |
+| `mc_aes256ctr` | 3 | NIST SP 800-38A Appendix F.5.5 |
+| `mc_channelCrypt` | 6 | Meshtastic DEFAULT_PSK round-trips |
+| `mc_x25519PublicKey` | 4 | RFC 7748 §6.1 known key derivations |
+| `mc_x25519SharedSecret` | 5 | RFC 7748 §6.1 known shared secrets |
+| `mc_pkcCrypt` | 5 | PKC DM encrypt/decrypt round-trips |
+| Full OTA frame | 2 | Channel text message + PKC DM end-to-end |
+| Channel hash | 3 | Verify DEFAULT_CHAN_HASH = 0x08 |
 
-#### Key regression tests for known bugs
+#### Key regression tests for known PKC bugs
 
-**Position — `time` at field 4, not field 9**
+**RFC 7748 Alice→Bob shared secret**
+`test_x25519_shared_secret_alice_to_bob` pins the exact 32-byte output of
+`mc_x25519SharedSecret` to the RFC 7748 §6.1 vector. Wrong LE↔BE byte reversal
+or wrong mbedtls ECDH call path causes a concrete hex-diff failure.
 
-`test_parse_position_time_from_field4_not_field9` crafts a Position proto
-with the correct time at field 4 (`sfixed32`, tag `0x25`), a `pos_flags`
-varint at field 9 (tag `0x48`), a `google_plus_code` string at field 7 (tag
-`0x3A` — must be **skipped** not stored as sats), and sats at field 14 (tag
-`0x70`).
+**ECDH commutativity**
+`test_x25519_shared_secret_commutativity` verifies `ECDH(a,B) == ECDH(b,A)`.
+If mbedtls Curve25519 behaves differently from Arduino Crypto `Curve25519::eval()`
+for the Meshtastic PKC use-case, this test catches it.
 
-`test_parse_position_field9_sfixed32_not_stored_as_time` encodes time at the
-*old wrong* field 9 sfixed32 position (tag `0x4D`) and verifies the decoder
-**does not** store it in `pos.unixTime`.
+**Full PKC OTA frame round-trip**
+`test_full_ota_pkc_direct_message` constructs a complete Meshtastic OTA packet
+(16-byte header + AES-256-CTR Data proto, `chanHash=0x00`), encrypts as Alice,
+decrypts as Bob, and parses the result. Highest-fidelity test of the PKC path
+without hardware.
 
-**Data — `request_id` at field 6 (tag `0x35`), never field 7 (`0x3D`)**
+**Channel hash = 0x08**
+`test_channel_hash_combined` verifies `xorHash("LongFast") ^ xorHash(DEFAULT_PSK)`
+equals `0x08`. PSK or channel-name drift here explains decrypt failures on hardware.
 
-`test_encode_data_request_id_uses_field6_tag_0x35` scans the encoded bytes
-for tag `0x35` (✓ required) and `0x3D` (✗ must be absent).
+### `test_mesh_codec` (41 tests)
 
-### `test_applist`
+Tests `mesh_codec.cxx` — platform-free Meshtastic protobuf codec.
 
-Tests the pure logic of `ApplicationList` using in-memory state only (NVS
-stubs return `NOT_FOUND` so `_loadFromNvs` exits immediately):
+- Field-number regression: `time` at field 4, `sats_in_view` at field 14
+- `request_id` at tag `0x35` (field 6), never `0x3D` (field 7)
 
-- Built-in bundle ID lookup (`isAllowedApplication`, `getApplicationId`)
-- Display name resolution by enum and by bundle ID string
-- Custom entry add / remove / reset
-- Duplicate, built-in-override, and overflow guards
+### `test_applist` (27 tests)
 
-### `test_notification_def`
+ApplicationList: built-in lookups, custom add/remove, overflow and duplicate guards.
 
-Tests `notification_def` — the POD struct that carries notification data
-between BLE callbacks and the draw task:
+### `test_notification_def` (22 tests)
 
-- Default field values (all zero/empty/false)
-- `reset()` clears string and flag fields but preserves `key`
-- `isCall()` returns true only for `APP_PHONE` and `APP_FACETIME`
-- `ATTR_*` bitmask arithmetic and tracking logic
-- Buffer size guarantees (title=64, message=128, bundleId=64)
+notification_def struct: defaults, `reset()`, `isCall()`, ATTR_* bitmasks, buffer sizes.

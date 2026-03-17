@@ -18,6 +18,7 @@
 #ifndef MESHNODE_H_
 #define MESHNODE_H_
 
+#include "mesh_crypto.h"  // mc_x25519PublicKey, mc_x25519SharedSecret
 #include <cstdint>
 
 /**
@@ -94,6 +95,15 @@ public:
      * In encrypted mode this is derived from the persisted private key.
      */
     const uint8_t* publicKey() const { return _publicKey; }
+
+    /**
+     * 32-byte X25519 private key.
+     * Valid only when hasPkcKeys() returns true (encrypted mode).
+     * Used by _decryptPkc() in meshtastic_proto.cxx to pass directly to
+     * mc_pkcCrypt() without going through computeSharedSecret().
+     * NOTE: never expose this over BLE or log it.
+     */
+    const uint8_t* privateKey() const { return _privateKey; }
 
     /**
      * Whether this node has a valid PKC keypair (encrypted mode only).

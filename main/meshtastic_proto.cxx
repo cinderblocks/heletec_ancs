@@ -36,12 +36,11 @@
 #include "lora.h"
 #include "lora_internal.h"
 #include "mesh_codec.h"
+#include "mesh_crypto.h"
 #include "gps.h"
 #include "hardware.h"
 #include "meshnode.h"
 
-#include <mbedtls/aes.h>
-#include <mbedtls/platform_util.h>
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -67,52 +66,24 @@ static const char* TAG = "lora";
 };
 
 // ── _decrypt ──────────────────────────────────────────────────────────────
-// Meshtastic AES-128-CTR cipher (decrypt == encrypt for CTR mode).
-// Used for BOTH decrypting incoming packets and encrypting outgoing ones.
-//
-// Nonce layout (CryptoEngine::initCounter() in Meshtastic firmware):
-//   bytes  [0:3]  = packetId LE
-//   bytes  [4:7]  = 0x00 × 4
-//   bytes  [8:11] = fromNode LE
-//   bytes [12:15] = 0x00 × 4
+// Meshtastic AES-128-CTR channel cipher — delegates to platform-free
+// mc_channelCrypt() in mesh_crypto.cxx.
+// CTR mode is symmetric: same function encrypts and decrypts.
 bool LoRa::_decrypt(const uint8_t* in, size_t len,
                     uint32_t packetId, uint32_t fromNode,
                     uint8_t* out)
 {
-    if (len == 0) return false;
-
-    uint8_t nonce[16] = {};
-    nonce[0]  = static_cast<uint8_t>(packetId);
-    nonce[1]  = static_cast<uint8_t>(packetId >>  8);
-    nonce[2]  = static_cast<uint8_t>(packetId >> 16);
-    nonce[3]  = static_cast<uint8_t>(packetId >> 24);
-    // [4:7]  = 0
-    nonce[8]  = static_cast<uint8_t>(fromNode);
-    nonce[9]  = static_cast<uint8_t>(fromNode >>  8);
-    nonce[10] = static_cast<uint8_t>(fromNode >> 16);
-    nonce[11] = static_cast<uint8_t>(fromNode >> 24);
-    // [12:15] = 0
-
-    uint8_t streamBlock[16] = {};
-    size_t  nc_off = 0;
-
-    mbedtls_aes_context ctx;
-    mbedtls_aes_init(&ctx);
-    bool ok = false;
-    if (mbedtls_aes_setkey_enc(&ctx, DEFAULT_PSK, 128) == 0)
-        ok = (mbedtls_aes_crypt_ctr(&ctx, len, &nc_off, nonce, streamBlock, in, out) == 0);
-    mbedtls_aes_free(&ctx);
-    return ok;
+    return mc_channelCrypt(DEFAULT_PSK, packetId, fromNode, in, len, out);
 }
 
 // ── _decryptPkc ───────────────────────────────────────────────────────────
-// PKC (public-key cryptography) direct message decryption.
-// Meshtastic uses chanHash=0x00 to mark PKC-encrypted packets:
-//   1. Look up the sender's X25519 public key in our neighbour table.
-//   2. Compute the ECDH shared secret (our private key × their public key).
-//   3. Use the 32-byte shared secret as an AES-256-CTR key.
-//   4. Nonce layout — SAME as channel encryption:
-//      [packetId LE (4B) | 0 (4B) | fromNode LE (4B) | 0 (4B)]
+// PKC direct-message decryption:
+//   1. Look up the sender's X25519 public key in the neighbour table.
+//   2. Delegate to mc_pkcCrypt() which does ECDH + AES-256-CTR.
+//
+// The crypto primitives (ECDH, AES-256-CTR, nonce construction) are in
+// mesh_crypto.cxx so they can be unit-tested on the host with RFC 7748
+// and NIST SP 800-38A vectors.
 bool LoRa::_decryptPkc(const uint8_t* in, size_t len,
                         uint32_t packetId, uint32_t fromNode,
                         uint8_t* out)
@@ -149,40 +120,10 @@ bool LoRa::_decryptPkc(const uint8_t* in, size_t len,
         return false;
     }
 
-    // ── Compute ECDH shared secret ──────────────────────────────────────
-    uint8_t sharedSecret[32] = {};
-    if (!Node.computeSharedSecret(remotePub, sharedSecret))
-    {
-        ESP_LOGW(TAG, "PKC: ECDH failed for node 0x%08" PRIx32, fromNode);
-        return false;
-    }
-
-    // ── AES-256-CTR with the shared secret as key ───────────────────────
-    uint8_t nonce[16] = {};
-    nonce[0]  = static_cast<uint8_t>(packetId);
-    nonce[1]  = static_cast<uint8_t>(packetId >>  8);
-    nonce[2]  = static_cast<uint8_t>(packetId >> 16);
-    nonce[3]  = static_cast<uint8_t>(packetId >> 24);
-    // [4:7]  = 0
-    nonce[8]  = static_cast<uint8_t>(fromNode);
-    nonce[9]  = static_cast<uint8_t>(fromNode >>  8);
-    nonce[10] = static_cast<uint8_t>(fromNode >> 16);
-    nonce[11] = static_cast<uint8_t>(fromNode >> 24);
-    // [12:15] = 0
-
-    uint8_t streamBlock[16] = {};
-    size_t  nc_off = 0;
-
-    mbedtls_aes_context ctx;
-    mbedtls_aes_init(&ctx);
-    bool ok = false;
-    if (mbedtls_aes_setkey_enc(&ctx, sharedSecret, 256) == 0)
-        ok = (mbedtls_aes_crypt_ctr(&ctx, len, &nc_off, nonce, streamBlock, in, out) == 0);
-    mbedtls_aes_free(&ctx);
-
-    // Zeroize the shared secret from stack
-    mbedtls_platform_zeroize(sharedSecret, sizeof(sharedSecret));
-
+    // ── ECDH + AES-256-CTR via platform-free mc_pkcCrypt() ───────────────
+    const bool ok = mc_pkcCrypt(Node.privateKey(), remotePub,
+                                packetId, fromNode, in, len, out);
+    mbedtls_platform_zeroize(remotePub, sizeof(remotePub));
     return ok;
 #endif
 }

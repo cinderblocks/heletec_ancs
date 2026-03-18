@@ -11,8 +11,8 @@ set(SOURCE_FILES
     hardware.cxx
     lora.cxx
     main.cxx
-    mesh_codec.cxx       # platform-free Meshtastic protobuf codec
-    mesh_crypto.cxx      # platform-free Meshtastic crypto primitives (mbedtls only)
+    mesh_codec.cxx
+    mesh_crypto.cxx
     meshnode.cxx
     meshtastic_proto.cxx
     notificationservice.cxx

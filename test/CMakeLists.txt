@@ -14,39 +14,52 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(unity)
 
-# ── Locate mbedtls (required for test_mesh_crypto) ────────────────────────
-# Priority 1: ESP-IDF bundled mbedtls — built from source via add_subdirectory
-#             to guarantee version consistency with the firmware.
-# Priority 2: System mbedtls (brew install mbedtls / apt-get install libmbedtls-dev).
+# ── Crypto library detection (mbedtls only) ───────────────────────────────
 #
-# Both paths produce a CMake target in MBEDTLS_LINK_TARGET that exports the
-# correct include directories and link libraries, so downstream targets only
-# need target_link_libraries(... ${MBEDTLS_LINK_TARGET}).
-set(MBEDTLS_FOUND FALSE)
+# Two-tier strategy:
+#
+#   Priority 1 — ESP-IDF bundled source (IDF_PATH is set).
+#     add_subdirectory() the upstream subtree that ESP-IDF vendors inside its
+#     components/ directory.
+#     mbedtls:   $IDF_PATH/components/mbedtls/mbedtls/
+#
+#   Priority 2 — System library (IDF_PATH not set, or upstream dir absent).
+#     pkg-config first, then manual Homebrew/apt fallback paths.
+#     Install: brew install mbedtls          (macOS)
+#              apt-get install libmbedtls-dev (Debian/Ubuntu)
 
+find_package(PkgConfig QUIET)
+set(MBEDTLS_FOUND  FALSE)
+
+# ── mbedtls ───────────────────────────────────────────────────────────────
 if(DEFINED ENV{IDF_PATH})
     set(_IDF_MBEDTLS "$ENV{IDF_PATH}/components/mbedtls/mbedtls")
     if(EXISTS "${_IDF_MBEDTLS}/CMakeLists.txt")
-        # Suppress optional mbedtls targets we don't need.
         set(ENABLE_PROGRAMS      OFF CACHE BOOL "" FORCE)
         set(ENABLE_TESTING       OFF CACHE BOOL "" FORCE)
         set(MBEDTLS_FATAL_WARNINGS OFF CACHE BOOL "" FORCE)
         add_subdirectory("${_IDF_MBEDTLS}"
-                         "${CMAKE_CURRENT_BINARY_DIR}/mbedtls"
+                         "${CMAKE_CURRENT_BINARY_DIR}/mbedtls_idf"
                          EXCLUDE_FROM_ALL)
-        set(MBEDTLS_FOUND TRUE)
-        # The mbedcrypto target exports its include dirs automatically.
+        # The upstream mbedtls CMakeLists.txt creates a target named "mbedcrypto".
         set(MBEDTLS_LINK_TARGET mbedcrypto)
+        set(MBEDTLS_FOUND TRUE)
         message(STATUS "Using ESP-IDF mbedtls: ${_IDF_MBEDTLS}")
     endif()
 endif()
 
 if(NOT MBEDTLS_FOUND)
-    # Fall back to system mbedtls.
-    # Homebrew (macOS): brew install mbedtls
-    #   Apple Silicon: /opt/homebrew/opt/mbedtls/
-    #   Intel:         /usr/local/opt/mbedtls/
-    # Debian/Ubuntu:   apt-get install libmbedtls-dev
+    if(PkgConfig_FOUND)
+        pkg_check_modules(MBEDCRYPTO QUIET IMPORTED_TARGET mbedcrypto)
+        if(MBEDCRYPTO_FOUND)
+            set(MBEDTLS_LINK_TARGET PkgConfig::MBEDCRYPTO)
+            set(MBEDTLS_FOUND TRUE)
+            message(STATUS "Found mbedtls via pkg-config")
+        endif()
+    endif()
+endif()
+
+if(NOT MBEDTLS_FOUND)
     find_library(MBEDTLS_CRYPTO_LIB
         NAMES mbedcrypto
         HINTS
@@ -67,25 +80,23 @@ if(NOT MBEDTLS_FOUND)
             /usr/local/include
             /usr/include
     )
-
     if(MBEDTLS_CRYPTO_LIB AND MBEDTLS_INCLUDE_DIR)
-        # Wrap system library in an imported target for uniform linking.
         add_library(system_mbedcrypto UNKNOWN IMPORTED)
         set_target_properties(system_mbedcrypto PROPERTIES
-            IMPORTED_LOCATION "${MBEDTLS_CRYPTO_LIB}"
+            IMPORTED_LOCATION             "${MBEDTLS_CRYPTO_LIB}"
             INTERFACE_INCLUDE_DIRECTORIES "${MBEDTLS_INCLUDE_DIR}"
         )
         set(MBEDTLS_LINK_TARGET system_mbedcrypto)
         set(MBEDTLS_FOUND TRUE)
-        message(STATUS "Using system mbedtls: ${MBEDTLS_CRYPTO_LIB}")
+        message(STATUS "Found system mbedtls: ${MBEDTLS_CRYPTO_LIB}")
         message(STATUS "  includes:           ${MBEDTLS_INCLUDE_DIR}")
-    else()
-        message(WARNING
-            "mbedtls not found — test_mesh_crypto will be skipped.\n"
-            "Set IDF_PATH to use ESP-IDF's bundled mbedtls, or install:\n"
-            "  brew install mbedtls              (macOS)\n"
-            "  apt-get install libmbedtls-dev    (Debian/Ubuntu)")
     endif()
+endif()
+
+if(NOT MBEDTLS_FOUND)
+    message(WARNING "mbedtls not found — set IDF_PATH or install: "
+                    "brew install mbedtls  /  apt-get install libmbedtls-dev")
+    message(WARNING "test_mesh_crypto will be skipped.")
 endif()
 
 # ── Paths ─────────────────────────────────────────────────────────────────
@@ -118,8 +129,7 @@ add_firmware_test(test_mesh_codec
 # ── test_mesh_crypto ──────────────────────────────────────────────────────
 # Tests AES-128-CTR, AES-256-CTR, X25519 key derivation, X25519 ECDH, and
 # PKC DM round-trips using NIST SP 800-38A and RFC 7748 known test vectors.
-# Requires mbedtls — prefers ESP-IDF's bundled copy (IDF_PATH), falls back
-# to system mbedtls.
+# Requires mbedtls (AES-CTR + Curve25519 ECDH).
 if(MBEDTLS_FOUND)
     add_executable(test_mesh_crypto
         test_mesh_crypto.cxx
@@ -131,7 +141,8 @@ if(MBEDTLS_FOUND)
         ${STUB_DIR}
     )
     target_compile_options(test_mesh_crypto PRIVATE ${COMMON_FLAGS})
-    target_link_libraries(test_mesh_crypto PRIVATE unity ${MBEDTLS_LINK_TARGET})
+    target_link_libraries(test_mesh_crypto PRIVATE
+        unity ${MBEDTLS_LINK_TARGET})
     add_test(NAME test_mesh_crypto COMMAND test_mesh_crypto)
 else()
     message(STATUS "Skipping test_mesh_crypto — mbedtls not found")

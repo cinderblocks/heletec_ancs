@@ -18,8 +18,10 @@
 /**
  * mesh_crypto.h — Meshtastic cryptographic primitives, zero platform deps.
  *
- * Depends ONLY on mbedtls (available on both ESP-IDF target and POSIX host
- * via Homebrew/apt). No ESP-IDF, FreeRTOS, or hardware-specific headers.
+ * X25519:  standalone implementation derived from TweetNaCl (public domain).
+ * AES-CTR: mbedtls_aes (hardware-accelerated on ESP32-S3).
+ *
+ * No ESP-IDF, FreeRTOS, or hardware-specific headers.
  *
  * This file exists so that every crypto operation can be unit-tested on the
  * host with known RFC 7748 / NIST SP 800-38A test vectors, independently
@@ -92,18 +94,19 @@ bool mc_channelCrypt(const uint8_t psk[16],
 /**
  * Derive an X25519 public key from a private key.
  *
+ * Uses a self-contained implementation (constant-time, RFC 7748 compliant).
  * Keys are in little-endian RFC 7748 wire format (32 bytes).
- * Internally reversed to big-endian for the mbedtls MPI API.
  *
  * @param privateKey  32-byte X25519 private key (little-endian, RFC 7748).
  * @param publicKeyOut 32-byte output buffer for the public key (little-endian).
- * @return true on success, false on mbedtls error.
+ * @return true on success, false on error.
  */
 bool mc_x25519PublicKey(const uint8_t privateKey[32], uint8_t publicKeyOut[32]);
 
 /**
  * Compute an X25519 ECDH shared secret.
  *
+ * Uses a self-contained implementation (constant-time, RFC 7748 compliant).
  * Keys are in little-endian RFC 7748 wire format.  The 32-byte output is
  * also little-endian, matching the output of Arduino Crypto's
  * Curve25519::eval() that Meshtastic ESP32 firmware uses directly as the
@@ -111,9 +114,8 @@ bool mc_x25519PublicKey(const uint8_t privateKey[32], uint8_t publicKeyOut[32]);
  *
  * @param ourPrivKey    Our 32-byte X25519 private key (little-endian).
  * @param remotePubKey  Sender's 32-byte X25519 public key (little-endian).
- * @param sharedOut     32-byte output buffer — must be zeroed before call.
- *                      Filled with the shared secret (little-endian).
- * @return true on success, false on mbedtls error.
+ * @param sharedOut     32-byte output buffer for the shared secret (little-endian).
+ * @return true on success, false on error (e.g. low-order point).
  */
 bool mc_x25519SharedSecret(const uint8_t ourPrivKey[32],
                            const uint8_t remotePubKey[32],

@@ -158,7 +158,7 @@ void MeshNode::init()
 
     // ── Derive public key from private key via platform-free mc_x25519PublicKey ──
     // Keys are little-endian (RFC 7748 / Meshtastic wire format).
-    // mc_x25519PublicKey handles LE→BE reversal for mbedtls internally.
+    // mc_x25519PublicKey delegates to mbedtls ECP Curve25519.
     if (mc_x25519PublicKey(_privateKey, _publicKey))
     {
         _hasPkcKeys = true;

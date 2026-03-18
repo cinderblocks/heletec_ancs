@@ -42,6 +42,7 @@
 #include "meshnode.h"
 
 #include <esp_log.h>
+#include <mbedtls/platform_util.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <cinttypes>

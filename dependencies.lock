@@ -47,6 +47,6 @@ dependencies:
 direct_dependencies:
 - cinderblocks/esp_tinygpsplusplus
 - h2zero/esp-nimble-cpp
-manifest_hash: c9388dd3d0db6c85646727e7cf82f00eed42794396e7327b9ad4f05f1b9d487d
+manifest_hash: 3e3a21afb43c5b3d50bd2c9cc89ef9a6ab182b481bd0453d5296a27a8a542618
 target: esp32s3
 version: 2.0.0

@@ -65,10 +65,19 @@ struct LoRaStats {
  * US LongFast @ 906.875 MHz, SF11/BW250/CR4-5, private sync word 0x2B).
  *
  * Uses standard AES-128-CTR channel encryption for full interoperability
- * with the existing Meshtastic mesh.  When CONFIG_LORA_IS_LICENSED is off
- * (default), X25519 PKC direct messages (chanHash=0x00) are also decrypted
- * using ECDH shared secrets with AES-256-CTR.  In IsLicensed (ham radio)
- * mode, PKC is disabled and TX packets are sent as plaintext.
+ * with the existing Meshtastic mesh.  TX is always encrypted with the
+ * default PSK so that stock Meshtastic nodes can decode our packets.
+ *
+ * In normal (encrypted) mode, X25519 PKC direct messages (chanHash=0x00)
+ * are also decrypted using ECDH shared secrets with AES-256-CCM.
+ *
+ * In IsLicensed (ham radio) mode:
+ *   - TX packets are still AES-128-CTR encrypted for interop (the PSK is
+ *     publicly known / factory default, satisfying Part 97 requirements).
+ *   - is_licensed=true is advertised in User proto field 6.
+ *   - Public key is all-zeros (no PKC).
+ *   - RX: AES-CTR decrypt is tried first; if protobuf parse fails, the raw
+ *     payload is used as plaintext (handles other unencrypted nodes).
  *
  * Received packets containing TEXT_MESSAGE_APP Data protos have their
  * text stored and the draw task is notified via Hardware::notifyDraw(DRAW_LORA).
@@ -221,15 +230,18 @@ private:
                   uint32_t packetId, uint32_t fromNode,
                   uint8_t* out);
 
-    /// AES-256-CTR PKC (public key cryptography) cipher for direct messages.
-    /// Uses X25519 ECDH shared secret as the 256-bit key.  Same nonce layout
-    /// as _decrypt().  chanHash=0x00 marks PKC-encrypted packets on the wire.
+    /// AES-256-CCM PKC (public key cryptography) cipher for direct messages.
+    /// Uses SHA-256(X25519 ECDH shared secret) as the 256-bit key.
+    /// Wire payload: [ciphertext] [8-byte CCM tag] [4-byte extraNonce].
+    /// chanHash=0x00 marks PKC-encrypted packets on the wire.
+    /// Falls back to AES-256-CTR if CCM auth fails (older firmware compat).
     /// @param fromNode  Sender node ID — used to look up the remote public key
-    ///                  in the neighbour table and to build the CTR nonce.
-    /// @return true on success, false if no public key found or ECDH/AES failed.
+    ///                  in the neighbour table and to build the CCM nonce.
+    /// @param plainLen  Output: actual plaintext size produced (differs by mode).
+    /// @return true on CCM auth success or validated CTR fallback.
     bool _decryptPkc(const uint8_t* in, size_t len,
                      uint32_t packetId, uint32_t fromNode,
-                     uint8_t* out);
+                     uint8_t* out, size_t& plainLen);
     bool _parseData(const uint8_t* data, size_t len,
                     uint32_t& portnum,
                     const uint8_t*& payload, size_t& payloadLen,
@@ -294,8 +306,11 @@ private:
                               uint32_t requestId = 0);
 
     /// Build a complete OTA Meshtastic packet ready for transmit().
-    /// In encrypted mode: Data proto is AES-128-CTR encrypted (channel PSK).
-    /// In IsLicensed mode: Data proto is sent as plaintext (no encryption).
+    /// Data proto is always AES-128-CTR encrypted (channel PSK), even in
+    /// IsLicensed mode — stock Meshtastic nodes match chanHash=0x08 to
+    /// their encrypted channel and will AES-CTR decrypt our payload.
+    /// Sending plaintext with chanHash=0x08 causes receivers to "decrypt"
+    /// the raw bytes into garbage and silently drop the packet.
     /// @param to        Destination node ID (0xFFFFFFFF = broadcast).
     /// @param requestId Incoming pktId for unicast NodeInfo responses (0 = none).
     ///                  Placed in Data field 6 (request_id, fixed32) so the

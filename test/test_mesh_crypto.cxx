@@ -17,7 +17,7 @@
  *
  * Meshtastic encryption: meshtastic.org/docs/overview/encryption/
  *   - Channel cipher: AES-128-CTR, key=PSK, nonce=[pktId LE|0|fromNode LE|0]
- *   - PKC DM cipher:  AES-256-CTR, key=X25519 ECDH shared secret (LE),
+ *   - PKC DM cipher:  AES-256-CCM (M=8, L=2), key=SHA-256(X25519 ECDH shared secret),
  *                     same nonce layout, chanHash=0x00 on wire.
  *
  * Channel hash computation (DEFAULT_CHAN_HASH = 0x08):
@@ -32,7 +32,7 @@
  *  4. mc_channelCrypt        — Meshtastic DEFAULT_PSK round-trips
  *  5. mc_x25519PublicKey     — RFC 7748 known key derivations
  *  6. mc_x25519SharedSecret  — RFC 7748 known shared secrets
- *  7. mc_pkcCrypt            — PKC DM encrypt/decrypt round-trips
+ *  7. mc_pkcEncrypt/Decrypt   — PKC DM encrypt/decrypt round-trips (AES-256-CCM)
  *  8. Full Meshtastic OTA frame — encode→encrypt→decrypt→parse
  *  9. Channel-hash computation — verify DEFAULT_CHAN_HASH = 0x08
  */
@@ -500,32 +500,39 @@ void test_x25519_wrong_remote_key_gives_different_secret(void)
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// 7. mc_pkcCrypt — PKC DM encrypt/decrypt round-trips
+// 7. mc_pkcEncrypt / mc_pkcDecrypt — PKC DM round-trips (AES-256-CCM)
 //
-// In Meshtastic PKC DM flow:
-//   Sender (Alice) encrypts:  mc_pkcCrypt(alicePriv, bobPub,   pktId, aliceNode, pt → ct)
-//   Receiver (Bob) decrypts:  mc_pkcCrypt(bobPriv,  alicePub, pktId, aliceNode, ct → pt)
+// Meshtastic PKI encryption (firmware v2.5+):
+//   1. ECDH shared secret → SHA-256 hash → AES-256 key
+//   2. AES-256-CCM with M=8 (8-byte auth tag), L=2 (13-byte nonce)
+//   3. Wire payload = [ciphertext] [8-byte tag] [4-byte extraNonce]
+//   4. MC_PKC_OVERHEAD = 12 bytes total appended
 //
-// The fromNode in the nonce is always the SENDER's node ID, even when
-// the receiver (Bob) is decrypting.  This matches Meshtastic's
-// CryptoEngine::initCounter() where fromNode is the OTA header sender.
+// Sender (Alice→Bob):
+//   mc_pkcEncrypt(alicePriv, bobPub, pktId, aliceNode, bobNode, pt, len, ct)
+//   → ct is len + 12 bytes
+// Receiver (Bob):
+//   mc_pkcDecrypt(bobPriv, alicePub, pktId, aliceNode, ct, len+12, pt)
+//   → pt is len bytes; returns false if CCM tag fails
 // ─────────────────────────────────────────────────────────────────────────
 
 void test_pkc_crypt_roundtrip_basic(void)
 {
     const uint8_t pt[] = "Direct message via PKC";
     const size_t  len  = sizeof(pt) - 1;
-    const uint32_t pktId    = 0x11223344;
-    const uint32_t aliceNode = 0xAAAA0001; // sender node ID
+    const uint32_t pktId     = 0x11223344;
+    const uint32_t aliceNode = 0xAAAA0001;
+    const uint32_t bobNode   = 0xBBBB0002;
 
-    uint8_t ct[64] = {}, pt2[64] = {};
+    uint8_t ct[64 + MC_PKC_OVERHEAD] = {}, pt2[64] = {};
 
     // Alice encrypts to Bob
-    TEST_ASSERT_TRUE(mc_pkcCrypt(TEST_PRIV_A, TEST_PUB_B,
-                                  pktId, aliceNode, pt, len, ct));
-    // Bob decrypts from Alice
-    TEST_ASSERT_TRUE(mc_pkcCrypt(TEST_PRIV_B, TEST_PUB_A,
-                                  pktId, aliceNode, ct, len, pt2));
+    TEST_ASSERT_TRUE(mc_pkcEncrypt(TEST_PRIV_A, TEST_PUB_B,
+                                    pktId, aliceNode, bobNode, pt, len, ct));
+    // Bob decrypts from Alice (extraNonce extracted from last 4 bytes of ct)
+    TEST_ASSERT_TRUE(mc_pkcDecrypt(TEST_PRIV_B, TEST_PUB_A,
+                                    pktId, aliceNode,
+                                    ct, len + MC_PKC_OVERHEAD, pt2));
     TEST_ASSERT_EQUAL_MEMORY(pt, pt2, len);
 }
 
@@ -534,42 +541,39 @@ void test_pkc_crypt_ciphertext_differs_from_plaintext(void)
     const uint8_t pt[32] = {0x08,0x01,0x12,0x18,'P','K','C',' ','t','e',
                              's','t',' ','m','e','s','s','a','g','e',' ',
                              'h','e','r','e','!',0,0,0,0,0,0};
-    uint8_t ct[32] = {};
-    mc_pkcCrypt(TEST_PRIV_A, TEST_PUB_B, 0xDEAD, 0xBEEF, pt, 32, ct);
+    uint8_t ct[32 + MC_PKC_OVERHEAD] = {};
+    mc_pkcEncrypt(TEST_PRIV_A, TEST_PUB_B, 0xDEAD, 0xBEEF, 0xF00D, pt, 32, ct);
     TEST_ASSERT_FALSE_MESSAGE(memcmp(pt, ct, 32) == 0,
         "PKC ciphertext must differ from plaintext");
 }
 
 void test_pkc_crypt_different_packetid_different_ciphertext(void)
 {
-    // Changing the packetId changes the nonce, changing the ciphertext
     const uint8_t pt[16] = {};
-    uint8_t ct1[16] = {}, ct2[16] = {};
-    mc_pkcCrypt(TEST_PRIV_A, TEST_PUB_B, 0x00000001, 0xAAAA0001, pt, 16, ct1);
-    mc_pkcCrypt(TEST_PRIV_A, TEST_PUB_B, 0x00000002, 0xAAAA0001, pt, 16, ct2);
-    TEST_ASSERT_FALSE_MESSAGE(memcmp(ct1, ct2, 16) == 0,
+    uint8_t ct1[16 + MC_PKC_OVERHEAD] = {}, ct2[16 + MC_PKC_OVERHEAD] = {};
+    mc_pkcEncrypt(TEST_PRIV_A, TEST_PUB_B, 0x00000001, 0xAAAA0001, 0xBBBB0002, pt, 16, ct1);
+    mc_pkcEncrypt(TEST_PRIV_A, TEST_PUB_B, 0x00000002, 0xAAAA0001, 0xBBBB0002, pt, 16, ct2);
+    TEST_ASSERT_FALSE_MESSAGE(memcmp(ct1, ct2, 16 + MC_PKC_OVERHEAD) == 0,
         "Different packetIds must produce different PKC ciphertext");
 }
 
 void test_pkc_crypt_wrong_key_fails_decryption(void)
 {
-    // If Bob uses the wrong private key, the decrypted plaintext must be garbage
+    // With CCM, wrong key → authentication failure (returns false)
     const uint8_t pt[16] = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16};
-    uint8_t ct[16] = {}, wrong_pt[16] = {};
+    uint8_t ct[16 + MC_PKC_OVERHEAD] = {}, wrong_pt[16] = {};
 
-    mc_pkcCrypt(TEST_PRIV_A, TEST_PUB_B, 0x1234, 0x5678, pt, 16, ct);
+    mc_pkcEncrypt(TEST_PRIV_A, TEST_PUB_B, 0x1234, 0x5678, 0x9ABC, pt, 16, ct);
 
-    // "Bob" decrypts with Alice's key (wrong key) instead of his own
-    mc_pkcCrypt(TEST_PRIV_A, TEST_PUB_A, 0x1234, 0x5678, ct, 16, wrong_pt);
-
-    TEST_ASSERT_FALSE_MESSAGE(memcmp(pt, wrong_pt, 16) == 0,
-        "Wrong decryption key must not recover the original plaintext");
+    // "Bob" decrypts with wrong key pair — CCM tag must fail
+    TEST_ASSERT_FALSE_MESSAGE(
+        mc_pkcDecrypt(TEST_PRIV_A, TEST_PUB_A, 0x1234, 0x5678,
+                      ct, 16 + MC_PKC_OVERHEAD, wrong_pt),
+        "Wrong decryption key must cause CCM authentication failure");
 }
 
 void test_pkc_crypt_roundtrip_data_proto(void)
 {
-    // Build a real Meshtastic Data proto payload, encrypt as PKC DM, then decrypt
-    // Data proto: portnum=1 (TEXT_MESSAGE), payload="PKC DM test"
     const uint8_t pt[] = {
         0x08, 0x01,                          // field 1: portnum = 1
         0x12, 0x0b,                          // field 2: payload (11 bytes)
@@ -577,15 +581,17 @@ void test_pkc_crypt_roundtrip_data_proto(void)
     };
     const size_t  len      = sizeof(pt);
     const uint32_t pktId   = 0xFEEDFACE;
-    const uint32_t senderNode = 0xDEAD0000;
+    const uint32_t senderNode   = 0xDEAD0000;
+    const uint32_t receiverNode = 0xBEEF0000;
 
-    uint8_t ct[sizeof(pt)] = {};
+    uint8_t ct[sizeof(pt) + MC_PKC_OVERHEAD] = {};
     uint8_t pt_out[sizeof(pt)] = {};
 
-    TEST_ASSERT_TRUE(mc_pkcCrypt(TEST_PRIV_A, TEST_PUB_B,
-                                  pktId, senderNode, pt, len, ct));
-    TEST_ASSERT_TRUE(mc_pkcCrypt(TEST_PRIV_B, TEST_PUB_A,
-                                  pktId, senderNode, ct, len, pt_out));
+    TEST_ASSERT_TRUE(mc_pkcEncrypt(TEST_PRIV_A, TEST_PUB_B,
+                                    pktId, senderNode, receiverNode, pt, len, ct));
+    TEST_ASSERT_TRUE(mc_pkcDecrypt(TEST_PRIV_B, TEST_PUB_A,
+                                    pktId, senderNode,
+                                    ct, len + MC_PKC_OVERHEAD, pt_out));
     TEST_ASSERT_EQUAL_MEMORY(pt, pt_out, len);
 
     // Also verify the decrypted bytes parse as a valid Data proto
@@ -690,11 +696,12 @@ void test_full_ota_pkc_direct_message(void)
                                    false, bobNode, 0);
     TEST_ASSERT_GREATER_THAN(0u, dataLen);
 
-    // 2. Alice PKC-encrypts the Data proto
-    uint8_t ciphertext[64] = {};
-    TEST_ASSERT_TRUE(mc_pkcCrypt(TEST_PRIV_A, TEST_PUB_B,
-                                  packetId, aliceNode,
-                                  dataProto, dataLen, ciphertext));
+    // 2. Alice PKC-encrypts (output = ciphertext + 8-byte tag + 4-byte extraNonce)
+    uint8_t ciphertext[64 + MC_PKC_OVERHEAD] = {};
+    TEST_ASSERT_TRUE(mc_pkcEncrypt(TEST_PRIV_A, TEST_PUB_B,
+                                    packetId, aliceNode, bobNode,
+                                    dataProto, dataLen, ciphertext));
+    const size_t wirePayLen = dataLen + MC_PKC_OVERHEAD;
 
     // 3. Build OTA header (chanHash=0x00 marks PKC)
     uint8_t ota[256] = {};
@@ -707,27 +714,27 @@ void test_full_ota_pkc_direct_message(void)
     ota[12] = 0x6B; // FLAGS_UNICAST
     ota[13] = 0x00; // PKC marker (chanHash=0x00)
     ota[14] = 0x00; ota[15] = 0x00;
-    memcpy(ota + 16, ciphertext, dataLen);
-    const size_t otaLen = 16 + dataLen;
+    memcpy(ota + 16, ciphertext, wirePayLen);
+    const size_t otaLen = 16 + wirePayLen;
 
     // 4. Bob "receives" the packet
     const uint32_t rx_from   = ota[4] | (uint32_t)ota[5]<<8 | (uint32_t)ota[6]<<16 | (uint32_t)ota[7]<<24;
     const uint32_t rx_pktId  = ota[8] | (uint32_t)ota[9]<<8 | (uint32_t)ota[10]<<16| (uint32_t)ota[11]<<24;
-    const uint8_t  rx_chanHash = ota[13]; // must be 0x00 for PKC
+    TEST_ASSERT_EQUAL_HEX8(0x00, ota[13]);
 
-    TEST_ASSERT_EQUAL_HEX8(0x00, rx_chanHash);
-
-    // 5. Bob PKC-decrypts (Bob's private key + Alice's public key)
+    // 5. Bob PKC-decrypts (extraNonce extracted from last 4 bytes of payload)
+    const size_t rx_wirePayLen = otaLen - 16;
+    const size_t rx_plainLen   = rx_wirePayLen - MC_PKC_OVERHEAD;
     uint8_t plain[64] = {};
-    TEST_ASSERT_TRUE(mc_pkcCrypt(TEST_PRIV_B, TEST_PUB_A,
-                                  rx_pktId, rx_from,
-                                  ota + 16, otaLen - 16, plain));
+    TEST_ASSERT_TRUE(mc_pkcDecrypt(TEST_PRIV_B, TEST_PUB_A,
+                                    rx_pktId, rx_from,
+                                    ota + 16, rx_wirePayLen, plain));
 
-    // 6. Parse the Data proto
+    // 6. Parse the Data proto (plaintext only, no overhead)
     uint32_t portnum = 0;
     const uint8_t* msgPayload = nullptr;
     size_t msgLen = 0; bool wantResp = false;
-    TEST_ASSERT_TRUE(mc_parseData(plain, otaLen - 16, portnum, msgPayload, msgLen, wantResp));
+    TEST_ASSERT_TRUE(mc_parseData(plain, rx_plainLen, portnum, msgPayload, msgLen, wantResp));
     TEST_ASSERT_EQUAL_UINT32(1u, portnum);
     TEST_ASSERT_EQUAL_MEMORY(dmText, msgPayload, sizeof(dmText) - 1);
 }
@@ -815,7 +822,7 @@ int main(void)
     RUN_TEST(test_x25519_shared_secret_deterministic);
     RUN_TEST(test_x25519_wrong_remote_key_gives_different_secret);
 
-    // 7. mc_pkcCrypt
+    // 7. mc_pkcEncrypt / mc_pkcDecrypt (AES-256-CCM)
     RUN_TEST(test_pkc_crypt_roundtrip_basic);
     RUN_TEST(test_pkc_crypt_ciphertext_differs_from_plaintext);
     RUN_TEST(test_pkc_crypt_different_packetid_different_ciphertext);

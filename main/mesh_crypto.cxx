@@ -25,8 +25,10 @@
  * from TweetNaCl by D.J. Bernstein et al. (public domain).  This avoids
  * platform-specific quirks in various mbedTLS builds.
  *
- * AES-CTR (channel + PKC ciphers) uses mbedtls_aes, which is
- * hardware-accelerated on ESP32-S3.
+ * AES-CTR (channel cipher) uses mbedtls_aes.
+ * AES-CCM (PKC cipher) uses mbedtls_ccm.
+ * SHA-256 (key derivation) uses mbedtls_sha256.
+ * All are hardware-accelerated on ESP32-S3.
  *
  * On device:  linked against ESP-IDF's mbedtls component.
  * On host:    linked against system mbedtls (brew install mbedtls).
@@ -35,7 +37,12 @@
 #include "mesh_crypto.h"
 
 #include <mbedtls/aes.h>
+#include <mbedtls/ccm.h>
+#include <mbedtls/gcm.h>
+#include <mbedtls/sha256.h>
 #include <mbedtls/platform_util.h>
+#include <mbedtls/ecp.h>
+#include <mbedtls/bignum.h>
 #include <cstring>
 #include <cstdint>
 
@@ -274,22 +281,339 @@ bool mc_x25519SharedSecret(const uint8_t ourPrivKey[32],
     return z != 0;
 }
 
-// ── mc_pkcCrypt ───────────────────────────────────────────────────────────
-bool mc_pkcCrypt(const uint8_t ourPrivKey[32], const uint8_t remotePubKey[32],
-                 uint32_t packetId, uint32_t fromNode,
-                 const uint8_t* in, size_t len, uint8_t* out)
+// ── mc_x25519SharedSecret_alt — mbedtls ECP Curve25519 cross-check ────────
+// Returns 0 on success, or negative mbedtls error code.
+// Montgomery curves in mbedtls use raw LE coordinates (no 0x04 prefix).
+// f_rng is needed by mbedtls_ecp_mul for side-channel blinding on ESP32.
+int mc_x25519SharedSecret_alt(const uint8_t ourPrivKey[32],
+                              const uint8_t remotePubKey[32],
+                              uint8_t sharedOut[32],
+                              int (*f_rng)(void*, unsigned char*, size_t),
+                              void* p_rng)
 {
-    uint8_t sharedSecret[32] = {};
-    if (!mc_x25519SharedSecret(ourPrivKey, remotePubKey, sharedSecret))
+    // Clamp private key per RFC 7748
+    uint8_t clamped[32];
+    memcpy(clamped, ourPrivKey, 32);
+    clamped[0]  &= 248;
+    clamped[31] &= 127;
+    clamped[31] |= 64;
+
+    mbedtls_ecp_group grp;
+    mbedtls_ecp_point Q, result;
+    mbedtls_mpi d;
+
+    mbedtls_ecp_group_init(&grp);
+    mbedtls_ecp_point_init(&Q);
+    mbedtls_ecp_point_init(&result);
+    mbedtls_mpi_init(&d);
+
+    int ret;
+
+    ret = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_CURVE25519);
+    if (ret != 0) { ret = ret - 1000000; goto cleanup; }  // tag: -100xxxx
+
+    // Read remote public key — Montgomery: raw 32-byte LE
+    ret = mbedtls_ecp_point_read_binary(&grp, &Q, remotePubKey, 32);
+    if (ret != 0) { ret = ret - 2000000; goto cleanup; }  // tag: -200xxxx
+
+    // Read clamped private key scalar (LE)
+    ret = mbedtls_mpi_read_binary_le(&d, clamped, 32);
+    if (ret != 0) { ret = ret - 3000000; goto cleanup; }  // tag: -300xxxx
+
+    // Compute: result = d * Q on Curve25519
+    ret = mbedtls_ecp_mul(&grp, &result, &d, &Q, f_rng, p_rng);
+    if (ret != 0) { ret = ret - 4000000; goto cleanup; }  // tag: -400xxxx
+
+    // Write result X-coordinate in LE
     {
-        mbedtls_platform_zeroize(sharedSecret, 32);
+        uint8_t resBuf[32];
+        size_t olen = 0;
+        ret = mbedtls_ecp_point_write_binary(&grp, &result,
+                MBEDTLS_ECP_PF_COMPRESSED, &olen, resBuf, sizeof(resBuf));
+        if (ret != 0) { ret = ret - 5000000; goto cleanup; }  // tag: -500xxxx
+        if (olen != 32) { ret = -6000000; goto cleanup; }     // tag: -6000000
+        memcpy(sharedOut, resBuf, 32);
+    }
+
+    ret = 0;
+
+cleanup:
+    mbedtls_platform_zeroize(clamped, sizeof(clamped));
+    mbedtls_mpi_free(&d);
+    mbedtls_ecp_point_free(&result);
+    mbedtls_ecp_point_free(&Q);
+    mbedtls_ecp_group_free(&grp);
+    return ret;
+}
+
+// ── mc_sha256 ─────────────────────────────────────────────────────────────
+bool mc_sha256(const uint8_t* data, size_t len, uint8_t hash[32])
+{
+    return mbedtls_sha256(data, len, hash, 0 /*not SHA-224*/) == 0;
+}
+
+// ── PKC helpers ───────────────────────────────────────────────────────────
+// Build the 13-byte CCM nonce from the 16-byte Meshtastic nonce layout.
+// CCM with L=2 uses nonce of 15−L = 13 bytes.
+static void _buildPkcNonce(uint32_t packetId, uint32_t fromNode,
+                           uint32_t extraNonce, uint8_t ccmNonce[13])
+{
+    uint8_t full[16];
+    mc_buildNonce(packetId, fromNode, full);
+    // Set extraNonce in bytes [12:15] of the full nonce
+    full[12] = static_cast<uint8_t>(extraNonce);
+    full[13] = static_cast<uint8_t>(extraNonce >>  8);
+    full[14] = static_cast<uint8_t>(extraNonce >> 16);
+    full[15] = static_cast<uint8_t>(extraNonce >> 24);
+    // CCM L=2 → nonce is first 13 bytes
+    memcpy(ccmNonce, full, 13);
+}
+
+// Derive AES-256 key: ECDH → SHA-256(shared_secret)
+static bool _derivePkcKey(const uint8_t ourPrivKey[32],
+                          const uint8_t remotePubKey[32],
+                          uint8_t keyOut[32])
+{
+    uint8_t shared[32] = {};
+    if (!mc_x25519SharedSecret(ourPrivKey, remotePubKey, shared))
+    {
+        mbedtls_platform_zeroize(shared, 32);
         return false;
     }
+    // Meshtastic: crypto->hash(shared_key, 32) — SHA-256 of raw ECDH output
+    const bool ok = mc_sha256(shared, 32, keyOut);
+    mbedtls_platform_zeroize(shared, 32);
+    return ok;
+}
+
+// ── mc_pkcEncrypt — AES-256-CCM (M=8, L=2) ──────────────────────────────
+bool mc_pkcEncrypt(const uint8_t ourPrivKey[32], const uint8_t remotePubKey[32],
+                   uint32_t packetId, uint32_t fromNode, uint32_t toNode,
+                   const uint8_t* in, size_t len, uint8_t* out)
+{
+    uint8_t key[32] = {};
+    if (!_derivePkcKey(ourPrivKey, remotePubKey, key))
+        return false;
+
+    uint8_t ccmNonce[13];
+    _buildPkcNonce(packetId, fromNode, toNode, ccmNonce);
+
+    // out layout: [ciphertext (len)] [8-byte CCM tag] [4-byte extraNonce LE]
+    uint8_t tag[8] = {};
+
+    mbedtls_ccm_context ccm;
+    mbedtls_ccm_init(&ccm);
+    bool ok = false;
+    if (mbedtls_ccm_setkey(&ccm, MBEDTLS_CIPHER_ID_AES, key, 256) == 0)
+    {
+        ok = (mbedtls_ccm_encrypt_and_tag(&ccm,
+                len,                    // plaintext length
+                ccmNonce, 13,           // nonce (13 bytes → L=2)
+                nullptr, 0,             // no AAD
+                in, out,                // plaintext → ciphertext
+                tag, 8) == 0);         // M=8 tag
+    }
+    mbedtls_ccm_free(&ccm);
+    mbedtls_platform_zeroize(key, 32);
+
+    if (ok)
+    {
+        // Append tag + extraNonce after ciphertext
+        memcpy(out + len, tag, 8);
+        out[len + 8]  = static_cast<uint8_t>(toNode);
+        out[len + 9]  = static_cast<uint8_t>(toNode >>  8);
+        out[len + 10] = static_cast<uint8_t>(toNode >> 16);
+        out[len + 11] = static_cast<uint8_t>(toNode >> 24);
+    }
+    return ok;
+}
+
+// ── mc_pkcDecrypt — AES-256-CCM (M=8, L=2) ──────────────────────────────
+bool mc_pkcDecrypt(const uint8_t ourPrivKey[32], const uint8_t remotePubKey[32],
+                   uint32_t packetId, uint32_t fromNode,
+                   const uint8_t* in, size_t len, uint8_t* out)
+{
+    if (len < MC_PKC_OVERHEAD) return false;
+
+    // Extract extraNonce from last 4 bytes of the wire payload
+    const size_t cipherLen = len - MC_PKC_OVERHEAD;  // actual ciphertext size
+    const uint8_t* tag         = in + cipherLen;     // 8-byte CCM auth tag
+    const uint8_t* extraBytes  = in + cipherLen + 8; // 4-byte extraNonce
+    const uint32_t extraNonce  = (uint32_t)extraBytes[0]
+                               | (uint32_t)extraBytes[1] <<  8
+                               | (uint32_t)extraBytes[2] << 16
+                               | (uint32_t)extraBytes[3] << 24;
+
+    uint8_t key[32] = {};
+    if (!_derivePkcKey(ourPrivKey, remotePubKey, key))
+        return false;
+
+    uint8_t ccmNonce[13];
+    _buildPkcNonce(packetId, fromNode, extraNonce, ccmNonce);
+
+    mbedtls_ccm_context ccm;
+    mbedtls_ccm_init(&ccm);
+    bool ok = false;
+    if (mbedtls_ccm_setkey(&ccm, MBEDTLS_CIPHER_ID_AES, key, 256) == 0)
+    {
+        ok = (mbedtls_ccm_auth_decrypt(&ccm,
+                cipherLen,              // ciphertext length (without tag/extraNonce)
+                ccmNonce, 13,           // nonce (13 bytes → L=2)
+                nullptr, 0,             // no AAD
+                in, out,                // ciphertext → plaintext
+                tag, 8) == 0);         // verify 8-byte tag
+    }
+    mbedtls_ccm_free(&ccm);
+    mbedtls_platform_zeroize(key, 32);
+    return ok;
+}
+
+// ── mc_pkcDecryptCcmEx — flexible AES-256-CCM decrypt ─────────────────────
+// Wire layout: [ciphertext(wireLen - tagSize)] [tag(tagSize)].
+// ExtraNonce is provided explicitly (not extracted from wire).
+bool mc_pkcDecryptCcmEx(const uint8_t key[32],
+                        uint32_t packetId, uint32_t fromNode,
+                        uint32_t extraNonce,
+                        const uint8_t* in, size_t wireLen,
+                        uint8_t* out, size_t tagSize)
+{
+    if (wireLen <= tagSize) return false;
+    if (tagSize != 4 && tagSize != 6 && tagSize != 8 &&
+        tagSize != 10 && tagSize != 12 && tagSize != 14 && tagSize != 16)
+        return false;
+
+    const size_t cipherLen = wireLen - tagSize;
+    const uint8_t* tag     = in + cipherLen;
+
+    uint8_t ccmNonce[13];
+    _buildPkcNonce(packetId, fromNode, extraNonce, ccmNonce);
+
+    mbedtls_ccm_context ccm;
+    mbedtls_ccm_init(&ccm);
+    bool ok = false;
+    if (mbedtls_ccm_setkey(&ccm, MBEDTLS_CIPHER_ID_AES, key, 256) == 0)
+    {
+        ok = (mbedtls_ccm_auth_decrypt(&ccm,
+                cipherLen,
+                ccmNonce, 13,
+                nullptr, 0,
+                in, out,
+                tag, tagSize) == 0);
+    }
+    mbedtls_ccm_free(&ccm);
+    return ok;
+}
+
+// ── mc_pkcDecryptCcmFlex — CCM with variable nonce length ─────────────────
+// Accepts pre-built nonce of any valid CCM length (7-13 bytes).
+// Wire = [ciphertext(wireLen - tagSize)] [tag(tagSize)].
+bool mc_pkcDecryptCcmFlex(const uint8_t key[32],
+                          const uint8_t* nonce, size_t nonceLen,
+                          const uint8_t* in, size_t wireLen,
+                          uint8_t* out, size_t tagSize)
+{
+    if (wireLen <= tagSize) return false;
+    if (nonceLen < 7 || nonceLen > 13) return false;
+
+    const size_t cipherLen = wireLen - tagSize;
+    const uint8_t* tag     = in + cipherLen;
+
+    mbedtls_ccm_context ccm;
+    mbedtls_ccm_init(&ccm);
+    bool ok = false;
+    if (mbedtls_ccm_setkey(&ccm, MBEDTLS_CIPHER_ID_AES, key, 256) == 0)
+    {
+        ok = (mbedtls_ccm_auth_decrypt(&ccm,
+                cipherLen,
+                nonce, nonceLen,
+                nullptr, 0,
+                in, out,
+                tag, tagSize) == 0);
+    }
+    mbedtls_ccm_free(&ccm);
+    return ok;
+}
+
+// ── mc_pkcDecryptGcm — AES-256-GCM decrypt ───────────────────────────────
+// Wire = [ciphertext(wireLen - tagSize)] [tag(tagSize)].
+// IV is typically 12 bytes for GCM.
+bool mc_pkcDecryptGcm(const uint8_t key[32],
+                      const uint8_t* iv, size_t ivLen,
+                      const uint8_t* in, size_t wireLen,
+                      uint8_t* out, size_t tagSize)
+{
+    if (wireLen <= tagSize) return false;
+
+    const size_t cipherLen = wireLen - tagSize;
+    const uint8_t* tag     = in + cipherLen;
+
+    mbedtls_gcm_context gcm;
+    mbedtls_gcm_init(&gcm);
+    bool ok = false;
+    if (mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, key, 256) == 0)
+    {
+        ok = (mbedtls_gcm_auth_decrypt(&gcm,
+                cipherLen,
+                iv, ivLen,
+                nullptr, 0,     // no AAD
+                tag, tagSize,
+                in, out) == 0);
+    }
+    mbedtls_gcm_free(&gcm);
+    return ok;
+}
+
+// ── mc_pkcDecryptCtr — AES-256-CTR with 4-byte extraNonce ────────────────
+// Fallback for firmware that uses CTR instead of CCM for PKC.
+// Wire layout: [ciphertext(len-4)] [4-byte extraNonce].
+// No authentication tag — caller MUST validate decrypted output.
+bool mc_pkcDecryptCtr(const uint8_t ourPrivKey[32], const uint8_t remotePubKey[32],
+                      uint32_t packetId, uint32_t fromNode,
+                      const uint8_t* in, size_t len, uint8_t* out)
+{
+    if (len <= MC_PKC_CTR_OVERHEAD) return false;
+
+    const size_t plainLen = len - MC_PKC_CTR_OVERHEAD;
+    const uint8_t* extraBytes = in + plainLen;
+    const uint32_t extraNonce = (uint32_t)extraBytes[0]
+                              | (uint32_t)extraBytes[1] <<  8
+                              | (uint32_t)extraBytes[2] << 16
+                              | (uint32_t)extraBytes[3] << 24;
+
+    uint8_t key[32] = {};
+    if (!_derivePkcKey(ourPrivKey, remotePubKey, key))
+        return false;
+
+    // Full 16-byte CTR nonce: [packetId(4)|0(4)|fromNode(4)|extraNonce(4)]
+    uint8_t nonce[16];
+    mc_buildNonce(packetId, fromNode, nonce);
+    nonce[12] = static_cast<uint8_t>(extraNonce);
+    nonce[13] = static_cast<uint8_t>(extraNonce >>  8);
+    nonce[14] = static_cast<uint8_t>(extraNonce >> 16);
+    nonce[15] = static_cast<uint8_t>(extraNonce >> 24);
+
+    const bool ok = mc_aes256ctr(key, nonce, in, plainLen, out);
+    mbedtls_platform_zeroize(key, 32);
+    return ok;
+}
+
+// ── mc_pkcDecryptCtrRaw — AES-256-CTR with no extraNonce ─────────────────
+// Wire payload is entirely ciphertext.  Nonce = [pktId|0|fromNode|0].
+bool mc_pkcDecryptCtrRaw(const uint8_t ourPrivKey[32], const uint8_t remotePubKey[32],
+                         uint32_t packetId, uint32_t fromNode,
+                         const uint8_t* in, size_t len, uint8_t* out)
+{
+    if (len == 0) return false;
+
+    uint8_t key[32] = {};
+    if (!_derivePkcKey(ourPrivKey, remotePubKey, key))
+        return false;
 
     uint8_t nonce[16];
     mc_buildNonce(packetId, fromNode, nonce);
+    // nonce[12:15] remain 0 — no extraNonce
 
-    const bool ok = mc_aes256ctr(sharedSecret, nonce, in, len, out);
-    mbedtls_platform_zeroize(sharedSecret, 32);
+    const bool ok = mc_aes256ctr(key, nonce, in, len, out);
+    mbedtls_platform_zeroize(key, 32);
     return ok;
 }

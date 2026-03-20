@@ -185,10 +185,9 @@ size_t mc_encodeData(uint8_t* buf, size_t /*cap*/,
     // source (field 5) intentionally omitted — only relay nodes set it
 
     if (requestId != 0)
-    {
         writeFixed32(0x35, requestId);                  // Field 6: request_id ← tag 0x35 NOT 0x3D
-        buf[n++] = 0x48; buf[n++] = 0x00;              // Field 9: ok_to_mqtt = false
-    }
+
+    buf[n++] = 0x48; buf[n++] = 0x00;              // Field 9: ok_to_mqtt = false (always)
 
     return n;
 }

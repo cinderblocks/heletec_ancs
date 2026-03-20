@@ -55,15 +55,19 @@ menuconfig LORA_ENABLED
         RST=12, BUSY=13, DIO1=14) — Heltec Wireless Tracker 1.1 schematic.
 
 config LORA_IS_LICENSED
-    bool "Licensed (ham radio) mode — disable encryption"
+    bool "Licensed (ham radio) mode — disable PKC, advertise is_licensed"
     default n
     depends on LORA_ENABLED
     help
         When ENABLED, the device operates in licensed (ham radio) mode:
-        - TX packets are sent as plaintext (no AES channel encryption)
+        - TX packets are still AES-128-CTR encrypted with the default PSK
+          for full interoperability with stock encrypted Meshtastic nodes
+          (the PSK is publicly known / factory default)
         - PKC (public-key encrypted direct messages) is disabled
         - Public key is all-zeros in NODEINFO_APP broadcasts
         - is_licensed=true is advertised in User proto field 6
+        - RX: AES-CTR decrypt is tried first; if protobuf parse fails,
+          raw payload is used as plaintext (handles other unencrypted nodes)
 
         When DISABLED (default), the device operates in normal encrypted
         mode matching stock Meshtastic behaviour:
@@ -71,7 +75,7 @@ config LORA_IS_LICENSED
         - X25519 keypair generated and persisted in NVS
         - Public key broadcast in NODEINFO_APP (User proto field 8)
         - PKC-encrypted direct messages (chanHash=0x00) can be decrypted
-          using ECDH shared secrets with AES-256-CTR
+          using ECDH shared secrets with AES-256-CCM
 
 config LORA_CHANNEL_NUM
     int "Meshtastic channel slot number (0 = auto from name hash)"

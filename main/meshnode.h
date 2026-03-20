@@ -100,7 +100,7 @@ public:
      * 32-byte X25519 private key.
      * Valid only when hasPkcKeys() returns true (encrypted mode).
      * Used by _decryptPkc() in meshtastic_proto.cxx to pass directly to
-     * mc_pkcCrypt() without going through computeSharedSecret().
+     * mc_pkcDecrypt() without going through computeSharedSecret().
      * NOTE: never expose this over BLE or log it.
      */
     const uint8_t* privateKey() const { return _privateKey; }

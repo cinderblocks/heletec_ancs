@@ -154,11 +154,21 @@ static constexpr uint16_t IRQ_TX_MASK   = IRQ_TX_DONE | IRQ_TIMEOUT;
 // ── Meshtastic OTA protocol constants ────────────────────────────────────
 
 // DEFAULT_CHAN_HASH: 1-byte channel hash placed in OTA header byte [13].
-// Default "LongFast" channel:
+// Default "LongFast" channel with the default AES-128 PSK:
 //   xorHash("LongFast", 8) = 0x0A
 //   xorHash(expanded_default_PSK, 16) = 0x02
 //   hash = 0x0A ^ 0x02 = 0x08
+//
+// Always use this on TX so stock encrypted Meshtastic nodes match it to
+// their encrypted "LongFast" channel and AES-CTR decrypt our payload.
 static constexpr uint8_t DEFAULT_CHAN_HASH = 0x08;
+
+// UNENCRYPTED_CHAN_HASH: hash for a channel with an EMPTY PSK.
+//   xorHash("LongFast", 8) = 0x0A,  xorHash("", 0) = 0x00
+//   hash = 0x0A ^ 0x00 = 0x0A
+// Used when matching RX packets from other truly-unencrypted nodes.
+// NOT used on TX (stock encrypted nodes would ignore it).
+static constexpr uint8_t UNENCRYPTED_CHAN_HASH = 0x0A;
 
 // HW_MODEL: Meshtastic HardwareModel enum value for this board.
 // meshtastic_HardwareModel_HELTEC_WIRELESS_TRACKER = 48 (mesh.proto)

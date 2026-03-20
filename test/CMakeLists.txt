@@ -127,9 +127,10 @@ add_firmware_test(test_mesh_codec
 )
 
 # ── test_mesh_crypto ──────────────────────────────────────────────────────
-# Tests AES-128-CTR, AES-256-CTR, X25519 key derivation, X25519 ECDH, and
-# PKC DM round-trips using NIST SP 800-38A and RFC 7748 known test vectors.
-# Requires mbedtls (AES-CTR + Curve25519 ECDH).
+# Tests AES-128-CTR, AES-256-CTR, AES-256-CCM, SHA-256, X25519 key
+# derivation, X25519 ECDH, and PKC DM round-trips using NIST SP 800-38A
+# and RFC 7748 known test vectors.
+# Requires mbedtls (AES-CTR + AES-CCM + SHA-256).
 if(MBEDTLS_FOUND)
     add_executable(test_mesh_crypto
         test_mesh_crypto.cxx

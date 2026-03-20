@@ -106,13 +106,14 @@ void MeshNode::init()
 
     // ── PKC keypair (encrypted mode) or all-zeros (licensed mode) ──────────
 #if CONFIG_LORA_IS_LICENSED
-    // IsLicensed mode — no encryption.
+    // IsLicensed mode — no PKC (public-key direct messages).
+    // Channel AES-128-CTR encryption is still used on TX for interop.
     // Public key is all-zeros; no private key is generated or stored.
     memset(_publicKey, 0, 32);
     memset(_privateKey, 0, 32);
     _hasPkcKeys = false;
 
-    ESP_LOGI(TAG, "Node ID: %s  short: \"%s\"  long: \"%s\"  (IsLicensed, no encryption)",
+    ESP_LOGI(TAG, "Node ID: %s  short: \"%s\"  long: \"%s\"  (IsLicensed, no PKC)",
              _nodeIdStr, _shortName, _longName);
 #else
     // Encrypted mode — generate or load a persistent X25519 keypair.

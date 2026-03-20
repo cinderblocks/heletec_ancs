@@ -1190,11 +1190,13 @@ void LoRa::_processPacket(const uint8_t* buf, uint8_t pktLen,
             ESP_LOGI(TAG,
                 "Position from 0x%08" PRIx32
                 " lat=%.5f lon=%.5f alt=%dm sats=%" PRIu32
+                " spd=%" PRIu32 "cm/s hdg=%.2f"
                 " rssi=%d snr=%.1f",
                 from,
                 (double)pos.lat_i / 1e7,
                 (double)pos.lon_i / 1e7,
                 (int)pos.alt_m, pos.sats,
+                pos.speed_cm_s, (double)pos.track_x100 / 100.0,
                 rssi, (double)snr);
 
             portENTER_CRITICAL(&_statsLock);
@@ -1221,9 +1223,11 @@ void LoRa::_processPacket(const uint8_t* buf, uint8_t pktLen,
             ESP_LOGI(TAG,
                 "NodeInfo from 0x%08" PRIx32
                 " id=%s long=\"%s\" short=\"%s\" hw=%" PRIu32
+                " role=%u licensed=%d"
                 " rssi=%d snr=%.1f want_resp=%d pubkey=%s",
                 from,
                 user.id, user.longName, user.shortName, user.hwModel,
+                (unsigned)user.role, (int)user.isLicensed,
                 rssi, (double)snr, (int)wantResp,
                 user.hasPublicKey ? "yes" : "no");
 

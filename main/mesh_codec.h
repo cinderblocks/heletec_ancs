@@ -48,29 +48,36 @@ struct MeshMessage {
 };
 
 struct MeshPosition {
-    uint32_t fromNode  = 0;
-    int32_t  lat_i     = 0;   ///< latitude  × 1e7 (degrees)
-    int32_t  lon_i     = 0;   ///< longitude × 1e7 (degrees)
-    int32_t  alt_m     = 0;   ///< altitude metres above MSL
-    uint32_t sats      = 0;
-    int16_t  rssi      = 0;
-    float    snr       = 0.f;
-    uint32_t unixTime  = 0;   ///< timestamp from Position proto (0 if absent)
-    uint32_t lastSeen  = 0;   ///< xTaskGetTickCount() when last updated (uint32_t = TickType_t on ESP32)
-    bool     valid     = false;
+    uint32_t fromNode    = 0;
+    int32_t  lat_i       = 0;   ///< latitude  × 1e7 (degrees)
+    int32_t  lon_i       = 0;   ///< longitude × 1e7 (degrees)
+    int32_t  alt_m       = 0;   ///< altitude metres above MSL
+    uint32_t sats        = 0;
+    uint32_t speed_cm_s  = 0;   ///< ground speed in cm/s (field 10)
+    uint32_t track_x100  = 0;   ///< ground track (heading) × 100 in 0.01° (field 11)
+    int16_t  rssi        = 0;
+    float    snr         = 0.f;
+    uint32_t unixTime    = 0;   ///< timestamp from Position proto (0 if absent)
+    uint32_t lastSeen    = 0;   ///< xTaskGetTickCount() when last updated (uint32_t = TickType_t on ESP32)
+    bool     valid       = false;
 };
 
 struct MeshUser {
-    uint32_t fromNode     = 0;
-    char     id[12]       = {}; ///< "!xxxxxxxx\0"
-    char     longName[33] = {};
-    char     shortName[5] = {};
-    uint32_t hwModel      = 0;
-    uint8_t  publicKey[32]= {}; ///< X25519 public key (field 8), for PKC decryption
-    bool     hasPublicKey = false;
-    int16_t  rssi         = 0;
-    float    snr          = 0.f;
-    bool     valid        = false;
+    uint32_t fromNode       = 0;
+    char     id[12]         = {}; ///< "!xxxxxxxx\0"
+    char     longName[33]   = {};
+    char     shortName[5]   = {};
+    uint8_t  macaddr[6]     = {}; ///< BT MAC address (field 4)
+    bool     hasMacaddr     = false;
+    uint32_t hwModel        = 0;
+    bool     isLicensed     = false; ///< User proto field 6
+    uint8_t  role           = 0;     ///< DeviceRole enum (field 7): 0=CLIENT, 5=TRACKER
+    uint8_t  publicKey[32]  = {};    ///< X25519 public key (field 8), for PKC decryption
+    bool     hasPublicKey   = false;
+    bool     isUnmessageable= false; ///< User proto field 9
+    int16_t  rssi           = 0;
+    float    snr            = 0.f;
+    bool     valid          = false;
 };
 
 // ── Protobuf encoder primitives ───────────────────────────────────────────
@@ -202,14 +209,30 @@ bool mc_parseData(const uint8_t* data, size_t len,
  *
  * Returns true when at least lat_i/lon_i were found.
  *
- * Correct field mapping (Meshtastic firmware 2.5+):
- *   time       → field 4 (sfixed32)  ← NOT field 9 (pos_flags varint)
- *   sats       → field 14 (varint)   ← NOT field 7 (google_plus_code string)
+ * Decoded fields:
+ *   lat_i       ← field 1  (sfixed32)
+ *   lon_i       ← field 2  (sfixed32)
+ *   alt_m       ← field 3  (int32 varint)
+ *   unixTime    ← field 4  (fixed32)   ← NOT field 9 (pos_flags varint)
+ *   speed_cm_s  ← field 10 (uint32 varint, ground_speed in cm/s)
+ *   track_x100  ← field 11 (uint32 varint, ground_track heading × 100)
+ *   sats        ← field 14 (uint32 varint) ← NOT field 7 (google_plus_code string)
  */
 bool mc_parsePosition(const uint8_t* data, size_t len, MeshPosition& pos);
 
 /**
  * Decode a Meshtastic User (NodeInfo) proto.
  * Returns true when the id field (field 1) was found.
+ *
+ * Decoded fields:
+ *   id              ← field 1  (string)
+ *   longName        ← field 2  (string)
+ *   shortName       ← field 3  (string)
+ *   macaddr         ← field 4  (bytes, 6)  — sets hasMacaddr when length==6
+ *   hwModel         ← field 5  (varint)
+ *   isLicensed      ← field 6  (bool varint)
+ *   role            ← field 7  (varint, DeviceRole enum)
+ *   publicKey       ← field 8  (bytes, 32) — sets hasPublicKey when length==32
+ *   isUnmessageable ← field 9  (bool varint)
  */
 bool mc_parseUser(const uint8_t* data, size_t len, MeshUser& user);

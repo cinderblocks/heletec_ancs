@@ -135,17 +135,21 @@ size_t mc_encodeUser(uint8_t* buf, size_t /*cap*/,
     buf[n++] = 0x28;                             // Field 5: hw_model (varint)
     n += mc_pbVarint(buf + n, hwModel);
 
+    // Fields 6–8 must be emitted in ascending order to match Meshtastic
+    // v2.7.15 nanopb output.  is_licensed and public_key are mutually
+    // exclusive: licensed mode sets field 6 and suppresses field 8.
+    if (isLicensed)
+    {
+        buf[n++] = 0x30; buf[n++] = 0x01;       // Field 6: is_licensed = true
+    }
+
     if (deviceRole != 0)
     {
         buf[n++] = 0x38;                         // Field 7: role (varint)
         n += mc_pbVarint(buf + n, deviceRole);
     }
 
-    if (isLicensed)
-    {
-        buf[n++] = 0x30; buf[n++] = 0x01;       // Field 6: is_licensed = true
-    }
-    else if (publicKey != nullptr)
+    if (!isLicensed && publicKey != nullptr)
     {
         n += mc_pbLenField(buf + n, 0x42, publicKey, 32); // Field 8: public_key (32 bytes)
     }
@@ -378,9 +382,11 @@ bool mc_parsePosition(const uint8_t* data, size_t len, MeshPosition& pos)
                 vs += 7; if (vs > 63) return false;
             }
             switch (field) {
-                case 3:  pos.alt_m = (int32_t)(int64_t)val; break;
+                case 3:  pos.alt_m      = (int32_t)(int64_t)val; break;
+                case 10: pos.speed_cm_s = (uint32_t)val; break;  // ground_speed
+                case 11: pos.track_x100 = (uint32_t)val; break;  // ground_track
                 // field 9 = pos_flags (varint) — NOT time; skip silently
-                case 14: pos.sats  = (uint32_t)val; break;  // NOT field 7
+                case 14: pos.sats       = (uint32_t)val; break;  // NOT field 7
                 default: break;
             }
         }
@@ -460,7 +466,12 @@ bool mc_parseUser(const uint8_t* data, size_t len, MeshUser& user)
                     snprintf(user.shortName, sizeof(user.shortName), "%.*s",
                              (int)std::min(slen, (uint64_t)(sizeof(user.shortName) - 1)), src);
                     break;
-                case 4: break; // macaddr — skip
+                case 4:
+                    if (slen == 6) {
+                        memcpy(user.macaddr, src, 6);
+                        user.hasMacaddr = true;
+                    }
+                    break;
                 case 8:
                     if (slen == 32) { memcpy(user.publicKey, src, 32); user.hasPublicKey = true; }
                     break;
@@ -472,7 +483,13 @@ bool mc_parseUser(const uint8_t* data, size_t len, MeshUser& user)
         {
             uint64_t val = 0;
             if (!readVarint(val)) return false;
-            if (field == 5) user.hwModel = (uint32_t)val;
+            switch (field) {
+                case 5: user.hwModel        = (uint32_t)val; break;
+                case 6: user.isLicensed     = (val != 0);    break;
+                case 7: user.role           = (uint8_t)val;  break;
+                case 9: user.isUnmessageable= (val != 0);    break;
+                default: break;
+            }
         }
         else if (wireType == 5) { if (p + 4 > len) return false; p += 4; }
         else if (wireType == 1) { if (p + 8 > len) return false; p += 8; }

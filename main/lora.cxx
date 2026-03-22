@@ -38,6 +38,7 @@
 #include "sdkconfig.h"
 
 #include <esp_log.h>
+#include <esp_random.h>
 #include <esp_rom_sys.h>
 #include <driver/spi_master.h>
 #include <driver/gpio.h>
@@ -157,12 +158,23 @@ void LoRa::run(void* /*data*/)
         (uint32_t)CONFIG_LORA_POSITION_TX_INTERVAL_SEC * 1000UL);
     _lastPosTxTick = xTaskGetTickCount() - posTxInterval;
 
-    // NodeInfo interval — boot broadcast: 3 retransmits at 15 s intervals
-    // before settling to the configured period.  Gives nearby nodes 3 chances
-    // to receive our identity packet in the first 30 s.
+    // NodeInfo interval — boot broadcast with want_response=true so that
+    // nearby nodes immediately reply with their own NODEINFO.  This is the
+    // standard Meshtastic bidirectional discovery mechanism: when a peer
+    // receives our want_response=true packet, their firmware replies with
+    // their own NODEINFO, which causes both nodes to appear in each other's
+    // databases and the Meshtastic app node list.
+    //
+    // Random jitter (0–2 s) before the first TX reduces collision probability
+    // when multiple nodes boot simultaneously (e.g. after a power cycle).
     const TickType_t nodeInfoInterval = pdMS_TO_TICKS(
         (uint32_t)CONFIG_LORA_NODEINFO_TX_INTERVAL_SEC * 1000UL);
-    sendNodeInfo();
+    {
+        const uint32_t jitterMs = esp_random() % 2000u;
+        ESP_LOGD(TAG, "Boot NODEINFO TX jitter: %" PRIu32 " ms", jitterMs);
+        vTaskDelay(pdMS_TO_TICKS(jitterMs));
+    }
+    sendNodeInfo(/*to=*/0xFFFFFFFF, /*wantResponse=*/true);
     _nodeInfoBootCount = 1;
     _lastNodeInfoTxTick = xTaskGetTickCount()
                         - nodeInfoInterval
@@ -405,11 +417,16 @@ void LoRa::run(void* /*data*/)
         // ── Periodic NodeInfo broadcast ───────────────────────────────────
         if ((xTaskGetTickCount() - _lastNodeInfoTxTick) >= nodeInfoInterval)
         {
-            sendNodeInfo();
+            // Use want_response=true during the boot discovery window (first 4
+            // broadcasts) to prompt bidirectional exchanges with nearby nodes.
+            // After that, want_response=false to avoid unnecessary traffic.
+            const bool wantResp = (_nodeInfoBootCount < 4);
+            sendNodeInfo(/*to=*/0xFFFFFFFF, wantResp);
             _nodeInfoBootCount++;
-            // First 3 broadcasts: 15 s retransmit window for reliable boot
-            // discovery.  From the 4th onward: normal configured interval.
-            const TickType_t nextNI = (_nodeInfoBootCount < 3)
+            // First 4 broadcasts: 15 s retransmit window for reliable boot
+            // discovery (boot + 3 retransmits = 4 total).
+            // From the 5th onward: normal configured interval.
+            const TickType_t nextNI = (_nodeInfoBootCount < 4)
                 ? pdMS_TO_TICKS(15 * 1000UL)
                 : nodeInfoInterval;
             _lastNodeInfoTxTick = xTaskGetTickCount()

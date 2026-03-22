@@ -83,9 +83,10 @@ public:
     const char* longName() const { return _longName; }
 
     /**
-     * 6-byte Bluetooth MAC address (same source as node ID derivation).
-     * Used for User proto field 4 (macaddr) for compatibility with older
-     * Meshtastic firmware.
+     * 6-byte WiFi STA MAC address (same source as node ID derivation).
+     * Used for User proto field 4 (macaddr).  Must come from ESP_MAC_WIFI_STA
+     * (the base eFuse MAC) to match what Meshtastic firmware uses when
+     * deriving nodeNum for the same chip.
      */
     const uint8_t* macaddr() const { return _mac; }
 

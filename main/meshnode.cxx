@@ -41,11 +41,19 @@ static const char* NVS_KEY_PRIVKEY = "privkey";
 // ── init ──────────────────────────────────────────────────────────────────
 void MeshNode::init()
 {
-    // ── Derive node ID from BT MAC (lower 4 bytes) ────────────────────────
-    // esp_read_mac(ESP_MAC_BT) returns the Bluetooth MAC directly, matching
-    // exactly the node ID a stock Meshtastic build would assign to this chip.
+    // ── Derive node ID from WiFi STA MAC (lower 4 bytes) ──────────────────
+    // Meshtastic firmware derives nodeNum from ESP_MAC_WIFI_STA (the base
+    // eFuse MAC), NOT ESP_MAC_BT.  On ESP32-S3 the two MACs differ by +1 in
+    // the last byte, so using ESP_MAC_BT would generate a node ID that no
+    // stock Meshtastic node would ever assign to this chip — causing the User
+    // proto "id" field ("!xxxxxxxx") to disagree with the OTA "from" field
+    // that a receiving node sees, and some firmware builds discard the NODEINFO.
+    //
+    // The macaddr field (User proto field 4) must also come from WIFI_STA to
+    // match what Meshtastic derives when it computes a node's BLE address
+    // from the factory MAC for display purposes.
     uint8_t mac[6] = {};
-    esp_read_mac(mac, ESP_MAC_BT);
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
     memcpy(_mac, mac, 6);
 
     _nodeId = (static_cast<uint32_t>(mac[2]) << 24)

@@ -547,26 +547,37 @@ bool LoRa::sendNodeInfo(uint32_t to, bool wantResponse, uint32_t requestId)
                                         Node.nodeId(),
                                         Node.longName(),
                                         Node.shortName());
-    if (userLen == 0) return false;
+    if (userLen == 0) {
+        ESP_LOGW(TAG, "sendNodeInfo: _encodeUser returned 0 — nothing to send");
+        return false;
+    }
 
     uint8_t pkt[256] = {};
     uint8_t pktLen   = 0;
     if (!_buildTxPacket(pkt, pktLen, PORT_NODEINFO, userBuf, userLen,
-                        wantResponse, to, requestId)) return false;
+                        wantResponse, to, requestId)) {
+        ESP_LOGW(TAG, "sendNodeInfo: _buildTxPacket failed");
+        return false;
+    }
 
-    ESP_LOGI(TAG,
-        "TX NODEINFO id=%s long=\"%s\" short=\"%s\""
-        " hw=%u role=%u licensed=%d pkc=%s unmsg=%d"
-        " to=0x%08" PRIx32 " want_resp=%d req_id=0x%08" PRIx32 " pktlen=%u",
-        Node.nodeIdStr(), Node.longName(), Node.shortName(),
-        (unsigned)HW_MODEL,
-        (unsigned)CONFIG_MESH_NODE_ROLE,
-        (int)CONFIG_LORA_IS_LICENSED,
-        Node.hasPkcKeys() ? "yes" : "no",
-        0,   // is_unmessageable is always false for this firmware (has display + ANCS)
-        to, (int)wantResponse, requestId, (unsigned)pktLen);
-
-    return transmit(pkt, pktLen);
+    const bool ok = transmit(pkt, pktLen);
+    if (ok) {
+        ESP_LOGI(TAG,
+            "TX NODEINFO ok: id=%s long=\"%s\" short=\"%s\""
+            " hw=%u role=%u licensed=%d pkc=%s"
+            " to=0x%08" PRIx32 " want_resp=%d req_id=0x%08" PRIx32 " pktlen=%u",
+            Node.nodeIdStr(), Node.longName(), Node.shortName(),
+            (unsigned)HW_MODEL,
+            (unsigned)CONFIG_MESH_NODE_ROLE,
+            (int)CONFIG_LORA_IS_LICENSED,
+            Node.hasPkcKeys() ? "yes" : "no",
+            to, (int)wantResponse, requestId, (unsigned)pktLen);
+    } else {
+        ESP_LOGW(TAG,
+            "TX NODEINFO FAILED: id=%s to=0x%08" PRIx32 " pktlen=%u",
+            Node.nodeIdStr(), to, (unsigned)pktLen);
+    }
+    return ok;
 }
 
 // ── sendKeyVerification ───────────────────────────────────────────────────

@@ -534,3 +534,68 @@ bool mc_parseUser(const uint8_t* data, size_t len, MeshUser& user)
     }
     return gotId;
 }
+
+// ── mc_parseNodeStatus ────────────────────────────────────────────────────
+// Decode a Meshtastic NodeStatus proto (NODE_STATUS_APP, portnum 75).
+//
+// meshtastic/mesh.proto NodeStatus message (2.7.x):
+//   Field 1 (uptime,            uint32, varint): tag 0x08
+//   Field 2 (is_mqtt_connected, bool,   varint): tag 0x10
+//   Field 3 (is_router,         bool,   varint): tag 0x18
+//
+// All fields are optional in proto3.  A node that is not an MQTT gateway and
+// does not have a router role will typically only send field 1 (uptime).
+
+bool mc_parseNodeStatus(const uint8_t* data, size_t len, MeshNodeStatus& status)
+{
+    if (data == nullptr || len == 0) return false;
+
+    size_t p = 0;
+    bool gotUptime = false;
+
+    auto readVarint = [&](uint64_t& out) -> bool {
+        out = 0; int s = 0;
+        while (p < len) {
+            uint8_t b = data[p++];
+            out |= (uint64_t)(b & 0x7F) << s;
+            if (!(b & 0x80)) return true;
+            s += 7; if (s > 63) return false;
+        }
+        return false;
+    };
+
+    while (p < len)
+    {
+        uint64_t tag64 = 0;
+        if (!readVarint(tag64)) break;
+        const uint32_t field    = (uint32_t)(tag64 >> 3);
+        const uint8_t  wireType = (uint8_t)(tag64 & 0x07);
+
+        if (wireType == 0) // varint
+        {
+            uint64_t val = 0;
+            if (!readVarint(val)) return false;
+            switch (field) {
+                case 1: status.uptimeSec       = (uint32_t)val; gotUptime = true; break;
+                case 2: status.isMqttConnected = (val != 0);    break;
+                case 3: status.isRouter        = (val != 0);    break;
+                default: break;
+            }
+        }
+        else if (wireType == 2) // length-delimited — skip unknown
+        {
+            uint64_t slen = 0;
+            if (!readVarint(slen)) return false;
+            if (p + slen > len) return false;
+            p += (size_t)slen;
+        }
+        else if (wireType == 5) { if (p + 4 > len) return false; p += 4; }
+        else if (wireType == 1) { if (p + 8 > len) return false; p += 8; }
+        else return false;
+    }
+
+    // A NodeStatus is considered valid even when uptime==0 (just-booted node),
+    // as long as we successfully parsed the message.  We track gotUptime to
+    // distinguish "field 1 present and zero" from "empty / corrupt payload".
+    return gotUptime;
+}

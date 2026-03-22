@@ -715,10 +715,11 @@ bool LoRa::sendMapReport()
 
 // ── _upsertNeighbor ───────────────────────────────────────────────────────
 // Insert or update the neighbour table entry for fromNode.
-// pos/user may be nullptr to leave that field unchanged on an existing entry.
+// pos / user / nodeStatus may each be nullptr to leave that field unchanged.
 void LoRa::_upsertNeighbor(uint32_t fromNode,
-                             const MeshPosition* pos,
-                             const MeshUser*     user)
+                             const MeshPosition*   pos,
+                             const MeshUser*       user,
+                             const MeshNodeStatus* nodeStatus)
 {
     portENTER_CRITICAL(&_neighborLock);
 
@@ -730,7 +731,8 @@ void LoRa::_upsertNeighbor(uint32_t fromNode,
     {
         if (_neighbors[i].occupied &&
             (_neighbors[i].pos.fromNode == fromNode ||
-             _neighbors[i].user.fromNode == fromNode))
+             _neighbors[i].user.fromNode == fromNode ||
+             _neighbors[i].nodeStatus.fromNode == fromNode))
         {
             slot = i;
             break;
@@ -745,15 +747,15 @@ void LoRa::_upsertNeighbor(uint32_t fromNode,
     }
     if (slot == -1) slot = oldestSlot;
 
-    // Clear stale data from a different node so their public key doesn't
-    // leak into this entry (e.g. on eviction of an old neighbour).
     const bool isExisting = _neighbors[slot].occupied &&
         (_neighbors[slot].pos.fromNode == fromNode ||
-         _neighbors[slot].user.fromNode == fromNode);
+         _neighbors[slot].user.fromNode == fromNode ||
+         _neighbors[slot].nodeStatus.fromNode == fromNode);
     if (!isExisting)
         _neighbors[slot] = {};
 
     _neighbors[slot].occupied = true;
+
     if (pos)
     {
         _neighbors[slot].pos           = *pos;
@@ -765,19 +767,37 @@ void LoRa::_upsertNeighbor(uint32_t fromNode,
     {
         _neighbors[slot].pos.fromNode = fromNode;
     }
+
     if (user)
     {
         _neighbors[slot].user          = *user;
         _neighbors[slot].user.fromNode = fromNode;
         _neighbors[slot].user.valid    = true;
-
-        portEXIT_CRITICAL(&_neighborLock);
     }
     else
     {
         _neighbors[slot].user.fromNode = fromNode;
-        portEXIT_CRITICAL(&_neighborLock);
     }
+
+    if (nodeStatus)
+    {
+        _neighbors[slot].nodeStatus          = *nodeStatus;
+        _neighbors[slot].nodeStatus.fromNode = fromNode;
+        _neighbors[slot].nodeStatus.valid    = true;
+    }
+    else
+    {
+        _neighbors[slot].nodeStatus.fromNode = fromNode;
+    }
+
+    portEXIT_CRITICAL(&_neighborLock);
+}
+
+// ── _parseNodeStatus ──────────────────────────────────────────────────────
+/* static */ bool LoRa::_parseNodeStatus(const uint8_t* data, size_t len,
+                                          MeshNodeStatus& status)
+{
+    return mc_parseNodeStatus(data, len, status);
 }
 
 // ── neighborCount ─────────────────────────────────────────────────────────
@@ -820,6 +840,24 @@ MeshUser LoRa::neighborUser(size_t idx) const
         if (_neighbors[i].occupied)
         {
             if (count == idx) { result = _neighbors[i].user; break; }
+            count++;
+        }
+    }
+    portEXIT_CRITICAL(&_neighborLock);
+    return result;
+}
+
+// ── neighborStatus ────────────────────────────────────────────────────────
+MeshNodeStatus LoRa::neighborStatus(size_t idx) const
+{
+    portENTER_CRITICAL(&_neighborLock);
+    size_t count = 0;
+    MeshNodeStatus result = {};
+    for (size_t i = 0; i < NEIGHBOR_MAX; i++)
+    {
+        if (_neighbors[i].occupied)
+        {
+            if (count == idx) { result = _neighbors[i].nodeStatus; break; }
             count++;
         }
     }
@@ -1274,6 +1312,40 @@ void LoRa::_processPacket(const uint8_t* buf, uint8_t pktLen,
             }
         }
 #endif
+    }
+    else if (portnum == PORT_NODE_STATUS)
+    {
+        // ── NODE_STATUS_APP (portnum 75, Meshtastic 2.7.x) ───────────────
+        // Lightweight heartbeat broadcast: uptime + MQTT/router flags.
+        // Update the neighbour table so callers can see whether a nearby
+        // node is an MQTT gateway or has a router role.
+        MeshNodeStatus ns = {};
+        ns.rssi = rssi;
+        ns.snr  = snr;
+
+        if (_parseNodeStatus(payload, payloadLen, ns))
+        {
+            ESP_LOGI(TAG,
+                "NodeStatus from 0x%08" PRIx32
+                " uptime=%" PRIu32 "s mqtt=%d router=%d"
+                " rssi=%d snr=%.1f",
+                from,
+                ns.uptimeSec,
+                (int)ns.isMqttConnected,
+                (int)ns.isRouter,
+                rssi, (double)snr);
+
+            portENTER_CRITICAL(&_statsLock);
+            _stats.lastRssi = rssi;
+            _stats.lastSnr  = snr;
+            portEXIT_CRITICAL(&_statsLock);
+
+            _upsertNeighbor(from, nullptr, nullptr, &ns);
+        }
+        else
+        {
+            ESP_LOGD(TAG, "NodeStatus parse failed for pkt 0x%08" PRIx32, pktId);
+        }
     }
     else
     {

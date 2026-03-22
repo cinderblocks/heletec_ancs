@@ -22,6 +22,7 @@
  *  12. Reference byte-vector conformance (v2.7.x nanopb-equivalent output)
  *  13. Wire tag conformance   — tag bytes match .proto field definitions
  *  14. Edge cases and boundaries
+ *  15. mc_parseNodeStatus     — NODE_STATUS_APP portnum 75 (2.7.x heartbeat)
  */
 
 #include "unity.h"
@@ -2031,5 +2032,140 @@ int main(void)
     RUN_TEST(test_encodeUser_id_format);
     RUN_TEST(test_encodeUser_zero_node_id);
 
+    // 15. mc_parseNodeStatus — NODE_STATUS_APP (portnum 75, Meshtastic 2.7.x)
+    RUN_TEST(test_parseNodeStatus_uptime_only);
+    RUN_TEST(test_parseNodeStatus_all_fields);
+    RUN_TEST(test_parseNodeStatus_mqtt_gateway);
+    RUN_TEST(test_parseNodeStatus_router_flag);
+    RUN_TEST(test_parseNodeStatus_empty_returns_false);
+    RUN_TEST(test_parseNodeStatus_null_returns_false);
+    RUN_TEST(test_parseNodeStatus_uptime_zero_still_valid);
+    RUN_TEST(test_parseNodeStatus_skips_unknown_fields);
+    RUN_TEST(test_wire_tags_nodestatus_proto);
+
     return UNITY_END();
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 15. mc_parseNodeStatus — NODE_STATUS_APP (portnum 75, Meshtastic 2.7.x)
+//
+// Proto: meshtastic/mesh.proto NodeStatus (2.7.x)
+//   Field 1 (uptime,            uint32 varint): tag 0x08
+//   Field 2 (is_mqtt_connected, bool   varint): tag 0x10
+//   Field 3 (is_router,         bool   varint): tag 0x18
+// ─────────────────────────────────────────────────────────────────────────
+
+void test_parseNodeStatus_uptime_only(void)
+{
+    // Minimal packet: only field 1 (uptime=3600).
+    // 3600 = 0xE10.  Varint: lower 7 bits = 0x10, set continuation; next 7 = 0x1C
+    const uint8_t data[] = { 0x08, 0x90, 0x1C }; // tag 0x08, varint 3600
+    MeshNodeStatus ns = {};
+    TEST_ASSERT_TRUE(mc_parseNodeStatus(data, sizeof(data), ns));
+    TEST_ASSERT_EQUAL_UINT32(3600u, ns.uptimeSec);
+    TEST_ASSERT_FALSE(ns.isMqttConnected);
+    TEST_ASSERT_FALSE(ns.isRouter);
+}
+
+void test_parseNodeStatus_all_fields(void)
+{
+    // All three fields: uptime=7200, mqtt=true, router=true
+    // 7200 = 0x1C20: varint lower7=0x20|0x80=0xA0, next7=0x38
+    const uint8_t data[] = {
+        0x08, 0xA0, 0x38,   // field 1: uptime = 7200
+        0x10, 0x01,          // field 2: is_mqtt_connected = true
+        0x18, 0x01,          // field 3: is_router = true
+    };
+    MeshNodeStatus ns = {};
+    TEST_ASSERT_TRUE(mc_parseNodeStatus(data, sizeof(data), ns));
+    TEST_ASSERT_EQUAL_UINT32(7200u, ns.uptimeSec);
+    TEST_ASSERT_TRUE(ns.isMqttConnected);
+    TEST_ASSERT_TRUE(ns.isRouter);
+}
+
+void test_parseNodeStatus_mqtt_gateway(void)
+{
+    // MQTT gateway: mqtt=true, router=false, uptime=1800
+    // 1800 = 0x708: varint: 0x88 0x0E
+    const uint8_t data[] = {
+        0x08, 0x88, 0x0E,   // field 1: uptime = 1800
+        0x10, 0x01,          // field 2: is_mqtt_connected = true
+    };
+    MeshNodeStatus ns = {};
+    TEST_ASSERT_TRUE(mc_parseNodeStatus(data, sizeof(data), ns));
+    TEST_ASSERT_EQUAL_UINT32(1800u, ns.uptimeSec);
+    TEST_ASSERT_TRUE(ns.isMqttConnected);
+    TEST_ASSERT_FALSE(ns.isRouter);
+}
+
+void test_parseNodeStatus_router_flag(void)
+{
+    // Router node: mqtt=false, router=true
+    const uint8_t data[] = {
+        0x08, 0x01,   // field 1: uptime = 1 s (just booted)
+        0x18, 0x01,   // field 3: is_router = true
+    };
+    MeshNodeStatus ns = {};
+    TEST_ASSERT_TRUE(mc_parseNodeStatus(data, sizeof(data), ns));
+    TEST_ASSERT_EQUAL_UINT32(1u, ns.uptimeSec);
+    TEST_ASSERT_FALSE(ns.isMqttConnected);
+    TEST_ASSERT_TRUE(ns.isRouter);
+}
+
+void test_parseNodeStatus_empty_returns_false(void)
+{
+    // Zero-length payload — no uptime field present, must return false.
+    // Pass nullptr/0 (same as an empty buffer) to avoid zero-length array.
+    MeshNodeStatus ns = {};
+    TEST_ASSERT_FALSE(mc_parseNodeStatus(nullptr, 0, ns));
+}
+
+void test_parseNodeStatus_null_returns_false(void)
+{
+    // Explicit nullptr guard — separate from the empty case.
+    const uint8_t dummy[] = { 0x00 };
+    MeshNodeStatus ns = {};
+    TEST_ASSERT_FALSE(mc_parseNodeStatus(nullptr, sizeof(dummy), ns));
+}
+
+void test_parseNodeStatus_uptime_zero_still_valid(void)
+{
+    // uptime=0 is a valid just-booted state — must return true.
+    const uint8_t data[] = { 0x08, 0x00 }; // field 1: uptime = 0
+    MeshNodeStatus ns = {};
+    TEST_ASSERT_TRUE_MESSAGE(mc_parseNodeStatus(data, sizeof(data), ns),
+        "uptime=0 must parse as valid (just-booted node)");
+    TEST_ASSERT_EQUAL_UINT32(0u, ns.uptimeSec);
+}
+
+void test_parseNodeStatus_skips_unknown_fields(void)
+{
+    // Unknown field 5 (varint) and field 10 (length-delimited) must be skipped.
+    const uint8_t data[] = {
+        0x08, 0x64,             // field 1: uptime = 100
+        0x28, 0xFF, 0x01,       // field 5: unknown varint = 255 — skip
+        0x52, 0x03, 'a','b','c',// field 10: unknown string = "abc" — skip
+        0x10, 0x01,             // field 2: is_mqtt_connected = true
+    };
+    MeshNodeStatus ns = {};
+    TEST_ASSERT_TRUE(mc_parseNodeStatus(data, sizeof(data), ns));
+    TEST_ASSERT_EQUAL_UINT32(100u, ns.uptimeSec);
+    TEST_ASSERT_TRUE(ns.isMqttConnected);
+}
+
+void test_wire_tags_nodestatus_proto(void)
+{
+    // Verify tag bytes match Meshtastic 2.7.x mesh.proto NodeStatus definition:
+    //   Field 1 (uptime,            uint32, varint): (1<<3)|0 = 0x08
+    //   Field 2 (is_mqtt_connected, bool,   varint): (2<<3)|0 = 0x10
+    //   Field 3 (is_router,         bool,   varint): (3<<3)|0 = 0x18
+    TEST_ASSERT_EQUAL_HEX8(0x08, (1 << 3) | 0);
+    TEST_ASSERT_EQUAL_HEX8(0x10, (2 << 3) | 0);
+    TEST_ASSERT_EQUAL_HEX8(0x18, (3 << 3) | 0);
+
+    // Confirm that a valid uptime-only packet round-trips.
+    const uint8_t data[] = { 0x08, 0x2A }; // uptime = 42
+    MeshNodeStatus ns = {};
+    TEST_ASSERT_TRUE(mc_parseNodeStatus(data, sizeof(data), ns));
+    TEST_ASSERT_EQUAL_UINT32(42u, ns.uptimeSec);
 }

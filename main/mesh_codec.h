@@ -83,6 +83,28 @@ struct MeshUser {
     bool     valid          = false;
 };
 
+/**
+ * NodeStatus — decoded from NODE_STATUS_APP (portnum 75, Meshtastic 2.7.x).
+ *
+ * Lightweight heartbeat broadcast that nodes send periodically to indicate
+ * they are online and to share basic connectivity state.  Distinct from
+ * TELEMETRY_APP (battery/voltage metrics) and NODEINFO_APP (identity).
+ *
+ * Proto: meshtastic/mesh.proto, message NodeStatus (2.7.x):
+ *   Field 1 (uptime,            uint32): seconds since last reboot  — tag 0x08
+ *   Field 2 (is_mqtt_connected, bool):  connected to MQTT broker    — tag 0x10
+ *   Field 3 (is_router,         bool):  acting as mesh router       — tag 0x18
+ */
+struct MeshNodeStatus {
+    uint32_t fromNode        = 0;
+    uint32_t uptimeSec       = 0;    ///< seconds since last reboot (field 1)
+    bool     isMqttConnected = false;///< connected to MQTT broker (field 2)
+    bool     isRouter        = false;///< acting as mesh router (field 3)
+    int16_t  rssi            = 0;
+    float    snr             = 0.f;
+    bool     valid           = false;
+};
+
 // ── Protobuf encoder primitives ───────────────────────────────────────────
 
 /// Encode a 64-bit unsigned value as a protobuf base-128 varint.
@@ -276,3 +298,17 @@ bool mc_parsePosition(const uint8_t* data, size_t len, MeshPosition& pos);
  *   isUnmessageable ← field 9  (bool varint)
  */
 bool mc_parseUser(const uint8_t* data, size_t len, MeshUser& user);
+
+/**
+ * Decode a Meshtastic NodeStatus proto (NODE_STATUS_APP payload, portnum 75).
+ * Returns true when at least the uptime field (field 1) was present.
+ *
+ * Decoded fields (Meshtastic 2.7.x mesh.proto):
+ *   uptimeSec       ← field 1 (uint32 varint)  seconds since last reboot
+ *   isMqttConnected ← field 2 (bool varint)    connected to MQTT broker
+ *   isRouter        ← field 3 (bool varint)    acting as mesh router
+ *
+ * All fields are optional (proto3 defaults to 0/false).  Returns true even
+ * when only field 1 is present, which is the normal case for non-gateway nodes.
+ */
+bool mc_parseNodeStatus(const uint8_t* data, size_t len, MeshNodeStatus& status);

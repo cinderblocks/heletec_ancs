@@ -155,9 +155,10 @@ public:
     size_t neighborCount() const;
 
     /// Copy of the neighbour entry at index idx (0-based).  Thread-safe.
-    /// Returns a zeroed MeshPosition/MeshUser if idx is out of range.
-    MeshPosition neighborPosition(size_t idx) const;
-    MeshUser     neighborUser(size_t idx) const;
+    /// Returns a zeroed MeshPosition/MeshUser/MeshNodeStatus if idx is out of range.
+    MeshPosition   neighborPosition(size_t idx) const;
+    MeshUser       neighborUser(size_t idx) const;
+    MeshNodeStatus neighborStatus(size_t idx) const;
 
 protected:
     void run(void* data) override;
@@ -211,13 +212,15 @@ private:
     static constexpr size_t MESH_HDR = 16;
 
     // PortNum values (Meshtastic 2.7.x portnums.proto)
+    static constexpr uint32_t PORT_UNKNOWN       = 0;  ///< UNKNOWN_APP - Message sent from outside the mesh in a form that is not understood
     static constexpr uint32_t PORT_TEXT          = 1;  ///< TEXT_MESSAGE_APP
     static constexpr uint32_t PORT_POSITION      = 3;  ///< POSITION_APP
     static constexpr uint32_t PORT_NODEINFO      = 4;  ///< NODEINFO_APP
     static constexpr uint32_t PORT_ROUTING       = 5;  ///< ROUTING_APP — ACK/NACK (received, not dispatched)
+    static constexpr uint32_t PORT_NODE_STATUS   = 36; ///< NODE_STATUS_APP — online heartbeat + MQTT/router flags (2.7.x)
     static constexpr uint32_t PORT_TELEMETRY     = 67; ///< TELEMETRY_APP
     static constexpr uint32_t PORT_TRACEROUTE    = 70; ///< TRACEROUTE_APP — route discovery
-    static constexpr uint32_t PORT_NEIGHBORINFO  = 72; ///< NEIGHBORINFO_APP — mesh neighbour tables (received, not dispatched)
+    static constexpr uint32_t PORT_NEIGHBORINFO  = 71; ///< NEIGHBORINFO_APP — mesh neighbour tables (received, not dispatched)
     static constexpr uint32_t PORT_MAP_REPORT    = 73; ///< MAP_REPORT_APP — public mesh map visibility
 
     // Meshtastic default channel AES-128 PSK (factory LongFast).
@@ -266,10 +269,13 @@ private:
     static bool _parsePosition(const uint8_t* data, size_t len, MeshPosition& pos);
     /// Decode a Meshtastic User proto payload into user.
     static bool _parseUser(const uint8_t* data, size_t len, MeshUser& user);
+    /// Decode a Meshtastic NodeStatus proto payload into status.
+    static bool _parseNodeStatus(const uint8_t* data, size_t len, MeshNodeStatus& status);
     /// Insert or update the neighbour table entry for fromNode.
     void _upsertNeighbor(uint32_t fromNode,
-                         const MeshPosition* pos,  // nullptr = no update
-                         const MeshUser*     user); // nullptr = no update
+                         const MeshPosition*   pos,        // nullptr = no update
+                         const MeshUser*       user,       // nullptr = no update
+                         const MeshNodeStatus* nodeStatus = nullptr); // nullptr = no update
 
     // ── Protobuf encoder helpers (all static, no heap) ────────────────────
     /// Encode a varint into buf. Returns bytes written.
@@ -367,9 +373,10 @@ private:
     // ── Neighbour table ───────────────────────────────────────────────────
     static constexpr size_t NEIGHBOR_MAX = 8;
     struct NeighborEntry {
-        MeshPosition pos  = {};
-        MeshUser     user = {};
-        bool         occupied = false;
+        MeshPosition   pos        = {};
+        MeshUser       user       = {};
+        MeshNodeStatus nodeStatus = {}; ///< last NODE_STATUS_APP received from this node
+        bool           occupied   = false;
     };
     mutable portMUX_TYPE _neighborLock = portMUX_INITIALIZER_UNLOCKED;
     NeighborEntry        _neighbors[NEIGHBOR_MAX] = {};

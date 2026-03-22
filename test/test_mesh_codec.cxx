@@ -1144,6 +1144,24 @@ void test_encodeUser_is_unmessageable_always_emitted(void)
         "field 9 (is_unmessageable=false) must always be emitted");
 }
 
+void test_encodeUser_is_unmessageable_true(void)
+{
+    const uint8_t mac[6] = {};
+    uint8_t buf[120] = {};
+    // isLicensed=false, isUnmessageable=true
+    size_t n = mc_encodeUser(buf, sizeof(buf),
+                              0x12345678u, "Sensor", "SNS",
+                              mac, 48, 5, nullptr,
+                              /*isLicensed=*/false, /*isUnmessageable=*/true);
+    TEST_ASSERT_GREATER_THAN(0u, n);
+    // Field 9: is_unmessageable = true → 0x48 0x01
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(-1, findTag2(buf, n, 0x48, 0x01),
+        "field 9 (is_unmessageable=true) must emit 0x48 0x01");
+    // Field 9 value=0 must NOT appear
+    TEST_ASSERT_EQUAL_MESSAGE(-1, findTag2(buf, n, 0x48, 0x00),
+        "field 9 value=0x00 must not appear when is_unmessageable=true");
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // 10. mc_encodeTelemetry — full decode verification
 // ─────────────────────────────────────────────────────────────────────────
@@ -1767,6 +1785,7 @@ int main(void)
     RUN_TEST(test_encodeUser_licensed_with_role_field_order);
     RUN_TEST(test_encodeUser_no_macaddr);
     RUN_TEST(test_encodeUser_is_unmessageable_always_emitted);
+    RUN_TEST(test_encodeUser_is_unmessageable_true);
 
     // 10. mc_encodeTelemetry — full decode round-trip
     RUN_TEST(test_telemetry_roundtrip_full_decode);

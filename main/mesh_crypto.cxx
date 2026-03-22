@@ -387,18 +387,28 @@ static bool _derivePkcKey(const uint8_t ourPrivKey[32],
 }
 
 // ── mc_pkcEncrypt — AES-256-CCM (M=8, L=2) ──────────────────────────────
+// Meshtastic-standard PKC wire format:
+//   Wire = [ciphertext(N)] [8-byte CCM tag]
+//   Nonce = [packetId(8) | fromNode(4) | 0x00] — 13 bytes, byte 12 = 0
+//   Overhead = 8 bytes (MC_PKC_OVERHEAD)
+//
+// NOTE: The toNode parameter is currently unused for the nonce (stock
+// Meshtastic firmware uses nonce[12]=0).  Retained in the API for
+// potential future firmware variants that may use toNode in the nonce.
 bool mc_pkcEncrypt(const uint8_t ourPrivKey[32], const uint8_t remotePubKey[32],
                    uint32_t packetId, uint32_t fromNode, uint32_t toNode,
                    const uint8_t* in, size_t len, uint8_t* out)
 {
+    (void)toNode;  // Stock Meshtastic uses nonce[12]=0
+
     uint8_t key[32] = {};
     if (!_derivePkcKey(ourPrivKey, remotePubKey, key))
         return false;
 
     uint8_t ccmNonce[13];
-    _buildPkcNonce(packetId, fromNode, toNode, ccmNonce);
+    _buildPkcNonce(packetId, fromNode, /*extraNonce=*/0, ccmNonce);
 
-    // out layout: [ciphertext (len)] [8-byte CCM tag] [4-byte extraNonce LE]
+    // out layout: [ciphertext (len)] [8-byte CCM tag]
     uint8_t tag[8] = {};
 
     mbedtls_ccm_context ccm;
@@ -418,38 +428,33 @@ bool mc_pkcEncrypt(const uint8_t ourPrivKey[32], const uint8_t remotePubKey[32],
 
     if (ok)
     {
-        // Append tag + extraNonce after ciphertext
+        // Append tag after ciphertext (no extraNonce — Meshtastic standard)
         memcpy(out + len, tag, 8);
-        out[len + 8]  = static_cast<uint8_t>(toNode);
-        out[len + 9]  = static_cast<uint8_t>(toNode >>  8);
-        out[len + 10] = static_cast<uint8_t>(toNode >> 16);
-        out[len + 11] = static_cast<uint8_t>(toNode >> 24);
     }
     return ok;
 }
 
 // ── mc_pkcDecrypt — AES-256-CCM (M=8, L=2) ──────────────────────────────
+// Meshtastic-standard PKC wire format:
+//   Wire = [ciphertext(N)] [8-byte CCM tag]
+//   Nonce = [packetId(8) | fromNode(4) | 0x00] — 13 bytes, byte 12 = 0
+//   Overhead = 8 bytes
 bool mc_pkcDecrypt(const uint8_t ourPrivKey[32], const uint8_t remotePubKey[32],
                    uint32_t packetId, uint32_t fromNode,
                    const uint8_t* in, size_t len, uint8_t* out)
 {
-    if (len < MC_PKC_OVERHEAD) return false;
+    static constexpr size_t TAG_SIZE = 8;
+    if (len <= TAG_SIZE) return false;
 
-    // Extract extraNonce from last 4 bytes of the wire payload
-    const size_t cipherLen = len - MC_PKC_OVERHEAD;  // actual ciphertext size
-    const uint8_t* tag         = in + cipherLen;     // 8-byte CCM auth tag
-    const uint8_t* extraBytes  = in + cipherLen + 8; // 4-byte extraNonce
-    const uint32_t extraNonce  = (uint32_t)extraBytes[0]
-                               | (uint32_t)extraBytes[1] <<  8
-                               | (uint32_t)extraBytes[2] << 16
-                               | (uint32_t)extraBytes[3] << 24;
+    const size_t cipherLen = len - TAG_SIZE;
+    const uint8_t* tag     = in + cipherLen;
 
     uint8_t key[32] = {};
     if (!_derivePkcKey(ourPrivKey, remotePubKey, key))
         return false;
 
     uint8_t ccmNonce[13];
-    _buildPkcNonce(packetId, fromNode, extraNonce, ccmNonce);
+    _buildPkcNonce(packetId, fromNode, /*extraNonce=*/0, ccmNonce);
 
     mbedtls_ccm_context ccm;
     mbedtls_ccm_init(&ccm);
@@ -457,11 +462,11 @@ bool mc_pkcDecrypt(const uint8_t ourPrivKey[32], const uint8_t remotePubKey[32],
     if (mbedtls_ccm_setkey(&ccm, MBEDTLS_CIPHER_ID_AES, key, 256) == 0)
     {
         ok = (mbedtls_ccm_auth_decrypt(&ccm,
-                cipherLen,              // ciphertext length (without tag/extraNonce)
+                cipherLen,              // ciphertext length (without tag)
                 ccmNonce, 13,           // nonce (13 bytes → L=2)
                 nullptr, 0,             // no AAD
                 in, out,                // ciphertext → plaintext
-                tag, 8) == 0);         // verify 8-byte tag
+                tag, TAG_SIZE) == 0);   // verify 8-byte tag
     }
     mbedtls_ccm_free(&ccm);
     mbedtls_platform_zeroize(key, 32);
@@ -504,16 +509,18 @@ bool mc_pkcDecryptCcmEx(const uint8_t key[32],
     return ok;
 }
 
-// ── mc_pkcDecryptCcmFlex — CCM with variable nonce length ─────────────────
+// ── mc_pkcDecryptCcmFlexAad — CCM with variable nonce length + optional AAD ─
 // Accepts pre-built nonce of any valid CCM length (7-13 bytes).
 // Wire = [ciphertext(wireLen - tagSize)] [tag(tagSize)].
-bool mc_pkcDecryptCcmFlex(const uint8_t key[32],
-                          const uint8_t* nonce, size_t nonceLen,
-                          const uint8_t* in, size_t wireLen,
-                          uint8_t* out, size_t tagSize)
+bool mc_pkcDecryptCcmFlexAad(const uint8_t key[32],
+                             const uint8_t* nonce, size_t nonceLen,
+                             const uint8_t* aad, size_t aadLen,
+                             const uint8_t* in, size_t wireLen,
+                             uint8_t* out, size_t tagSize)
 {
     if (wireLen <= tagSize) return false;
     if (nonceLen < 7 || nonceLen > 13) return false;
+    if (aadLen != 0 && aad == nullptr) return false;
 
     const size_t cipherLen = wireLen - tagSize;
     const uint8_t* tag     = in + cipherLen;
@@ -526,12 +533,25 @@ bool mc_pkcDecryptCcmFlex(const uint8_t key[32],
         ok = (mbedtls_ccm_auth_decrypt(&ccm,
                 cipherLen,
                 nonce, nonceLen,
-                nullptr, 0,
+                aad, aadLen,
                 in, out,
                 tag, tagSize) == 0);
     }
     mbedtls_ccm_free(&ccm);
     return ok;
+}
+
+// ── mc_pkcDecryptCcmFlex — CCM with variable nonce length ─────────────────
+// Accepts pre-built nonce of any valid CCM length (7-13 bytes).
+// Wire = [ciphertext(wireLen - tagSize)] [tag(tagSize)].
+bool mc_pkcDecryptCcmFlex(const uint8_t key[32],
+                          const uint8_t* nonce, size_t nonceLen,
+                          const uint8_t* in, size_t wireLen,
+                          uint8_t* out, size_t tagSize)
+{
+    return mc_pkcDecryptCcmFlexAad(key, nonce, nonceLen,
+                                   nullptr, 0,
+                                   in, wireLen, out, tagSize);
 }
 
 // ── mc_pkcDecryptGcm — AES-256-GCM decrypt ───────────────────────────────
@@ -571,9 +591,9 @@ bool mc_pkcDecryptCtr(const uint8_t ourPrivKey[32], const uint8_t remotePubKey[3
                       uint32_t packetId, uint32_t fromNode,
                       const uint8_t* in, size_t len, uint8_t* out)
 {
-    if (len <= MC_PKC_CTR_OVERHEAD) return false;
+    if (len <= 4) return false;
 
-    const size_t plainLen = len - MC_PKC_CTR_OVERHEAD;
+    const size_t plainLen = len - 4;
     const uint8_t* extraBytes = in + plainLen;
     const uint32_t extraNonce = (uint32_t)extraBytes[0]
                               | (uint32_t)extraBytes[1] <<  8

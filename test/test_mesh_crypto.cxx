@@ -39,7 +39,7 @@
 
 #include "unity.h"
 #include "mesh_crypto.h"
-#include "mesh_codec.h"    // mc_encodeData, mc_parseData (for OTA frame tests)
+#include "mesh_codec.h"
 
 #include <cstring>
 #include <cstdint>
@@ -505,14 +505,15 @@ void test_x25519_wrong_remote_key_gives_different_secret(void)
 // Meshtastic PKI encryption (firmware v2.5+):
 //   1. ECDH shared secret → SHA-256 hash → AES-256 key
 //   2. AES-256-CCM with M=8 (8-byte auth tag), L=2 (13-byte nonce)
-//   3. Wire payload = [ciphertext] [8-byte tag] [4-byte extraNonce]
-//   4. MC_PKC_OVERHEAD = 12 bytes total appended
+//   3. Wire payload = [ciphertext] [8-byte tag]
+//   4. MC_PKC_OVERHEAD = 8 bytes total appended
+//   5. Nonce byte 12 = 0x00 (no extraNonce on wire)
 //
 // Sender (Alice→Bob):
 //   mc_pkcEncrypt(alicePriv, bobPub, pktId, aliceNode, bobNode, pt, len, ct)
-//   → ct is len + 12 bytes
+//   → ct is len + 8 bytes
 // Receiver (Bob):
-//   mc_pkcDecrypt(bobPriv, alicePub, pktId, aliceNode, ct, len+12, pt)
+//   mc_pkcDecrypt(bobPriv, alicePub, pktId, aliceNode, ct, len+8, pt)
 //   → pt is len bytes; returns false if CCM tag fails
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -529,7 +530,7 @@ void test_pkc_crypt_roundtrip_basic(void)
     // Alice encrypts to Bob
     TEST_ASSERT_TRUE(mc_pkcEncrypt(TEST_PRIV_A, TEST_PUB_B,
                                     pktId, aliceNode, bobNode, pt, len, ct));
-    // Bob decrypts from Alice (extraNonce extracted from last 4 bytes of ct)
+    // Bob decrypts from Alice (nonce[12]=0, 8-byte tag at end of ct)
     TEST_ASSERT_TRUE(mc_pkcDecrypt(TEST_PRIV_B, TEST_PUB_A,
                                     pktId, aliceNode,
                                     ct, len + MC_PKC_OVERHEAD, pt2));
@@ -604,6 +605,36 @@ void test_pkc_crypt_roundtrip_data_proto(void)
     TEST_ASSERT_EQUAL_size_t(11u, payloadLen);
     TEST_ASSERT_EQUAL_MEMORY("PKC DM test", payload, 11);
 }
+
+void test_pkc_crypt_exact_20_byte_wire_modern_format(void)
+{
+    // Regression for live packets shaped like:
+    //   wireLen = 20 = plaintext(12) + CCM tag(8)
+    // Modern Meshtastic format is [ciphertext][tag] with nonce[12]=0,
+    // i.e. no 4-byte extraNonce appended to the wire.
+    const uint8_t pt[12] = {
+        0x08, 0x01,              // field 1: portnum = 1
+        0x12, 0x08,              // field 2: payload length = 8
+        'P','K','C','2','0','B','y','t'
+    };
+    const uint32_t pktId      = 0x0F6B4601;
+    const uint32_t senderNode = 0x49B617F4;
+    const uint32_t recvNode   = 0x9E77A972;
+
+    uint8_t wire[sizeof(pt) + MC_PKC_OVERHEAD] = {};
+    uint8_t out[sizeof(pt)] = {};
+
+    TEST_ASSERT_TRUE(mc_pkcEncrypt(TEST_PRIV_A, TEST_PUB_B,
+                                    pktId, senderNode, recvNode,
+                                    pt, sizeof(pt), wire));
+    TEST_ASSERT_EQUAL_size_t(20u, sizeof(wire));
+
+    TEST_ASSERT_TRUE(mc_pkcDecrypt(TEST_PRIV_B, TEST_PUB_A,
+                                    pktId, senderNode,
+                                    wire, sizeof(wire), out));
+    TEST_ASSERT_EQUAL_MEMORY(pt, out, sizeof(pt));
+}
+
 
 // ─────────────────────────────────────────────────────────────────────────
 // 8. Full Meshtastic OTA frame — encode → channel-encrypt → decrypt → parse
@@ -696,7 +727,7 @@ void test_full_ota_pkc_direct_message(void)
                                    false, bobNode, 0);
     TEST_ASSERT_GREATER_THAN(0u, dataLen);
 
-    // 2. Alice PKC-encrypts (output = ciphertext + 8-byte tag + 4-byte extraNonce)
+    // 2. Alice PKC-encrypts (output = ciphertext + 8-byte tag)
     uint8_t ciphertext[64 + MC_PKC_OVERHEAD] = {};
     TEST_ASSERT_TRUE(mc_pkcEncrypt(TEST_PRIV_A, TEST_PUB_B,
                                     packetId, aliceNode, bobNode,
@@ -722,7 +753,7 @@ void test_full_ota_pkc_direct_message(void)
     const uint32_t rx_pktId  = ota[8] | (uint32_t)ota[9]<<8 | (uint32_t)ota[10]<<16| (uint32_t)ota[11]<<24;
     TEST_ASSERT_EQUAL_HEX8(0x00, ota[13]);
 
-    // 5. Bob PKC-decrypts (extraNonce extracted from last 4 bytes of payload)
+    // 5. Bob PKC-decrypts (nonce[12]=0, 8-byte tag at end of wire payload)
     const size_t rx_wirePayLen = otaLen - 16;
     const size_t rx_plainLen   = rx_wirePayLen - MC_PKC_OVERHEAD;
     uint8_t plain[64] = {};
@@ -828,6 +859,7 @@ int main(void)
     RUN_TEST(test_pkc_crypt_different_packetid_different_ciphertext);
     RUN_TEST(test_pkc_crypt_wrong_key_fails_decryption);
     RUN_TEST(test_pkc_crypt_roundtrip_data_proto);
+    RUN_TEST(test_pkc_crypt_exact_20_byte_wire_modern_format);
 
     // 8. Full OTA frame
     RUN_TEST(test_full_ota_channel_text_message);

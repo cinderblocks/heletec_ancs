@@ -117,32 +117,20 @@ int mc_x25519SharedSecret_alt(const uint8_t ourPrivKey[32],
 
 // ── PKC direct-message cipher (AES-256-CCM) ──────────────────────────────
 //
-// Meshtastic PKI/PKC encryption (firmware v2.5+):
+// Meshtastic PKC encryption (firmware v2.5+):
 //   1. ECDH shared secret = X25519(ourPriv, remotePub)
 //   2. AES key = SHA-256(shared secret)          ← 32 bytes
-//   3. Nonce   = [packetId(8), fromNode(4), extraNonce_low_byte(1)]
-//                (13 bytes for CCM L=2, from the 16-byte initNonce layout)
-//   4. AES-256-CCM encrypt with M=8 (8-byte auth tag)
-//   5. Wire payload = [ciphertext] [8-byte tag] [4-byte extraNonce]
-//
-// Total overhead appended to plaintext: MESHTASTIC_PKC_OVERHEAD = 12 bytes
-//   (8-byte CCM auth tag + 4-byte extraNonce sent in the clear)
-//
-// The extraNonce is the receiver's node ID (toNode).  On the wire the last
-// 4 bytes of the encrypted payload carry this value so the receiver can
-// reconstruct the nonce.
+//   3. Nonce   = [packetId LE(4)] [0x00(4)] [fromNode LE(4)] [0x00(4)]
+//                truncated to 13 bytes for CCM L=2
+//   4. AES-256-CCM encrypt, M=8 (8-byte auth tag), no AAD
+//   5. Wire payload = [ciphertext] [8-byte tag]
 
-/// Total bytes appended beyond the plaintext: 8 (CCM tag) + 4 (extraNonce).
-static constexpr size_t MC_PKC_OVERHEAD = 12;
-
-/// PKC overhead for CTR mode (older firmware): just 4-byte extraNonce, no tag.
-static constexpr size_t MC_PKC_CTR_OVERHEAD = 4;
+/// Bytes appended to plaintext on the wire: 8-byte CCM auth tag.
+static constexpr size_t MC_PKC_OVERHEAD = 8;
 
 /**
  * PKC encrypt: ECDH + SHA-256 + AES-256-CCM.
- *
- * @param out  Output buffer — must hold at least len + MC_PKC_OVERHEAD bytes.
- *             Layout: [ciphertext (len)] [8-byte CCM tag] [4-byte extraNonce LE]
+ * @param out  Must hold at least len + MC_PKC_OVERHEAD bytes.
  */
 bool mc_pkcEncrypt(const uint8_t ourPrivKey[32], const uint8_t remotePubKey[32],
                    uint32_t packetId, uint32_t fromNode, uint32_t toNode,
@@ -150,82 +138,17 @@ bool mc_pkcEncrypt(const uint8_t ourPrivKey[32], const uint8_t remotePubKey[32],
 
 /**
  * PKC decrypt: ECDH + SHA-256 + AES-256-CCM (M=8, L=2).
- * Wire layout: [ciphertext] [8-byte CCM tag] [4-byte extraNonce].
- * ExtraNonce is extracted from the last 4 bytes of `in`.
+ * Wire layout: [ciphertext] [8-byte CCM tag].
  */
 bool mc_pkcDecrypt(const uint8_t ourPrivKey[32], const uint8_t remotePubKey[32],
                    uint32_t packetId, uint32_t fromNode,
                    const uint8_t* in, size_t len, uint8_t* out);
 
 /**
- * Flexible PKC decrypt: AES-256-CCM with explicit key, extraNonce, and tag size.
- *
- * Wire layout: [ciphertext(wireLen - tagSize)] [CCM tag(tagSize)].
- * No extraNonce on the wire — caller provides it explicitly (e.g. toNode
- * from the OTA header).
- *
- * @param key        Pre-derived 32-byte AES key (SHA-256 of ECDH, or raw ECDH).
- * @param packetId   Packet ID from the OTA header.
- * @param fromNode   Sender node ID (goes into nonce[8:11]).
- * @param extraNonce Value for nonce[12:15] — typically the receiver's node ID.
- * @param in         Wire payload: [ciphertext][tag].
- * @param wireLen    Total bytes of `in`.
- * @param out        Output buffer for plaintext (wireLen - tagSize bytes).
- * @param tagSize    CCM auth tag size in bytes (4 or 8).
- * @return true if CCM authentication succeeds.
- */
-bool mc_pkcDecryptCcmEx(const uint8_t key[32],
-                        uint32_t packetId, uint32_t fromNode,
-                        uint32_t extraNonce,
-                        const uint8_t* in, size_t wireLen,
-                        uint8_t* out, size_t tagSize);
-
-/**
- * CCM decrypt with pre-built nonce of variable length (7-13 bytes).
- * Allows testing L=2 (13-byte nonce) vs L=3 (12-byte nonce) etc.
+ * CCM decrypt with pre-built nonce of variable length (7–13 bytes).
  * Wire = [ciphertext(wireLen - tagSize)] [tag(tagSize)].
  */
 bool mc_pkcDecryptCcmFlex(const uint8_t key[32],
                           const uint8_t* nonce, size_t nonceLen,
                           const uint8_t* in, size_t wireLen,
                           uint8_t* out, size_t tagSize);
-
-/**
- * AES-256-GCM decrypt with variable IV length and tag size.
- * Wire = [ciphertext(wireLen - tagSize)] [tag(tagSize)].
- */
-bool mc_pkcDecryptGcm(const uint8_t key[32],
-                      const uint8_t* iv, size_t ivLen,
-                      const uint8_t* in, size_t wireLen,
-                      uint8_t* out, size_t tagSize);/**
- * PKC decrypt — AES-256-CTR fallback for older Meshtastic firmware.
- *
- * Some firmware versions (pre-2.5) use AES-256-CTR instead of AES-256-CCM
- * for PKC direct messages.  Wire layout: [ciphertext] [4-byte extraNonce].
- * No authentication tag — caller must validate the decrypted output.
- *
- * @param in   Wire payload: [ciphertext] [4-byte extraNonce].
- * @param len  Total input length INCLUDING the 4-byte extraNonce.
- *             Must be > MC_PKC_CTR_OVERHEAD (4).
- * @param out  Output buffer — must hold at least (len - 4) bytes.
- * @return true if decryption was performed (no auth check — validate output!).
- */
-bool mc_pkcDecryptCtr(const uint8_t ourPrivKey[32], const uint8_t remotePubKey[32],
-                      uint32_t packetId, uint32_t fromNode,
-                      const uint8_t* in, size_t len, uint8_t* out);
-
-/**
- * PKC decrypt — AES-256-CTR with no extraNonce overhead.
- *
- * Fallback for firmware that uses CTR with nonce=[pktId|0|fromNode|0],
- * with no extraNonce appended to the wire payload.
- * Full wire payload is ciphertext.
- *
- * @param in   Wire payload (all ciphertext).
- * @param len  Total input length = plaintext length.
- * @param out  Output buffer — must hold at least len bytes.
- * @return true if decryption was performed.
- */
-bool mc_pkcDecryptCtrRaw(const uint8_t ourPrivKey[32], const uint8_t remotePubKey[32],
-                         uint32_t packetId, uint32_t fromNode,
-                         const uint8_t* in, size_t len, uint8_t* out);

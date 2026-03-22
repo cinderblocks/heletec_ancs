@@ -221,7 +221,7 @@ void LoRa::run(void* /*data*/)
             const uint8_t payloadLen = rxs[2];
             const uint8_t rxPtr      = rxs[3];
 
-            ESP_LOGI(TAG, "RX_DONE irq=0x%04x len=%u ptr=0x%02x",
+            ESP_LOGD(TAG, "RX_DONE irq=0x%04x len=%u ptr=0x%02x",
                      irq, payloadLen, rxPtr);
 
             // ── CRC error check (must be inside RX_DONE, not a separate else-if)
@@ -241,7 +241,7 @@ void LoRa::run(void* /*data*/)
                 _transact(txp, rxp, sizeof(txp));
                 const int16_t rssi = -(static_cast<int16_t>(rxp[2])) / 2;
                 const float   snr  = static_cast<float>(static_cast<int8_t>(rxp[3])) / 4.0f;
-                ESP_LOGI(TAG, "CRC_ERR (with RX_DONE) irq=0x%04x rssi=%d snr=%.1f — discarding",
+                ESP_LOGD(TAG, "CRC_ERR (with RX_DONE) irq=0x%04x rssi=%d snr=%.1f — discarding",
                          irq, rssi, (double)snr);
             }
             else if (payloadLen > 0)
@@ -278,7 +278,7 @@ void LoRa::run(void* /*data*/)
             const int16_t rssi = -(static_cast<int16_t>(rxp[2])) / 2;
             const float   snr  = static_cast<float>(static_cast<int8_t>(rxp[3])) / 4.0f;
 
-            ESP_LOGI(TAG, "HDR_ERR irq=0x%04x rssi=%d snr=%.1f iq_cfg=0x%02x",
+            ESP_LOGD(TAG, "HDR_ERR irq=0x%04x rssi=%d snr=%.1f iq_cfg=0x%02x",
                      irq, rssi, (double)snr, _readReg(REG_IQ_CONFIG));
         }
         else if (irq & IRQ_CRC_ERROR)
@@ -294,7 +294,7 @@ void LoRa::run(void* /*data*/)
             const int16_t rssi = -(static_cast<int16_t>(rxp[2])) / 2;
             const float   snr  = static_cast<float>(static_cast<int8_t>(rxp[3])) / 4.0f;
 
-            ESP_LOGI(TAG, "CRC_ERR (no RX_DONE) irq=0x%04x rssi=%d snr=%.1f",
+            ESP_LOGD(TAG, "CRC_ERR (no RX_DONE) irq=0x%04x rssi=%d snr=%.1f",
                      irq, rssi, (double)snr);
         }
         else if (irq & IRQ_TIMEOUT)
@@ -312,7 +312,7 @@ void LoRa::run(void* /*data*/)
             const int16_t   noiseFloor = _getInstRssi();
             const uint8_t   chipMode   = _getChipMode();
             const uint8_t   iqCfg      = _readReg(REG_IQ_CONFIG);
-            ESP_LOGI(TAG,
+            ESP_LOGD(TAG,
                 "DIAG: preamble=%" PRIu32 " hdr_ok=%" PRIu32
                 " rx=%" PRIu32 "  crc_err=%" PRIu32
                 "  hdr_err=%" PRIu32 "  decrypt_ok=%" PRIu32
@@ -369,7 +369,7 @@ void LoRa::run(void* /*data*/)
                     if (dlat > MOVE_THRESH || dlat < -MOVE_THRESH ||
                         dlon > MOVE_THRESH || dlon < -MOVE_THRESH)
                     {
-                        ESP_LOGI(TAG, "Position TX: movement detected (Δlat=%d Δlon=%d), early send",
+                        ESP_LOGD(TAG, "Position TX: movement detected (Δlat=%d Δlon=%d), early send",
                                  (int)dlat, (int)dlon);
                         doTx = true;
                     }

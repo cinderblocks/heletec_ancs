@@ -128,9 +128,15 @@ size_t mc_encodePosition(uint8_t* buf, size_t cap,
  *   Field 3 (short_name,        string):  up to 4 chars
  *   Field 4 (macaddr,           bytes):   6-byte BT MAC
  *   Field 5 (hw_model,          varint):  HardwareModel enum
+ *   Field 6 (is_licensed,       bool):    true when operating under ham licence
  *   Field 7 (role,              varint):  DeviceRole (omitted when 0 = CLIENT)
  *   Field 8 (public_key,        bytes):   32-byte X25519 key (nullptr = omit)
- *   Field 9 (is_unmessageable,  bool):    false
+ *   Field 9 (is_unmessageable,  bool):    true when node cannot receive DMs
+ *                                         (e.g. headless sensors/trackers without
+ *                                          a display or DM-processing firmware)
+ *
+ * isLicensed=true → emit field 6 and suppress field 8 (no PKC in licensed mode).
+ * isUnmessageable=false → emit field 9 = 0 (always required by Meshtastic 2.5+).
  *
  * buf must be at least 120 bytes.  Returns bytes written.
  */
@@ -139,9 +145,10 @@ size_t mc_encodeUser(uint8_t* buf, size_t cap,
                      const char* longName, const char* shortName,
                      const uint8_t macaddr[6],
                      uint32_t hwModel,
-                     uint8_t  deviceRole,      ///< 0 = CLIENT (field 7 omitted), 5 = TRACKER
-                     const uint8_t* publicKey, ///< nullptr to omit field 8
-                     bool isLicensed = false);  ///< true → emit is_licensed=true, skip pubkey
+                     uint8_t  deviceRole,         ///< 0 = CLIENT (field 7 omitted), 5 = TRACKER
+                     const uint8_t* publicKey,    ///< nullptr to omit field 8
+                     bool isLicensed        = false, ///< true → emit is_licensed=true, skip pubkey
+                     bool isUnmessageable   = false); ///< true → emit is_unmessageable=true
 
 /**
  * Wrap an encoded payload in a Meshtastic Data proto.

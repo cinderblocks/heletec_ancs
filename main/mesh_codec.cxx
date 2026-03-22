@@ -117,7 +117,8 @@ size_t mc_encodeUser(uint8_t* buf, size_t /*cap*/,
                      uint32_t hwModel,
                      uint8_t  deviceRole,
                      const uint8_t* publicKey,
-                     bool isLicensed)
+                     bool isLicensed,
+                     bool isUnmessageable)
 {
     size_t n = 0;
 
@@ -154,7 +155,10 @@ size_t mc_encodeUser(uint8_t* buf, size_t /*cap*/,
         n += mc_pbLenField(buf + n, 0x42, publicKey, 32); // Field 8: public_key (32 bytes)
     }
 
-    buf[n++] = 0x48; buf[n++] = 0x00;           // Field 9: is_unmessageable = false
+    // Field 9: is_unmessageable — always emitted (required by Meshtastic 2.5+).
+    // true for headless nodes (sensors, plain trackers) that cannot receive DMs.
+    buf[n++] = 0x48;
+    buf[n++] = isUnmessageable ? 0x01 : 0x00;
     return n;
 }
 

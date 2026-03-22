@@ -70,6 +70,11 @@ struct LoRaStats {
  *
  * In normal (encrypted) mode, X25519 PKC direct messages (chanHash=0x00)
  * are also decrypted using ECDH shared secrets with AES-256-CCM.
+ * When the sender's public key is not yet known, the raw packet is buffered
+ * and a NodeInfo request is sent; decryption is retried when the key arrives.
+ *
+ * Observed isLicensed / isUnmessageable flags in received NodeInfo packets
+ * are stored in the neighbour table (MeshUser) for display / filtering.
  *
  * In IsLicensed (ham radio) mode:
  *   - TX packets are still AES-128-CTR encrypted for interop (the PSK is
@@ -232,15 +237,17 @@ private:
 
     /// AES-256-CCM PKC (public key cryptography) cipher for direct messages.
     /// Uses SHA-256(X25519 ECDH shared secret) as the 256-bit key.
-    /// Wire payload: [ciphertext] [8-byte CCM tag] [4-byte extraNonce].
     /// chanHash=0x00 marks PKC-encrypted packets on the wire.
-    /// Falls back to AES-256-CTR if CCM auth fails (older firmware compat).
-    /// @param fromNode  Sender node ID — used to look up the remote public key
-    ///                  in the neighbour table and to build the CCM nonce.
-    /// @param plainLen  Output: actual plaintext size produced (differs by mode).
-    /// @return true on CCM auth success or validated CTR fallback.
+    ///
+    /// Standard Meshtastic PKC decrypt: SHA-256(X25519 ECDH) key, AES-256-CCM,
+    /// nonce = [pktId_LE(4)|0(4)|fromNode_LE(4)|0(4)] truncated to 13 bytes, no AAD.
+    /// Wire = [ciphertext(N)] [8-byte CCM tag].
+    /// @param plainLen  Output: plaintext byte count on success.
+    /// @return true on CCM auth success.
     bool _decryptPkc(const uint8_t* in, size_t len,
+                     const uint8_t* hdr, size_t hdrLen,
                      uint32_t packetId, uint32_t fromNode,
+                     uint32_t toNode,
                      uint8_t* out, size_t& plainLen);
     bool _parseData(const uint8_t* data, size_t len,
                     uint32_t& portnum,

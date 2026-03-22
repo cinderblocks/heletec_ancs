@@ -46,7 +46,8 @@ public:
     enum class SoundType : uint8_t {
         NOTIFICATION = 0,  ///< BLE notification arpeggio
         CALL         = 1,  ///< incoming call ringtone
-        LORA         = 2,  ///< LoRa message chirp
+        LORA         = 2,  ///< Meshtastic channel message chirp
+        ALERT        = 3,  ///< Meshtastic emergency alert — rapid triple-pip alarm
     };
 
     /// Configure the LEDC peripheral.  Must be called before play() or stop().
@@ -102,6 +103,17 @@ private:
         {784, 150}, {0, 60}, {784, 150}, {0, 60}, {880, 300}, {0, 480},
     };
     // 2 × 1 200 = 2 400 ms ✓
+
+    // Emergency alert alarm: rapid triple-pip at A6 (1760 Hz), 3 cycles = 2 580 ms.
+    // Each cycle: 80+40+80+40+80+540 = 860 ms.  High pitch + rapid cadence makes
+    // this immediately distinct from all other sounds — attention-getting even at
+    // low buzzer volumes.
+    static constexpr Note ALERT_MELODY[] = {
+        {1760, 80}, {0, 40}, {1760, 80}, {0, 40}, {1760, 80}, {0, 540}, // cycle 1
+        {1760, 80}, {0, 40}, {1760, 80}, {0, 40}, {1760, 80}, {0, 540}, // cycle 2
+        {1760, 80}, {0, 40}, {1760, 80}, {0, 40}, {1760, 80}, {0, 540}, // cycle 3
+    };
+    // 3 × 860 = 2 580 ms ✓
 
     struct PlayArgs { const Note* notes; size_t count; };
 

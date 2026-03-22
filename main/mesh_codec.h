@@ -42,12 +42,13 @@
 // NOTE: lastSeen is uint32_t (FreeRTOS ticks on the target, raw uint32 in tests).
 
 struct MeshMessage {
-    uint32_t fromNode = 0;   ///< sender node ID
-    char     text[65] = {};  ///< UTF-8 text, null-terminated, max 64 chars
-    char     shortName[5] = {}; ///< sender short name from neighbour table (4 chars + NUL); "" if unknown
-    int16_t  rssi     = 0;   ///< signal strength in dBm
-    float    snr      = 0.f; ///< signal-to-noise ratio in dB
-    bool     valid    = false;
+    uint32_t fromNode   = 0;
+    char     text[65]   = {};  ///< UTF-8 text, null-terminated, max 64 chars
+    char     shortName[5] = {}; ///< sender short name from neighbour table; "" if unknown
+    int16_t  rssi       = 0;
+    float    snr        = 0.f;
+    bool     isAlert    = false; ///< true when received on PORT_ALERT (portnum 76)
+    bool     valid      = false;
 };
 
 struct MeshPosition {
@@ -312,3 +313,39 @@ bool mc_parseUser(const uint8_t* data, size_t len, MeshUser& user);
  * when only field 1 is present, which is the normal case for non-gateway nodes.
  */
 bool mc_parseNodeStatus(const uint8_t* data, size_t len, MeshNodeStatus& status);
+
+/**
+ * Encode / decode a Meshtastic PKIReport proto (KEY_VERIFICATION_APP payload,
+ * portnum 77, Meshtastic 2.7.x).
+ *
+ * Nodes broadcast their X25519 public key via KEY_VERIFICATION_APP so that
+ * peers can perform authenticated PKC DM encryption.  This is the explicit
+ * key-exchange complement to the implicit key distribution via NODEINFO_APP
+ * (field 8).
+ *
+ * Proto: meshtastic/mesh.proto, message PKIReport (2.7.x):
+ *   Field 1 (public_key,         bytes):  32-byte X25519 public key — tag 0x0A
+ *   Field 2 (requestor_node_num, uint32): requesting node num        — tag 0x10
+ */
+struct MeshPkiReport {
+    uint8_t  publicKey[32]    = {}; ///< sender's X25519 public key (field 1)
+    bool     hasPublicKey     = false;
+    uint32_t requestorNodeNum = 0;  ///< node that requested the verification (field 2)
+    bool     valid            = false; ///< true when field 1 was present and 32 bytes
+};
+
+/**
+ * Decode a PKIReport proto payload into report.
+ * Returns true when field 1 (public_key, 32 bytes) was found.
+ */
+bool mc_parsePkiReport(const uint8_t* data, size_t len, MeshPkiReport& report);
+
+/**
+ * Encode a PKIReport proto into buf.
+ *   Field 1 (public_key,         bytes):  publicKey[32]     — always emitted
+ *   Field 2 (requestor_node_num, uint32): requestorNodeNum  — omitted when 0
+ * buf must be at least 38 bytes.  Returns bytes written.
+ */
+size_t mc_encodePkiReport(uint8_t* buf, size_t cap,
+                           const uint8_t publicKey[32],
+                           uint32_t requestorNodeNum = 0);

@@ -33,6 +33,7 @@ static const char* TAG = "buzzer";
 constexpr Buzzer::Note Buzzer::NOTIF_MELODY[];
 constexpr Buzzer::Note Buzzer::RING_MELODY[];
 constexpr Buzzer::Note Buzzer::LORA_MELODY[];
+constexpr Buzzer::Note Buzzer::ALERT_MELODY[];
 
 // ── _taskHandle thread-safety note ───────────────────────────────────────
 // _taskHandle is accessed from three places:
@@ -160,11 +161,13 @@ void Buzzer::play(SoundType type)
     static const PlayArgs notifArgs{ NOTIF_MELODY, sizeof(NOTIF_MELODY) / sizeof(NOTIF_MELODY[0]) };
     static const PlayArgs ringArgs { RING_MELODY,  sizeof(RING_MELODY)  / sizeof(RING_MELODY[0])  };
     static const PlayArgs loraArgs { LORA_MELODY,  sizeof(LORA_MELODY)  / sizeof(LORA_MELODY[0])  };
+    static const PlayArgs alertArgs{ ALERT_MELODY, sizeof(ALERT_MELODY) / sizeof(ALERT_MELODY[0]) };
 
     const PlayArgs* args;
     switch (type) {
         case SoundType::CALL:  args = &ringArgs;  break;
         case SoundType::LORA:  args = &loraArgs;  break;
+        case SoundType::ALERT: args = &alertArgs; break;
         default:               args = &notifArgs; break;
     }
 

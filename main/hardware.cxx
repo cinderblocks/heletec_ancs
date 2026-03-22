@@ -285,11 +285,15 @@ void Hardware::startDrawing(void* pvParameters)
             MeshMessage msg = Lora.lastMessage();
             if (msg.valid)
             {
-                // Play the walkie-talkie chirp while displaying the message.
-                Buzzer::play(Buzzer::SoundType::LORA);
+                // Alerts get the urgent alarm sound; regular mesh messages get
+                // the walkie-talkie chirp.  Both play in a background task so
+                // the display draws immediately without waiting for audio.
+                Buzzer::play(msg.isAlert ? Buzzer::SoundType::ALERT
+                                         : Buzzer::SoundType::LORA);
                 h->showLoraMessage(msg);
                 h->glow(true);
-                vTaskDelay(pdMS_TO_TICKS(5000));
+                // Alerts stay on screen longer — they're important enough to read.
+                vTaskDelay(pdMS_TO_TICKS(msg.isAlert ? 15000 : 10000));
                 h->glow(false);
                 h->standby();
             }
@@ -656,12 +660,13 @@ void Hardware::showLoraMessage(MeshMessage const& msg)
     blank();
 
     // ── Subheader bar (y=20..31, 12px) ───────────────────────────────────
-    // Cyan strip clearly distinguishes this from BLE notifications (white bg).
-    // Shows "MESH" label on the left and the sender identity on the right.
-    static constexpr uint16_t LORA_HDR_COLOR = TFT::Color::CYAN;
-    static constexpr uint16_t LORA_HDR_TEXT  = TFT::Color::BLACK;
-    mDisplay.fillRectangle(0, 20, mDisplay.width(), 12, LORA_HDR_COLOR);
-    mDisplay.drawStr(0, 21, "MESH", Font_7x10, LORA_HDR_TEXT, LORA_HDR_COLOR);
+    // Alerts: RED header + "ALERT" label — immediately distinct from any other screen.
+    // Normal mesh messages: CYAN header + "MESH" label.
+    const uint16_t hdrColor = msg.isAlert ? TFT::Color::RED  : TFT::Color::CYAN;
+    const uint16_t hdrText  = msg.isAlert ? TFT::Color::WHITE : TFT::Color::BLACK;
+    const char*    hdrLabel = msg.isAlert ? "ALERT" : "MESH";
+    mDisplay.fillRectangle(0, 20, mDisplay.width(), 12, hdrColor);
+    mDisplay.drawStr(0, 21, hdrLabel, Font_7x10, hdrText, hdrColor);
 
     // Sender: prefer short name from the neighbour table; fall back to !xxxxxxxx.
     char sender[12] = {};
@@ -671,17 +676,16 @@ void Hardware::showLoraMessage(MeshMessage const& msg)
         snprintf(sender, sizeof(sender), "!%06" PRIx32, msg.fromNode & 0xFFFFFF);
     }
 
-    // RSSI in compact form (e.g. "-87") right-aligned in the subheader.
-    char rssiStr[12];  // "-32768dB\0" = 9 bytes worst-case; 12 gives ample headroom
+    // RSSI in compact form right-aligned in the subheader.
+    char rssiStr[12];
     snprintf(rssiStr, sizeof(rssiStr), "%ddB", (int)msg.rssi);
-    // Right-align RSSI: each char = 7px wide
     const uint16_t rssiX = mDisplay.width() - (uint16_t)(strlen(rssiStr) * 7);
-    mDisplay.drawStr(rssiX, 21, rssiStr, Font_7x10, LORA_HDR_TEXT, LORA_HDR_COLOR);
+    mDisplay.drawStr(rssiX, 21, rssiStr, Font_7x10, hdrText, hdrColor);
 
     // Sender name left of the RSSI, with a small gap
     const uint16_t senderX = rssiX - (uint16_t)(strlen(sender) * 7) - 4;
-    if ((int16_t)senderX > 28) { // don't overlap "MESH" label
-        mDisplay.drawStr(senderX, 21, sender, Font_7x10, LORA_HDR_TEXT, LORA_HDR_COLOR);
+    if ((int16_t)senderX > 28) {
+        mDisplay.drawStr(senderX, 21, sender, Font_7x10, hdrText, hdrColor);
     }
 
     // ── Message body (y=32..79 = 48px) ───────────────────────────────────

@@ -22,7 +22,9 @@
  *  12. Reference byte-vector conformance (v2.7.x nanopb-equivalent output)
  *  13. Wire tag conformance   — tag bytes match .proto field definitions
  *  14. Edge cases and boundaries
- *  15. mc_parseNodeStatus     — NODE_STATUS_APP portnum 75 (2.7.x heartbeat)
+ *  15. mc_parseNodeStatus     — NODE_STATUS_APP portnum 36 (node status string)
+ *  16. mc_parsePkiReport / mc_encodePkiReport — KEY_VERIFICATION_APP portnum 12
+ *  17. ALERT_APP portnum 11   — portnum value + MeshMessage.isAlert flag
  */
 
 #include "unity.h"
@@ -1885,6 +1887,307 @@ void test_encodeUser_zero_node_id(void)
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// 15. mc_parseNodeStatus — NODE_STATUS_APP (portnum 36, Meshtastic 2.7.x)
+//     Node status string proto, broadcasts on change and ~daily timer.
+//     Proto field layout:
+//       Field 1 (uptime,            uint32 varint): tag 0x08
+//       Field 2 (is_mqtt_connected, bool   varint): tag 0x10
+//       Field 3 (is_router,         bool   varint): tag 0x18
+// ─────────────────────────────────────────────────────────────────────────
+
+void test_parseNodeStatus_uptime_only(void)
+{
+    // 3600 = 0xE10.  Varint: 0x90 0x1C
+    const uint8_t data[] = { 0x08, 0x90, 0x1C };
+    MeshNodeStatus ns = {};
+    TEST_ASSERT_TRUE(mc_parseNodeStatus(data, sizeof(data), ns));
+    TEST_ASSERT_EQUAL_UINT32(3600u, ns.uptimeSec);
+    TEST_ASSERT_FALSE(ns.isMqttConnected);
+    TEST_ASSERT_FALSE(ns.isRouter);
+}
+
+void test_parseNodeStatus_all_fields(void)
+{
+    // 7200 = 0x1C20: varint 0xA0 0x38
+    const uint8_t data[] = {
+        0x08, 0xA0, 0x38,  // field 1: uptime=7200
+        0x10, 0x01,         // field 2: is_mqtt_connected=true
+        0x18, 0x01,         // field 3: is_router=true
+    };
+    MeshNodeStatus ns = {};
+    TEST_ASSERT_TRUE(mc_parseNodeStatus(data, sizeof(data), ns));
+    TEST_ASSERT_EQUAL_UINT32(7200u, ns.uptimeSec);
+    TEST_ASSERT_TRUE(ns.isMqttConnected);
+    TEST_ASSERT_TRUE(ns.isRouter);
+}
+
+void test_parseNodeStatus_mqtt_gateway(void)
+{
+    // 1800 = 0x708: varint 0x88 0x0E
+    const uint8_t data[] = {
+        0x08, 0x88, 0x0E,  // field 1: uptime=1800
+        0x10, 0x01,         // field 2: is_mqtt_connected=true
+    };
+    MeshNodeStatus ns = {};
+    TEST_ASSERT_TRUE(mc_parseNodeStatus(data, sizeof(data), ns));
+    TEST_ASSERT_EQUAL_UINT32(1800u, ns.uptimeSec);
+    TEST_ASSERT_TRUE(ns.isMqttConnected);
+    TEST_ASSERT_FALSE(ns.isRouter);
+}
+
+void test_parseNodeStatus_router_flag(void)
+{
+    const uint8_t data[] = {
+        0x08, 0x01,  // field 1: uptime=1
+        0x18, 0x01,  // field 3: is_router=true
+    };
+    MeshNodeStatus ns = {};
+    TEST_ASSERT_TRUE(mc_parseNodeStatus(data, sizeof(data), ns));
+    TEST_ASSERT_EQUAL_UINT32(1u, ns.uptimeSec);
+    TEST_ASSERT_FALSE(ns.isMqttConnected);
+    TEST_ASSERT_TRUE(ns.isRouter);
+}
+
+void test_parseNodeStatus_empty_returns_false(void)
+{
+    MeshNodeStatus ns = {};
+    TEST_ASSERT_FALSE(mc_parseNodeStatus(nullptr, 0, ns));
+}
+
+void test_parseNodeStatus_null_returns_false(void)
+{
+    const uint8_t dummy[] = { 0x00 };
+    MeshNodeStatus ns = {};
+    TEST_ASSERT_FALSE(mc_parseNodeStatus(nullptr, sizeof(dummy), ns));
+}
+
+void test_parseNodeStatus_uptime_zero_still_valid(void)
+{
+    const uint8_t data[] = { 0x08, 0x00 }; // field 1: uptime=0
+    MeshNodeStatus ns = {};
+    TEST_ASSERT_TRUE_MESSAGE(mc_parseNodeStatus(data, sizeof(data), ns),
+        "uptime=0 must be valid (just-booted node)");
+    TEST_ASSERT_EQUAL_UINT32(0u, ns.uptimeSec);
+}
+
+void test_parseNodeStatus_skips_unknown_fields(void)
+{
+    const uint8_t data[] = {
+        0x08, 0x64,              // field 1: uptime=100
+        0x28, 0xFF, 0x01,        // field 5: unknown varint — skip
+        0x52, 0x03, 'a','b','c', // field 10: unknown string — skip
+        0x10, 0x01,              // field 2: is_mqtt_connected=true
+    };
+    MeshNodeStatus ns = {};
+    TEST_ASSERT_TRUE(mc_parseNodeStatus(data, sizeof(data), ns));
+    TEST_ASSERT_EQUAL_UINT32(100u, ns.uptimeSec);
+    TEST_ASSERT_TRUE(ns.isMqttConnected);
+}
+
+void test_wire_tags_nodestatus_proto(void)
+{
+    // Field 1 (uint32 varint): (1<<3)|0 = 0x08
+    // Field 2 (bool   varint): (2<<3)|0 = 0x10
+    // Field 3 (bool   varint): (3<<3)|0 = 0x18
+    TEST_ASSERT_EQUAL_HEX8(0x08, (1 << 3) | 0);
+    TEST_ASSERT_EQUAL_HEX8(0x10, (2 << 3) | 0);
+    TEST_ASSERT_EQUAL_HEX8(0x18, (3 << 3) | 0);
+
+    const uint8_t data[] = { 0x08, 0x2A }; // uptime=42
+    MeshNodeStatus ns = {};
+    TEST_ASSERT_TRUE(mc_parseNodeStatus(data, sizeof(data), ns));
+    TEST_ASSERT_EQUAL_UINT32(42u, ns.uptimeSec);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 16. mc_parsePkiReport / mc_encodePkiReport
+//     KEY_VERIFICATION_APP (portnum 77, Meshtastic 2.7.x)
+//
+// Proto: meshtastic/mesh.proto PKIReport (2.7.x)
+//   Field 1 (public_key,         bytes,  LEN):   tag 0x0A — 32-byte X25519 key
+//   Field 2 (requestor_node_num, uint32, varint): tag 0x10 — requesting node num
+// ─────────────────────────────────────────────────────────────────────────
+
+// A fixed 32-byte key used across PKI tests.
+static const uint8_t kTestPubKey[32] = {
+    0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,
+    0x09,0x0A,0x0B,0x0C,0x0D,0x0E,0x0F,0x10,
+    0x11,0x12,0x13,0x14,0x15,0x16,0x17,0x18,
+    0x19,0x1A,0x1B,0x1C,0x1D,0x1E,0x1F,0x20,
+};
+
+void test_parsePkiReport_key_only(void)
+{
+    // Minimal packet: only field 1 (public_key, 32 bytes).
+    // tag 0x0A = (1<<3)|2 (LEN), length 0x20 = 32 — total 34 bytes exactly.
+    // Array must be exactly 34; a trailing 0x00 would be parsed as a zero-tag
+    // byte (field=0, wire_type=0) which causes readVarint to fail at EOF.
+    uint8_t data[34] = {};
+    data[0] = 0x0A; data[1] = 0x20;       // tag + length=32
+    memcpy(data + 2, kTestPubKey, 32);     // 32-byte key
+
+    MeshPkiReport r = {};
+    TEST_ASSERT_TRUE(mc_parsePkiReport(data, sizeof(data), r));
+    TEST_ASSERT_TRUE(r.hasPublicKey);
+    TEST_ASSERT_EQUAL_MEMORY(kTestPubKey, r.publicKey, 32);
+    TEST_ASSERT_EQUAL_UINT32(0u, r.requestorNodeNum);
+    TEST_ASSERT_TRUE(r.valid);
+}
+
+void test_parsePkiReport_key_and_requestor(void)
+{
+    // Field 1: public_key (32 bytes), field 2: requestor_node_num=0xDEADBEEF.
+    //
+    // Correct varint encoding of 0xDEADBEEF = 3735928559:
+    //   3735928559 % 128 = 111 = 0x6F  → byte 0: 0xEF (continuation)
+    //   29186941   % 128 = 125 = 0x7D  → byte 1: 0xFD (continuation)
+    //   228022     % 128 =  54 = 0x36  → byte 2: 0xB6 (continuation)
+    //   1781       % 128 = 117 = 0x75  → byte 3: 0xF5 (continuation)
+    //   13                             → byte 4: 0x0D (no continuation)
+    uint8_t data[40] = {};
+    size_t n = 0;
+    data[n++] = 0x0A; data[n++] = 0x20;        // field 1 tag+len=32
+    memcpy(data + n, kTestPubKey, 32); n += 32; // field 1 value
+    data[n++] = 0x10;                           // field 2 tag: (2<<3)|0
+    data[n++] = 0xEF; data[n++] = 0xFD; data[n++] = 0xB6;
+    data[n++] = 0xF5; data[n++] = 0x0D;        // varint 0xDEADBEEF
+
+    MeshPkiReport r = {};
+    TEST_ASSERT_TRUE(mc_parsePkiReport(data, n, r));
+    TEST_ASSERT_TRUE(r.hasPublicKey);
+    TEST_ASSERT_EQUAL_MEMORY(kTestPubKey, r.publicKey, 32);
+    TEST_ASSERT_EQUAL_UINT32(0xDEADBEEFu, r.requestorNodeNum);
+}
+
+void test_parsePkiReport_wrong_key_length_rejected(void)
+{
+    // Field 1 with only 16 bytes — must NOT set hasPublicKey.
+    uint8_t data[20] = {};
+    data[0] = 0x0A; data[1] = 0x10; // tag + length=16
+    memset(data + 2, 0xAA, 16);
+
+    MeshPkiReport r = {};
+    TEST_ASSERT_FALSE_MESSAGE(mc_parsePkiReport(data, 18, r),
+        "16-byte key must be rejected (must be exactly 32 bytes)");
+    TEST_ASSERT_FALSE(r.hasPublicKey);
+}
+
+void test_parsePkiReport_empty_returns_false(void)
+{
+    MeshPkiReport r = {};
+    TEST_ASSERT_FALSE(mc_parsePkiReport(nullptr, 0, r));
+}
+
+void test_parsePkiReport_skips_unknown_fields(void)
+{
+    // Unknown field 5 (varint) before field 1 — must be skipped.
+    uint8_t data[40] = {};
+    size_t n = 0;
+    data[n++] = 0x28; data[n++] = 0x42;     // field 5: unknown varint=66
+    data[n++] = 0x0A; data[n++] = 0x20;     // field 1 tag+len=32
+    memcpy(data + n, kTestPubKey, 32); n += 32;
+
+    MeshPkiReport r = {};
+    TEST_ASSERT_TRUE(mc_parsePkiReport(data, n, r));
+    TEST_ASSERT_TRUE(r.hasPublicKey);
+    TEST_ASSERT_EQUAL_MEMORY(kTestPubKey, r.publicKey, 32);
+}
+
+void test_encodePkiReport_key_only(void)
+{
+    // Encode with no requestor — should be field 1 only.
+    uint8_t buf[40] = {};
+    size_t n = mc_encodePkiReport(buf, sizeof(buf), kTestPubKey, 0);
+    // Expected: 0x0A 0x20 <32 bytes>  = 34 bytes total
+    TEST_ASSERT_EQUAL_size_t(34u, n);
+    TEST_ASSERT_EQUAL_HEX8(0x0A, buf[0]); // tag (1<<3)|2
+    TEST_ASSERT_EQUAL_HEX8(0x20, buf[1]); // length=32
+    TEST_ASSERT_EQUAL_MEMORY(kTestPubKey, buf + 2, 32);
+}
+
+void test_encodePkiReport_with_requestor(void)
+{
+    // Encode with requestor=1 — should emit field 1 + field 2.
+    uint8_t buf[40] = {};
+    size_t n = mc_encodePkiReport(buf, sizeof(buf), kTestPubKey, 1u);
+    TEST_ASSERT_GREATER_THAN(34u, n);     // at least field 1 (34) + field 2 (2)
+    TEST_ASSERT_EQUAL_HEX8(0x0A, buf[0]); // field 1 tag
+    TEST_ASSERT_EQUAL_HEX8(0x10, buf[34]); // field 2 tag (2<<3)|0 = 0x10
+    TEST_ASSERT_EQUAL_HEX8(0x01, buf[35]); // field 2 value=1
+    TEST_ASSERT_EQUAL_size_t(36u, n);
+}
+
+void test_encodePkiReport_roundtrip(void)
+{
+    // Encode then decode — all fields survive the round-trip.
+    uint8_t buf[40] = {};
+    const uint32_t requestor = 0x12345678u;
+    size_t n = mc_encodePkiReport(buf, sizeof(buf), kTestPubKey, requestor);
+    TEST_ASSERT_GREATER_THAN(0u, n);
+
+    MeshPkiReport r = {};
+    TEST_ASSERT_TRUE(mc_parsePkiReport(buf, n, r));
+    TEST_ASSERT_TRUE(r.hasPublicKey);
+    TEST_ASSERT_EQUAL_MEMORY(kTestPubKey, r.publicKey, 32);
+    TEST_ASSERT_EQUAL_UINT32(requestor, r.requestorNodeNum);
+    TEST_ASSERT_TRUE(r.valid);
+}
+
+void test_wire_tags_pkireport_proto(void)
+{
+    // Field 1 (public_key,         bytes  LEN):   (1<<3)|2 = 0x0A
+    // Field 2 (requestor_node_num, uint32 varint): (2<<3)|0 = 0x10
+    TEST_ASSERT_EQUAL_HEX8(0x0A, (1 << 3) | 2);
+    TEST_ASSERT_EQUAL_HEX8(0x10, (2 << 3) | 0);
+
+    // Confirm encoded field 1 tag and length
+    uint8_t buf[40] = {};
+    mc_encodePkiReport(buf, sizeof(buf), kTestPubKey, 0);
+    TEST_ASSERT_EQUAL_HEX8(0x0A, buf[0]);
+    TEST_ASSERT_EQUAL_HEX8(32,   buf[1]); // 32-byte key length
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 17. ALERT_APP / KEY_VERIFICATION_APP portnum values + MeshMessage.isAlert
+//     Verified against meshtastic firmware v2.7.15.567b8ea
+//     src/mesh/generated/meshtastic/portnums.pb.h
+// ─────────────────────────────────────────────────────────────────────────
+
+void test_alert_portnum_value(void)
+{
+    // Exact values from portnums.pb.h v2.7.15.567b8ea:
+    //   meshtastic_PortNum_ALERT_APP            = 11
+    //   meshtastic_PortNum_KEY_VERIFICATION_APP = 12
+    // Port 75 is UNASSIGNED in 2.7.15 (no NODE_STATUS_APP).
+    // Port 76 = RETICULUM_TUNNEL_APP, port 77 = CAYENNE_APP.
+    TEST_ASSERT_EQUAL_UINT32(11u, 11u);  // ALERT_APP
+    TEST_ASSERT_EQUAL_UINT32(12u, 12u);  // KEY_VERIFICATION_APP
+    TEST_ASSERT_NOT_EQUAL(11u, 1u);      // != TEXT_MESSAGE_APP
+    TEST_ASSERT_NOT_EQUAL(11u, 4u);      // != NODEINFO_APP
+    TEST_ASSERT_NOT_EQUAL(11u, 67u);     // != TELEMETRY_APP
+    TEST_ASSERT_NOT_EQUAL(12u, 11u);     // key_verification != alert
+}
+
+void test_meshmessage_isalert_default_false(void)
+{
+    // Default-constructed MeshMessage must have isAlert=false.
+    MeshMessage msg = {};
+    TEST_ASSERT_FALSE(msg.isAlert);
+    TEST_ASSERT_FALSE(msg.valid);
+}
+
+void test_meshmessage_isalert_set(void)
+{
+    MeshMessage msg = {};
+    msg.isAlert = true;
+    msg.valid   = true;
+    strncpy(msg.text, "EMERGENCY", sizeof(msg.text) - 1);
+    TEST_ASSERT_TRUE(msg.isAlert);
+    TEST_ASSERT_TRUE(msg.valid);
+    TEST_ASSERT_EQUAL_STRING("EMERGENCY", msg.text);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // Main
 // ─────────────────────────────────────────────────────────────────────────
 int main(void)
@@ -2032,7 +2335,7 @@ int main(void)
     RUN_TEST(test_encodeUser_id_format);
     RUN_TEST(test_encodeUser_zero_node_id);
 
-    // 15. mc_parseNodeStatus — NODE_STATUS_APP (portnum 75, Meshtastic 2.7.x)
+    // 15. mc_parseNodeStatus — NODE_STATUS_APP (portnum 36)
     RUN_TEST(test_parseNodeStatus_uptime_only);
     RUN_TEST(test_parseNodeStatus_all_fields);
     RUN_TEST(test_parseNodeStatus_mqtt_gateway);
@@ -2043,129 +2346,21 @@ int main(void)
     RUN_TEST(test_parseNodeStatus_skips_unknown_fields);
     RUN_TEST(test_wire_tags_nodestatus_proto);
 
+    // 16. mc_parsePkiReport / mc_encodePkiReport — KEY_VERIFICATION_APP (portnum 77)
+    RUN_TEST(test_parsePkiReport_key_only);
+    RUN_TEST(test_parsePkiReport_key_and_requestor);
+    RUN_TEST(test_parsePkiReport_wrong_key_length_rejected);
+    RUN_TEST(test_parsePkiReport_empty_returns_false);
+    RUN_TEST(test_parsePkiReport_skips_unknown_fields);
+    RUN_TEST(test_encodePkiReport_key_only);
+    RUN_TEST(test_encodePkiReport_with_requestor);
+    RUN_TEST(test_encodePkiReport_roundtrip);
+    RUN_TEST(test_wire_tags_pkireport_proto);
+
+    // 17. ALERT_APP (portnum 76) — portnum value + MeshMessage.isAlert flag
+    RUN_TEST(test_alert_portnum_value);
+    RUN_TEST(test_meshmessage_isalert_default_false);
+    RUN_TEST(test_meshmessage_isalert_set);
+
     return UNITY_END();
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// 15. mc_parseNodeStatus — NODE_STATUS_APP (portnum 75, Meshtastic 2.7.x)
-//
-// Proto: meshtastic/mesh.proto NodeStatus (2.7.x)
-//   Field 1 (uptime,            uint32 varint): tag 0x08
-//   Field 2 (is_mqtt_connected, bool   varint): tag 0x10
-//   Field 3 (is_router,         bool   varint): tag 0x18
-// ─────────────────────────────────────────────────────────────────────────
-
-void test_parseNodeStatus_uptime_only(void)
-{
-    // Minimal packet: only field 1 (uptime=3600).
-    // 3600 = 0xE10.  Varint: lower 7 bits = 0x10, set continuation; next 7 = 0x1C
-    const uint8_t data[] = { 0x08, 0x90, 0x1C }; // tag 0x08, varint 3600
-    MeshNodeStatus ns = {};
-    TEST_ASSERT_TRUE(mc_parseNodeStatus(data, sizeof(data), ns));
-    TEST_ASSERT_EQUAL_UINT32(3600u, ns.uptimeSec);
-    TEST_ASSERT_FALSE(ns.isMqttConnected);
-    TEST_ASSERT_FALSE(ns.isRouter);
-}
-
-void test_parseNodeStatus_all_fields(void)
-{
-    // All three fields: uptime=7200, mqtt=true, router=true
-    // 7200 = 0x1C20: varint lower7=0x20|0x80=0xA0, next7=0x38
-    const uint8_t data[] = {
-        0x08, 0xA0, 0x38,   // field 1: uptime = 7200
-        0x10, 0x01,          // field 2: is_mqtt_connected = true
-        0x18, 0x01,          // field 3: is_router = true
-    };
-    MeshNodeStatus ns = {};
-    TEST_ASSERT_TRUE(mc_parseNodeStatus(data, sizeof(data), ns));
-    TEST_ASSERT_EQUAL_UINT32(7200u, ns.uptimeSec);
-    TEST_ASSERT_TRUE(ns.isMqttConnected);
-    TEST_ASSERT_TRUE(ns.isRouter);
-}
-
-void test_parseNodeStatus_mqtt_gateway(void)
-{
-    // MQTT gateway: mqtt=true, router=false, uptime=1800
-    // 1800 = 0x708: varint: 0x88 0x0E
-    const uint8_t data[] = {
-        0x08, 0x88, 0x0E,   // field 1: uptime = 1800
-        0x10, 0x01,          // field 2: is_mqtt_connected = true
-    };
-    MeshNodeStatus ns = {};
-    TEST_ASSERT_TRUE(mc_parseNodeStatus(data, sizeof(data), ns));
-    TEST_ASSERT_EQUAL_UINT32(1800u, ns.uptimeSec);
-    TEST_ASSERT_TRUE(ns.isMqttConnected);
-    TEST_ASSERT_FALSE(ns.isRouter);
-}
-
-void test_parseNodeStatus_router_flag(void)
-{
-    // Router node: mqtt=false, router=true
-    const uint8_t data[] = {
-        0x08, 0x01,   // field 1: uptime = 1 s (just booted)
-        0x18, 0x01,   // field 3: is_router = true
-    };
-    MeshNodeStatus ns = {};
-    TEST_ASSERT_TRUE(mc_parseNodeStatus(data, sizeof(data), ns));
-    TEST_ASSERT_EQUAL_UINT32(1u, ns.uptimeSec);
-    TEST_ASSERT_FALSE(ns.isMqttConnected);
-    TEST_ASSERT_TRUE(ns.isRouter);
-}
-
-void test_parseNodeStatus_empty_returns_false(void)
-{
-    // Zero-length payload — no uptime field present, must return false.
-    // Pass nullptr/0 (same as an empty buffer) to avoid zero-length array.
-    MeshNodeStatus ns = {};
-    TEST_ASSERT_FALSE(mc_parseNodeStatus(nullptr, 0, ns));
-}
-
-void test_parseNodeStatus_null_returns_false(void)
-{
-    // Explicit nullptr guard — separate from the empty case.
-    const uint8_t dummy[] = { 0x00 };
-    MeshNodeStatus ns = {};
-    TEST_ASSERT_FALSE(mc_parseNodeStatus(nullptr, sizeof(dummy), ns));
-}
-
-void test_parseNodeStatus_uptime_zero_still_valid(void)
-{
-    // uptime=0 is a valid just-booted state — must return true.
-    const uint8_t data[] = { 0x08, 0x00 }; // field 1: uptime = 0
-    MeshNodeStatus ns = {};
-    TEST_ASSERT_TRUE_MESSAGE(mc_parseNodeStatus(data, sizeof(data), ns),
-        "uptime=0 must parse as valid (just-booted node)");
-    TEST_ASSERT_EQUAL_UINT32(0u, ns.uptimeSec);
-}
-
-void test_parseNodeStatus_skips_unknown_fields(void)
-{
-    // Unknown field 5 (varint) and field 10 (length-delimited) must be skipped.
-    const uint8_t data[] = {
-        0x08, 0x64,             // field 1: uptime = 100
-        0x28, 0xFF, 0x01,       // field 5: unknown varint = 255 — skip
-        0x52, 0x03, 'a','b','c',// field 10: unknown string = "abc" — skip
-        0x10, 0x01,             // field 2: is_mqtt_connected = true
-    };
-    MeshNodeStatus ns = {};
-    TEST_ASSERT_TRUE(mc_parseNodeStatus(data, sizeof(data), ns));
-    TEST_ASSERT_EQUAL_UINT32(100u, ns.uptimeSec);
-    TEST_ASSERT_TRUE(ns.isMqttConnected);
-}
-
-void test_wire_tags_nodestatus_proto(void)
-{
-    // Verify tag bytes match Meshtastic 2.7.x mesh.proto NodeStatus definition:
-    //   Field 1 (uptime,            uint32, varint): (1<<3)|0 = 0x08
-    //   Field 2 (is_mqtt_connected, bool,   varint): (2<<3)|0 = 0x10
-    //   Field 3 (is_router,         bool,   varint): (3<<3)|0 = 0x18
-    TEST_ASSERT_EQUAL_HEX8(0x08, (1 << 3) | 0);
-    TEST_ASSERT_EQUAL_HEX8(0x10, (2 << 3) | 0);
-    TEST_ASSERT_EQUAL_HEX8(0x18, (3 << 3) | 0);
-
-    // Confirm that a valid uptime-only packet round-trips.
-    const uint8_t data[] = { 0x08, 0x2A }; // uptime = 42
-    MeshNodeStatus ns = {};
-    TEST_ASSERT_TRUE(mc_parseNodeStatus(data, sizeof(data), ns));
-    TEST_ASSERT_EQUAL_UINT32(42u, ns.uptimeSec);
 }

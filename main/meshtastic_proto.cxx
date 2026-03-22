@@ -569,6 +569,41 @@ bool LoRa::sendNodeInfo(uint32_t to, bool wantResponse, uint32_t requestId)
     return transmit(pkt, pktLen);
 }
 
+// ── sendKeyVerification ───────────────────────────────────────────────────
+// Unicast our X25519 public key to @p to via KEY_VERIFICATION_APP (port 77).
+// Used two ways:
+//   1. Reactively: when we receive a KEY_VERIFICATION_APP from a node that
+//      has sent us their key and wantResponse=true, we reply with ours.
+//   2. Proactively: when a peer sends a PKC DM we can't decrypt (their key
+//      unknown), we can call this instead of a NodeInfo request to offer a
+//      mutual exchange.
+bool LoRa::sendKeyVerification(uint32_t to)
+{
+#if !CONFIG_LORA_TX_ENABLED
+    return false;
+#endif
+#if CONFIG_LORA_IS_LICENSED
+    // Licensed (ham) mode has no PKC keypair.
+    return false;
+#else
+    if (!Node.hasPkcKeys()) return false;
+
+    uint8_t pkiBuf[40] = {};
+    const size_t pkiLen = _encodePkiReport(pkiBuf, sizeof(pkiBuf),
+                                            Node.publicKey(), Node.nodeId());
+    if (pkiLen == 0) return false;
+
+    uint8_t pkt[256] = {};
+    uint8_t pktLen   = 0;
+    if (!_buildTxPacket(pkt, pktLen, PORT_KEY_VERIFICATION, pkiBuf, pkiLen,
+                        /*want_response=*/false, to, 0)) return false;
+
+    ESP_LOGI(TAG, "TX KEY_VERIFICATION to 0x%08" PRIx32 " pktlen=%u",
+             to, (unsigned)pktLen);
+    return transmit(pkt, pktLen);
+#endif
+}
+
 // ── _encodeTelemetry ──────────────────────────────────────────────────────
 // Encode a Meshtastic Telemetry proto with Device Metrics.
 //
@@ -798,6 +833,21 @@ void LoRa::_upsertNeighbor(uint32_t fromNode,
                                           MeshNodeStatus& status)
 {
     return mc_parseNodeStatus(data, len, status);
+}
+
+// ── _parsePkiReport ───────────────────────────────────────────────────────
+/* static */ bool LoRa::_parsePkiReport(const uint8_t* data, size_t len,
+                                         MeshPkiReport& report)
+{
+    return mc_parsePkiReport(data, len, report);
+}
+
+// ── _encodePkiReport ──────────────────────────────────────────────────────
+/* static */ size_t LoRa::_encodePkiReport(uint8_t* buf, size_t cap,
+                                             const uint8_t publicKey[32],
+                                             uint32_t requestorNodeNum)
+{
+    return mc_encodePkiReport(buf, cap, publicKey, requestorNodeNum);
 }
 
 // ── neighborCount ─────────────────────────────────────────────────────────
@@ -1315,10 +1365,11 @@ void LoRa::_processPacket(const uint8_t* buf, uint8_t pktLen,
     }
     else if (portnum == PORT_NODE_STATUS)
     {
-        // ── NODE_STATUS_APP (portnum 75, Meshtastic 2.7.x) ───────────────
-        // Lightweight heartbeat broadcast: uptime + MQTT/router flags.
+        // ── NODE_STATUS_APP (portnum 36, Meshtastic 2.7.x) ───────────────
+        // Node status string — broadcasts on change and on a periodic timer
+        // (approximately once a day).  Payload is a NodeStatus protobuf.
         // Update the neighbour table so callers can see whether a nearby
-        // node is an MQTT gateway or has a router role.
+        // node is an MQTT gateway or acting as a router.
         MeshNodeStatus ns = {};
         ns.rssi = rssi;
         ns.snr  = snr;
@@ -1345,6 +1396,105 @@ void LoRa::_processPacket(const uint8_t* buf, uint8_t pktLen,
         else
         {
             ESP_LOGD(TAG, "NodeStatus parse failed for pkt 0x%08" PRIx32, pktId);
+        }
+    }
+    else if (portnum == PORT_ALERT)
+    {
+        // ── ALERT_APP (portnum 11, Meshtastic 2.7.15) ────────────────────
+        // Critical alert broadcast.  Payload is raw UTF-8 text (same wire
+        // format as TEXT_MESSAGE_APP).  Alerts are ALWAYS shown regardless
+        // of the `to` field — they are inherently broadcast-only.
+        MeshMessage msg;
+        msg.fromNode = from;
+        msg.rssi     = rssi;
+        msg.snr      = snr;
+        msg.isAlert  = true;
+        msg.valid    = true;
+        const size_t copyLen = std::min(payloadLen, sizeof(msg.text) - 1);
+        memcpy(msg.text, payload, copyLen);
+        msg.text[copyLen] = '\0';
+
+        // Populate sender short name from neighbour table (same as TEXT).
+        for (size_t ni = 0; ni < NEIGHBOR_MAX; ni++)
+        {
+            portENTER_CRITICAL(&_neighborLock);
+            const bool occ   = _neighbors[ni].occupied;
+            const bool match = occ && (_neighbors[ni].user.fromNode == from ||
+                                       _neighbors[ni].pos.fromNode  == from);
+            char sn[5] = {};
+            if (match) memcpy(sn, _neighbors[ni].user.shortName, sizeof(sn));
+            portEXIT_CRITICAL(&_neighborLock);
+            if (match && sn[0] != '\0')
+            {
+                strncpy(msg.shortName, sn, sizeof(msg.shortName) - 1);
+                break;
+            }
+        }
+
+        ESP_LOGW(TAG, "ALERT from 0x%08" PRIx32 " (rssi=%d snr=%.1f): %s",
+                 from, rssi, (double)snr, msg.text);
+
+        portENTER_CRITICAL(&_statsLock);
+        _stats.textMessages++;
+        _stats.lastRssi = rssi;
+        _stats.lastSnr  = snr;
+        portEXIT_CRITICAL(&_statsLock);
+
+        portENTER_CRITICAL(&_msgLock);
+        _lastMsg = msg;
+        portEXIT_CRITICAL(&_msgLock);
+
+        Heltec.notifyDraw(Hardware::DRAW_LORA);
+    }
+    else if (portnum == PORT_KEY_VERIFICATION)
+    {
+        // ── KEY_VERIFICATION_APP (portnum 12, Meshtastic 2.7.15) ─────────
+        // Public key exchange for PKC direct messages.
+        //
+        // The sender is sharing their 32-byte X25519 public key (PKIReport
+        // field 1) so we can encrypt PKC DMs to them.  Store it in the
+        // neighbour table and retry any buffered packets from this node.
+        //
+        // If wantResponse is set the sender is requesting our key in return.
+        MeshPkiReport report = {};
+        if (_parsePkiReport(payload, payloadLen, report))
+        {
+            ESP_LOGI(TAG,
+                "KeyVerification from 0x%08" PRIx32
+                " requestor=0x%08" PRIx32
+                " pubkey=%s rssi=%d snr=%.1f",
+                from, report.requestorNodeNum,
+                report.hasPublicKey ? "yes" : "no",
+                rssi, (double)snr);
+
+            if (report.hasPublicKey)
+            {
+                // Merge the key into the neighbour's user record.
+                // Create a minimal MeshUser carrying only the public key so
+                // _upsertNeighbor does not clobber existing identity fields.
+                MeshUser keyUpdate = {};
+                keyUpdate.fromNode     = from;
+                keyUpdate.hasPublicKey = true;
+                memcpy(keyUpdate.publicKey, report.publicKey, 32);
+
+                _upsertNeighbor(from, nullptr, &keyUpdate);
+
+                // Retry any PKC DMs that arrived before we had the key.
+                _retryPkcBuffer(from);
+            }
+
+#if CONFIG_LORA_TX_ENABLED
+            // Reply with our own key if requested.
+            if (wantResp)
+            {
+                ESP_LOGI(TAG, "KeyVerification: responding with our pubkey to 0x%08" PRIx32, from);
+                sendKeyVerification(from);
+            }
+#endif
+        }
+        else
+        {
+            ESP_LOGD(TAG, "KeyVerification parse failed for pkt 0x%08" PRIx32, pktId);
         }
     }
     else

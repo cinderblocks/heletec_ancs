@@ -599,3 +599,81 @@ bool mc_parseNodeStatus(const uint8_t* data, size_t len, MeshNodeStatus& status)
     // distinguish "field 1 present and zero" from "empty / corrupt payload".
     return gotUptime;
 }
+
+// ── mc_parsePkiReport ─────────────────────────────────────────────────────
+// Decode a Meshtastic PKIReport proto (KEY_VERIFICATION_APP, portnum 77).
+//
+// meshtastic/mesh.proto PKIReport (2.7.x):
+//   Field 1 (public_key,         bytes,  LEN):    tag 0x0A — 32-byte X25519 key
+//   Field 2 (requestor_node_num, uint32, varint):  tag 0x10 — requesting node
+
+bool mc_parsePkiReport(const uint8_t* data, size_t len, MeshPkiReport& report)
+{
+    if (data == nullptr || len == 0) return false;
+
+    size_t p = 0;
+
+    auto readVarint = [&](uint64_t& out) -> bool {
+        out = 0; int s = 0;
+        while (p < len) {
+            uint8_t b = data[p++];
+            out |= (uint64_t)(b & 0x7F) << s;
+            if (!(b & 0x80)) return true;
+            s += 7; if (s > 63) return false;
+        }
+        return false;
+    };
+
+    while (p < len)
+    {
+        uint64_t tag64 = 0;
+        if (!readVarint(tag64)) break;
+        const uint32_t field    = (uint32_t)(tag64 >> 3);
+        const uint8_t  wireType = (uint8_t)(tag64 & 0x07);
+
+        if (wireType == 0)
+        {
+            uint64_t val = 0;
+            if (!readVarint(val)) return false;
+            if (field == 2) report.requestorNodeNum = (uint32_t)val;
+        }
+        else if (wireType == 2)
+        {
+            uint64_t slen = 0;
+            if (!readVarint(slen)) return false;
+            if (p + slen > len) return false;
+            if (field == 1 && slen == 32)
+            {
+                memcpy(report.publicKey, data + p, 32);
+                report.hasPublicKey = true;
+            }
+            p += (size_t)slen;
+        }
+        else if (wireType == 5) { if (p + 4 > len) return false; p += 4; }
+        else if (wireType == 1) { if (p + 8 > len) return false; p += 8; }
+        else return false;
+    }
+
+    report.valid = report.hasPublicKey;
+    return report.valid;
+}
+
+// ── mc_encodePkiReport ────────────────────────────────────────────────────
+// Encode a PKIReport proto (KEY_VERIFICATION_APP payload, portnum 77).
+//
+//   Field 1 (public_key,         bytes,  LEN):   tag 0x0A — 32-byte key (always)
+//   Field 2 (requestor_node_num, uint32, varint): tag 0x10 — omit when 0
+
+size_t mc_encodePkiReport(uint8_t* buf, size_t /*cap*/,
+                           const uint8_t publicKey[32],
+                           uint32_t requestorNodeNum)
+{
+    size_t n = 0;
+    n += mc_pbLenField(buf + n, 0x0A, publicKey, 32); // Field 1: public_key
+    if (requestorNodeNum != 0)
+    {
+        buf[n++] = 0x10;                               // Field 2: requestor_node_num
+        n += mc_pbVarint(buf + n, requestorNodeNum);
+    }
+    return n;
+}

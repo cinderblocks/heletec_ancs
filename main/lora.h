@@ -142,7 +142,14 @@ public:
     bool sendTelemetry();
 
     /**
-     * Broadcast a MAP_REPORT_APP (port 73) packet for public mesh map visibility.
+     * Unicast a KEY_VERIFICATION_APP (portnum 77) packet to @p to carrying
+     * our own 32-byte X25519 public key so the peer can encrypt PKC DMs to us.
+     * No-op in licensed mode (no PKC keys) or when PKC keys are unavailable.
+     * Must only be called from the LoRa task.  Returns true on TX success.
+     */
+    bool sendKeyVerification(uint32_t to);
+
+    /**
      * Announces this node's identity, hardware model, region, modem preset, and
      * current GPS fix to any MQTT bridge in range.  Bridges forward it to
      * meshtastic.network/map so the node appears on the public map.
@@ -211,17 +218,40 @@ private:
     // Over-the-air header: [to(4), from(4), id(4), flags(1), chan(1), pad(2)]
     static constexpr size_t MESH_HDR = 16;
 
-    // PortNum values (Meshtastic 2.7.x portnums.proto)
-    static constexpr uint32_t PORT_UNKNOWN       = 0;  ///< UNKNOWN_APP - Message sent from outside the mesh in a form that is not understood
-    static constexpr uint32_t PORT_TEXT          = 1;  ///< TEXT_MESSAGE_APP
-    static constexpr uint32_t PORT_POSITION      = 3;  ///< POSITION_APP
-    static constexpr uint32_t PORT_NODEINFO      = 4;  ///< NODEINFO_APP
-    static constexpr uint32_t PORT_ROUTING       = 5;  ///< ROUTING_APP — ACK/NACK (received, not dispatched)
-    static constexpr uint32_t PORT_NODE_STATUS   = 36; ///< NODE_STATUS_APP — online heartbeat + MQTT/router flags (2.7.x)
-    static constexpr uint32_t PORT_TELEMETRY     = 67; ///< TELEMETRY_APP
-    static constexpr uint32_t PORT_TRACEROUTE    = 70; ///< TRACEROUTE_APP — route discovery
-    static constexpr uint32_t PORT_NEIGHBORINFO  = 71; ///< NEIGHBORINFO_APP — mesh neighbour tables (received, not dispatched)
-    static constexpr uint32_t PORT_MAP_REPORT    = 73; ///< MAP_REPORT_APP — public mesh map visibility
+    // PortNum values — verified against meshtastic firmware v2.7.15.567b8ea
+    // src/mesh/generated/meshtastic/portnums.pb.h
+    // Ports 0-63:  Core Meshtastic use
+    // Ports 64-127: Registered 3rd-party apps
+    // Ports 256-511: Private / unregistered apps
+    static constexpr uint32_t PORT_UNKNOWN                   = 0;  ///< UNKNOWN_APP - Message sent from outside the mesh in a form that is not understood
+    static constexpr uint32_t PORT_TEXT                      = 1;  ///< TEXT_MESSAGE_APP
+    static constexpr uint32_t PORT_REMOTE_HARDWARE           = 2;  ///< REMOTE_HARDWARE_APP (received, not dispatched)
+    static constexpr uint32_t PORT_POSITION                  = 3;  ///< POSITION_APP
+    static constexpr uint32_t PORT_NODEINFO                  = 4;  ///< NODEINFO_APP
+    static constexpr uint32_t PORT_ROUTING                   = 5;  ///< ROUTING_APP — ACK/NACK
+    static constexpr uint32_t PORT_ADMIN                     = 6;  ///< ADMIN_APP (received, not dispatched)
+    static constexpr uint32_t PORT_TEXT_COMPRESSED           = 7;  ///< TEXT_MESSAGE_COMPRESSED_APP (received, not dispatched)
+    static constexpr uint32_t PORT_WAYPOINT                  = 8;  ///< WAYPOINT_APP (received, not dispatched)
+    static constexpr uint32_t PORT_AUDIO                     = 9;  ///< AUDIO_APP (received, not dispatched)
+    static constexpr uint32_t PORT_DETECTION_SENSOR          = 10; ///< DETECTION_SENSOR_APP (received, not dispatched)
+    static constexpr uint32_t PORT_ALERT                     = 11; ///< ALERT_APP — critical alert message
+    static constexpr uint32_t PORT_KEY_VERIFICATION          = 12; ///< KEY_VERIFICATION_APP — PKC key exchange
+    static constexpr uint32_t PORT_REPLY                     = 32; ///< REPLY_APP (received, not dispatched)
+    static constexpr uint32_t PORT_PAXCOUNTER                = 34; ///< PAXCOUNTER_APP (received, not dispatched)
+    static constexpr uint32_t PORT_NODE_STATUS               = 36; ///< NODE_STATUS_APP — node status string, broadcasts on change/timer
+    static constexpr uint32_t PORT_SERIAL                    = 64; ///< SERIAL_APP (received, not dispatched)
+    static constexpr uint32_t PORT_STORE_FORWARD             = 65; ///< STORE_FORWARD_APP (received, not dispatched)
+    static constexpr uint32_t PORT_RANGE_TEST                = 66; ///< RANGE_TEST_APP (received, not dispatched)
+    static constexpr uint32_t PORT_TELEMETRY                 = 67; ///< TELEMETRY_APP
+    static constexpr uint32_t PORT_ZPS                       = 68; ///< ZPS_APP (received, not dispatched)
+    static constexpr uint32_t PORT_SIMULATOR                 = 69; ///< SIMULATOR_APP (received, not dispatched)
+    static constexpr uint32_t PORT_TRACEROUTE                = 70; ///< TRACEROUTE_APP — route discovery
+    static constexpr uint32_t PORT_NEIGHBORINFO              = 71; ///< NEIGHBORINFO_APP (received, not dispatched)
+    static constexpr uint32_t PORT_ATAK_PLUGIN               = 72; ///< ATAK_PLUGIN (received, not dispatched)
+    static constexpr uint32_t PORT_MAP_REPORT                = 73; ///< MAP_REPORT_APP — public mesh map
+    static constexpr uint32_t PORT_POWERSTRESS               = 74; ///< POWERSTRESS_APP (received, not dispatched)
+    static constexpr uint32_t PORT_RETICULUM_TUNNEL          = 76; ///< RETICULUM_TUNNEL_APP (received, not dispatched)
+    static constexpr uint32_t PORT_CAYENNE                   = 77; ///< CAYENNE_APP (received, not dispatched)
 
     // Meshtastic default channel AES-128 PSK (factory LongFast).
     // Used for both RX decryption and TX encryption.
@@ -271,6 +301,12 @@ private:
     static bool _parseUser(const uint8_t* data, size_t len, MeshUser& user);
     /// Decode a Meshtastic NodeStatus proto payload into status.
     static bool _parseNodeStatus(const uint8_t* data, size_t len, MeshNodeStatus& status);
+    /// Decode a PKIReport proto payload into report.
+    static bool _parsePkiReport(const uint8_t* data, size_t len, MeshPkiReport& report);
+    /// Encode a PKIReport proto into buf.  Returns bytes written.
+    static size_t _encodePkiReport(uint8_t* buf, size_t cap,
+                                    const uint8_t publicKey[32],
+                                    uint32_t requestorNodeNum = 0);
     /// Insert or update the neighbour table entry for fromNode.
     void _upsertNeighbor(uint32_t fromNode,
                          const MeshPosition*   pos,        // nullptr = no update

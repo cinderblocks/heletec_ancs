@@ -466,7 +466,7 @@ bool LoRa::transmit(const uint8_t* data, uint8_t len)
     bool ok = false;
     if (irq & IRQ_TX_DONE)
     {
-        ESP_LOGI(TAG, "TX complete (%u bytes)", len);
+        ESP_LOGD(TAG, "TX complete (%u bytes)", len);
         portENTER_CRITICAL(&_statsLock);
         _stats.txPackets++;
         portEXIT_CRITICAL(&_statsLock);

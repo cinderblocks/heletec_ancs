@@ -1029,6 +1029,24 @@ void LoRa::_processPacket(const uint8_t* buf, uint8_t pktLen,
         memcpy(msg.text, payload, copyLen);
         msg.text[copyLen] = '\0';
 
+        // Populate sender short name from the neighbour table so the TFT can
+        // display it instead of a raw hex node ID.
+        for (size_t ni = 0; ni < NEIGHBOR_MAX; ni++)
+        {
+            portENTER_CRITICAL(&_neighborLock);
+            const bool occ  = _neighbors[ni].occupied;
+            const bool match = occ && (_neighbors[ni].user.fromNode == from ||
+                                       _neighbors[ni].pos.fromNode  == from);
+            char sn[5] = {};
+            if (match) memcpy(sn, _neighbors[ni].user.shortName, sizeof(sn));
+            portEXIT_CRITICAL(&_neighborLock);
+            if (match && sn[0] != '\0')
+            {
+                strncpy(msg.shortName, sn, sizeof(msg.shortName) - 1);
+                break;
+            }
+        }
+
         ESP_LOGI(TAG, "Text from 0x%08" PRIx32 " (rssi=%d snr=%.1f) [%s]: %s",
                  from, rssi, (double)snr, isDirect ? "DM" : "CH", msg.text);
 

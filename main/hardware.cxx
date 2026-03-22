@@ -285,6 +285,8 @@ void Hardware::startDrawing(void* pvParameters)
             MeshMessage msg = Lora.lastMessage();
             if (msg.valid)
             {
+                // Play the walkie-talkie chirp while displaying the message.
+                Buzzer::play(Buzzer::SoundType::LORA);
                 h->showLoraMessage(msg);
                 h->glow(true);
                 vTaskDelay(pdMS_TO_TICKS(5000));
@@ -652,22 +654,79 @@ void Hardware::showLoraState(bool connected)
 void Hardware::showLoraMessage(MeshMessage const& msg)
 {
     blank();
-    mDisplay.fillRectangle(0, 20, mDisplay.width(), mDisplay.height() - 20, TFT::Color::WHITE);
 
-    // Header row: "Mesh" label + node ID in hex
-    char nodeStr[12];
-    snprintf(nodeStr, sizeof(nodeStr), "%08" PRIx32, msg.fromNode);
-    mDisplay.drawStr(0, 21, "Mesh", Font_7x10, TFT::Color::BLACK, TFT::Color::WHITE);
-    mDisplay.drawStr(mDisplay.width() - 56, 21, nodeStr, Font_7x10,
-                     TFT::Color::BLACK, TFT::Color::WHITE);
+    // ── Subheader bar (y=20..31, 12px) ───────────────────────────────────
+    // Cyan strip clearly distinguishes this from BLE notifications (white bg).
+    // Shows "MESH" label on the left and the sender identity on the right.
+    static constexpr uint16_t LORA_HDR_COLOR = TFT::Color::CYAN;
+    static constexpr uint16_t LORA_HDR_TEXT  = TFT::Color::BLACK;
+    mDisplay.fillRectangle(0, 20, mDisplay.width(), 12, LORA_HDR_COLOR);
+    mDisplay.drawStr(0, 21, "MESH", Font_7x10, LORA_HDR_TEXT, LORA_HDR_COLOR);
 
-    // Message text (up to two Font_11x18 lines)
-    mDisplay.drawStr(0, 44, msg.text, Font_11x18, TFT::Color::BLACK, TFT::Color::WHITE);
+    // Sender: prefer short name from the neighbour table; fall back to !xxxxxxxx.
+    char sender[12] = {};
+    if (msg.shortName[0] != '\0') {
+        strncpy(sender, msg.shortName, sizeof(sender) - 1);
+    } else {
+        snprintf(sender, sizeof(sender), "!%06" PRIx32, msg.fromNode & 0xFFFFFF);
+    }
 
-    // RSSI / SNR in small text at the bottom
-    char sigStr[24];
-    snprintf(sigStr, sizeof(sigStr), "%d dBm  %.1f dB", msg.rssi, (double)msg.snr);
-    mDisplay.drawStr(0, 100, sigStr, Font_7x10, TFT::Color::BLACK, TFT::Color::WHITE);
+    // RSSI in compact form (e.g. "-87") right-aligned in the subheader.
+    char rssiStr[12];  // "-32768dB\0" = 9 bytes worst-case; 12 gives ample headroom
+    snprintf(rssiStr, sizeof(rssiStr), "%ddB", (int)msg.rssi);
+    // Right-align RSSI: each char = 7px wide
+    const uint16_t rssiX = mDisplay.width() - (uint16_t)(strlen(rssiStr) * 7);
+    mDisplay.drawStr(rssiX, 21, rssiStr, Font_7x10, LORA_HDR_TEXT, LORA_HDR_COLOR);
+
+    // Sender name left of the RSSI, with a small gap
+    const uint16_t senderX = rssiX - (uint16_t)(strlen(sender) * 7) - 4;
+    if ((int16_t)senderX > 28) { // don't overlap "MESH" label
+        mDisplay.drawStr(senderX, 21, sender, Font_7x10, LORA_HDR_TEXT, LORA_HDR_COLOR);
+    }
+
+    // ── Message body (y=32..79 = 48px) ───────────────────────────────────
+    // White background, black text.  Two lines of Font_11x18 (18px each).
+    // drawStr already word-wraps at display edge and advances y by font height.
+    // We split the text into two draw calls so line 2 starts at y=50.
+    //
+    // Line capacity: floor(160 / 11) = 14 chars per line.
+    // Total chars in two lines: 28.  msg.text is up to 64 chars so truncation
+    // is expected for long messages; the first 28 chars are the most important.
+    mDisplay.fillRectangle(0, 32, mDisplay.width(), mDisplay.height() - 32,
+                           TFT::Color::WHITE);
+
+    // Split text at a word boundary near column 14 so line 2 doesn't start
+    // mid-word wherever possible.
+    static constexpr int CHARS_PER_LINE = 14; // floor(160 / 11)
+    const char* text = msg.text;
+    const size_t textLen = strlen(text);
+
+    char line1[CHARS_PER_LINE + 1] = {};
+    char line2[CHARS_PER_LINE + 1] = {};
+
+    if (textLen <= (size_t)CHARS_PER_LINE) {
+        // Entire message fits on one line.
+        strncpy(line1, text, CHARS_PER_LINE);
+    } else {
+        // Find a space to break on near char 14; fall back to hard-break.
+        int breakAt = CHARS_PER_LINE;
+        for (int b = CHARS_PER_LINE; b >= CHARS_PER_LINE - 4 && b > 0; b--) {
+            if (text[b] == ' ') { breakAt = b; break; }
+        }
+        strncpy(line1, text, breakAt);
+        const char* rest = text + breakAt + (text[breakAt] == ' ' ? 1 : 0);
+        strncpy(line2, rest, CHARS_PER_LINE);
+    }
+
+    mDisplay.drawStr(0, 33, line1, Font_11x18, TFT::Color::BLACK, TFT::Color::WHITE);
+    if (line2[0] != '\0')
+        mDisplay.drawStr(0, 52, line2, Font_11x18, TFT::Color::BLACK, TFT::Color::WHITE);
+
+    // ── Signal quality (y=71..79, Font_7x10) ─────────────────────────────
+    // SNR only — RSSI already shown in subheader, and there's just 9px left.
+    char snrStr[16];
+    snprintf(snrStr, sizeof(snrStr), "SNR %.1fdB", (double)msg.snr);
+    mDisplay.drawStr(0, 70, snrStr, Font_7x10, TFT::Color::BLACK, TFT::Color::WHITE);
 }
 
 void Hardware::showPositionMessage(MeshPosition const& pos)

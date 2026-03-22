@@ -32,6 +32,7 @@ static const char* TAG = "buzzer";
 // in C++14 when ODR-used (passed by pointer to _playTask).
 constexpr Buzzer::Note Buzzer::NOTIF_MELODY[];
 constexpr Buzzer::Note Buzzer::RING_MELODY[];
+constexpr Buzzer::Note Buzzer::LORA_MELODY[];
 
 // ── _taskHandle thread-safety note ───────────────────────────────────────
 // _taskHandle is accessed from three places:
@@ -144,7 +145,7 @@ void Buzzer::stop()
 }
 
 // ── play ─────────────────────────────────────────────────────────────────
-void Buzzer::play(bool isCall)
+void Buzzer::play(SoundType type)
 {
 #if !CONFIG_BUZZER_ENABLED
     return;
@@ -158,18 +159,15 @@ void Buzzer::play(bool isCall)
     // static lifetime outlasts any task).
     static const PlayArgs notifArgs{ NOTIF_MELODY, sizeof(NOTIF_MELODY) / sizeof(NOTIF_MELODY[0]) };
     static const PlayArgs ringArgs { RING_MELODY,  sizeof(RING_MELODY)  / sizeof(RING_MELODY[0])  };
+    static const PlayArgs loraArgs { LORA_MELODY,  sizeof(LORA_MELODY)  / sizeof(LORA_MELODY[0])  };
 
-    const PlayArgs* args = isCall ? &ringArgs : &notifArgs;
+    const PlayArgs* args;
+    switch (type) {
+        case SoundType::CALL:  args = &ringArgs;  break;
+        case SoundType::LORA:  args = &loraArgs;  break;
+        default:               args = &notifArgs; break;
+    }
 
-    // Pin to core 0 — the same core as the draw task (which is pinned to core 0
-    // via xTaskCreatePinnedToCore in Hardware::begin).  Both tasks share one core,
-    // so their accesses to the static _taskHandle are strictly sequential and the
-    // "nullptr written by _playTask then read stale on core 0" cache-coherency race
-    // that exists with xTaskCreate (no affinity, may land on core 1) is eliminated.
-    //
-    // Use a plain local for the out-parameter: xTaskCreatePinnedToCore takes
-    // TaskHandle_t* (non-volatile), so we cannot pass &_taskHandle directly.
-    // The assignment into the volatile member happens after the call.
     TaskHandle_t handle = nullptr;
     BaseType_t rc = xTaskCreatePinnedToCore(
         _playTask,

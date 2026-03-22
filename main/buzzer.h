@@ -27,27 +27,37 @@
  * Buzzer — passive buzzer driver (GPIO 45) via LEDC PWM.
  *
  * Call init() once from Hardware::begin().
- * Call play(isCall) when a notification or incoming call arrives.
+ * Call play(type) when a notification, call, or Meshtastic message arrives.
  * Call stop() to silence immediately (e.g. on BLE disconnect).
  *
- * Two melodies, each exactly 5 000 ms:
- *   isCall = false → ascending notification arpeggio (C6/E6/G6, 5 cycles)
- *   isCall = true  → double-ring ringtone (B5, 3 rings)
+ * Three melodies, each ≤ 5 000 ms:
+ *   NOTIFICATION → ascending arpeggio (C6/E6/G6, 5 cycles, 5 000 ms)
+ *   CALL         → double-ring ringtone (B5, 3 rings, 5 000 ms)
+ *   LORA         → walkie-talkie "over" chirp (G5/A5, 2 × 1 200 ms, 2 400 ms)
+ *                  Short and distinctive — sounds like radio comms, not a phone.
  *
  * Playback runs in a dedicated low-priority FreeRTOS task so the draw
- * task is never blocked.  Since each notification display window is 15 s
- * and each melody is 5 s, the task always finishes naturally before the
- * next play() call — stop() is a defensive guard only.
+ * task is never blocked.
  */
 class Buzzer
 {
 public:
+    /// Sound type selector for play().
+    enum class SoundType : uint8_t {
+        NOTIFICATION = 0,  ///< BLE notification arpeggio
+        CALL         = 1,  ///< incoming call ringtone
+        LORA         = 2,  ///< LoRa message chirp
+    };
+
     /// Configure the LEDC peripheral.  Must be called before play() or stop().
     static void init();
 
-    /// Start a 5-second melody.  Stops any current playback first.
-    /// @param isCall  true → ringtone; false → notification arpeggio.
-    static void play(bool isCall = false);
+    /// Start a melody for the given sound type.  Stops any current playback first.
+    static void play(SoundType type = SoundType::NOTIFICATION);
+
+    /// Convenience overload — true selects CALL, false selects NOTIFICATION.
+    /// Kept for backward compatibility with existing callers.
+    static void play(bool isCall) { play(isCall ? SoundType::CALL : SoundType::NOTIFICATION); }
 
     /// Silence immediately and cancel any in-progress playback.
     static void stop();
@@ -82,6 +92,16 @@ private:
         {988, 400}, {0, 100}, {988, 400}, {0, 100}, {0, 800},
     };
     // 1 600 + 1 600 + 1 800 = 5 000 ms ✓
+
+    // Walkie-talkie "over" chirp: G5 double-tap → A5 confirmation, 2× = 2 400 ms.
+    // G5 = 784 Hz, A5 = 880 Hz.  Lower and shorter than the BLE arpeggio so it
+    // sounds like radio comms, not a phone notification.
+    // Cycle: 150+60+150+60+300+480 = 1 200 ms × 2 = 2 400 ms
+    static constexpr Note LORA_MELODY[] = {
+        {784, 150}, {0, 60}, {784, 150}, {0, 60}, {880, 300}, {0, 480},
+        {784, 150}, {0, 60}, {784, 150}, {0, 60}, {880, 300}, {0, 480},
+    };
+    // 2 × 1 200 = 2 400 ms ✓
 
     struct PlayArgs { const Note* notes; size_t count; };
 

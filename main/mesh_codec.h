@@ -44,6 +44,7 @@
 struct MeshMessage {
     uint32_t fromNode = 0;   ///< sender node ID
     char     text[65] = {};  ///< UTF-8 text, null-terminated, max 64 chars
+    char     shortName[5] = {}; ///< sender short name from neighbour table (4 chars + NUL); "" if unknown
     int16_t  rssi     = 0;   ///< signal strength in dBm
     float    snr      = 0.f; ///< signal-to-noise ratio in dB
     bool     valid    = false;

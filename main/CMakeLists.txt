@@ -3,9 +3,11 @@
 set(SOURCE_FILES
     applist.cxx
     applistservice.cxx
+    battery_monitor.cxx
     bleservice.cxx
     buzzer.cxx
     diag.cxx
+    display.cxx
     fonts.cxx
     gps.cxx
     hardware.cxx

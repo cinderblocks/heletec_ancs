@@ -20,25 +20,13 @@
 #include "ancs.h"
 #include "bleservice.h"
 #include "hardware.h"
+#include "util.h"
 #include <NimBLERemoteCharacteristic.h>
 #include <algorithm>
 #include <cinttypes>
 #include <cstring>
 
 static const char* TAG = "notify";
-
-// ---------------------------------------------------------------------------
-// Scoped mutex guard — takes on construction, releases on destruction.
-// Ensures the mutex is always released even on early return or exception.
-// ---------------------------------------------------------------------------
-struct ScopedLock {
-    explicit ScopedLock(SemaphoreHandle_t m) : _m(m) { if (_m) xSemaphoreTake(_m, portMAX_DELAY); }
-    ~ScopedLock() { if (_m) xSemaphoreGive(_m); }
-    ScopedLock(const ScopedLock&) = delete;
-    ScopedLock& operator=(const ScopedLock&) = delete;
-private:
-    SemaphoreHandle_t _m;
-};
 
 NotificationService::NotificationService()
 :   notificationCount(0)

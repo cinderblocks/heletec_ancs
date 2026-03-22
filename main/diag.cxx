@@ -48,7 +48,7 @@ size_t Diag::buildReport(char* buf, size_t bufSize)
     const uint32_t upSec    = (uint32_t)(esp_timer_get_time() / 1000000ULL);
     const uint32_t heap     = (uint32_t)esp_get_free_heap_size();
     const uint32_t heapMin  = (uint32_t)esp_get_minimum_free_heap_size();
-    const unsigned bat      = (unsigned)Heltec.getBatteryLevel();
+    const unsigned bat      = (unsigned)Heltec.cachedBatteryLevel();
     const int      bleConn  = Ble.isConnected() ? 1 : 0;
     const int      bonds    = (int)NimBLEDevice::getNumBonds();
     const unsigned notif    = (unsigned)Notifications.getNotificationCount();

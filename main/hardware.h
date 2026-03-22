@@ -18,66 +18,52 @@
 #ifndef HARDWARE_H_
 #define HARDWARE_H_
 
+#include "battery_monitor.h"
+#include "display.h"          // pulls in util.h → conn_state_def
 #include <freertos/FreeRTOS.h>
 #include <freertos/portmacro.h>
-#include <freertos/semphr.h>
-#include <esp_adc/adc_oneshot.h>
+#include <freertos/timers.h>
 #include <time.h>
 #include <climits>
-#include "tft.h"
 
 struct notification_def;
-
-enum conn_state_def
-{
-    BLE_DISCONNECTED = 0,
-    BLE_PAIRING,
-    BLE_SERVER_CONNECTED,
-    BLE_CONNECTED
-};
-
-using PairButtonCallback = void (*)();
 
 class Hardware
 {
     friend class NotificationService;
 
 public:
-    static constexpr uint8_t ADC_CTRL = 2;
-    static constexpr uint8_t VEXT_CTRL = 3;
+    static constexpr uint8_t ADC_CTRL   = 2;
+    static constexpr uint8_t VEXT_CTRL  = 3;
 
     // TFT
-    static constexpr uint8_t ST7735_CS = 38;
+    static constexpr uint8_t ST7735_CS   = 38;
     static constexpr uint8_t ST7735_REST = 39;
-    static constexpr uint8_t ST7735_RS = 40;
+    static constexpr uint8_t ST7735_RS   = 40;
     static constexpr uint8_t ST7735_SCLK = 41;
     static constexpr uint8_t ST7735_MOSI = 42;
-    static constexpr uint8_t ST7735_LED = 21;
+    static constexpr uint8_t ST7735_LED  = 21;
 
     // Misc
-    static constexpr uint8_t BUTTON     = 0;
+    static constexpr uint8_t BUTTON      = 0;
     static constexpr uint8_t FACTORY_LED = 18;
-    static constexpr uint8_t VBAT_READ  = 1;
-    static constexpr uint8_t BUZZER     = 45;
-    // Note: the TP4054 CHRG pin is only wired to the onboard LED on the
-    // Heltec Wireless Tracker 1.1 — it is NOT connected to any ESP32 GPIO.
-
-    static constexpr uint16_t HEADER_COLOR = 0x3190;
+    static constexpr uint8_t VBAT_READ   = 1;
+    static constexpr uint8_t BUZZER      = 45;
 
     // Task-notification event bits for the draw task
-    static constexpr uint32_t DRAW_NOTIFY  = (1u << 0); // new notification ready
-    static constexpr uint32_t DRAW_STATE   = (1u << 1); // BLE state changed
-    static constexpr uint32_t DRAW_BATTERY = (1u << 2); // battery level check
-    static constexpr uint32_t DRAW_TIME    = (1u << 3); // CTS clock updated
-    static constexpr uint32_t DRAW_GPS     = (1u << 4); // GPS fix state changed
-    static constexpr uint32_t DRAW_LORA      = (1u << 5); // Meshtastic text message
-    static constexpr uint32_t DRAW_LORA_POS  = (1u << 6); // Meshtastic position received
-    static constexpr uint32_t DRAW_LORA_NODE = (1u << 7); // Meshtastic nodeinfo received
-    static constexpr uint32_t DRAW_LORA_MESH = (1u << 8); // LoRa mesh connection state changed
-    static constexpr uint32_t DRAW_CHARGING  = (1u << 9); // USB VBUS / charge state changed
+    static constexpr uint32_t DRAW_NOTIFY    = (1u << 0);
+    static constexpr uint32_t DRAW_STATE     = (1u << 1);
+    static constexpr uint32_t DRAW_BATTERY   = (1u << 2);
+    static constexpr uint32_t DRAW_TIME      = (1u << 3);
+    static constexpr uint32_t DRAW_GPS       = (1u << 4);
+    static constexpr uint32_t DRAW_LORA      = (1u << 5);
+    static constexpr uint32_t DRAW_LORA_POS  = (1u << 6);
+    static constexpr uint32_t DRAW_LORA_NODE = (1u << 7);
+    static constexpr uint32_t DRAW_LORA_MESH = (1u << 8);
+    static constexpr uint32_t DRAW_CHARGING  = (1u << 9);
 
     Hardware();
-    ~Hardware();
+    ~Hardware() = default;
     void begin();
 
     void pairing(const char* passcode);
@@ -98,86 +84,51 @@ public:
      */
     void onTimeSync(const struct tm *localTime, int32_t utcOffsetSec);
 
-    uint8_t getBatteryLevel();
+    /**
+     * Trigger a fresh ADC read and return the updated battery percentage.
+     * Blocks ~100 ms while the voltage-divider rail settles.
+     */
+    uint8_t getBatteryLevel()  { _battery.update(); return _battery.level();   }
 
     /**
-     * Read the current battery voltage in volts via the ADC voltage divider.
-     * Reads ADC once (averaged), updates both level and voltage caches.
-     * Thread-safe: may block ~100 ms while the rail settles.
+     * Trigger a fresh ADC read and return the updated battery voltage in volts.
+     * Blocks ~100 ms while the voltage-divider rail settles.
      */
-    float getBatteryVoltage();
+    float   getBatteryVoltage() { _battery.update(); return _battery.voltage(); }
 
     /** Return the last cached battery percentage (updated every 30 s). */
-    uint8_t cachedBatteryLevel()  const { return mBatteryLevel;  }
+    uint8_t cachedBatteryLevel()   const { return _battery.level();     }
 
     /** Return the last cached battery voltage in volts (updated every 30 s). */
-    float   cachedBatteryVoltage() const { return mBatteryVoltage; }
+    float   cachedBatteryVoltage() const { return _battery.voltage();   }
 
     /**
      * Return true when the TP4054 charger is believed to be active.
-     *
-     * Detection uses two methods OR'd together (matching Meshtastic's
-     * fallback chain for this board):
-     *   1. USB Serial/JTAG VBUS sense — works if the ESP32-S3 native USB PHY
-     *      (GPIO19/20) is wired to the USB-C port.  On Heltec Wireless Tracker
-     *      1.1 the USB-C port goes through the CP2102N bridge, so this always
-     *      returns false on that hardware.
-     *   2. Battery voltage > 4.15 V — the TP4054 holds VBAT at 4.20 V during
-     *      CC/CV charging, measurably above the resting full voltage of
-     *      ~4.10–4.15 V (same threshold Meshtastic uses as its isVbusIn()
-     *      fallback for boards without EXT_CHRG_DETECT).
-     *
-     * Updated every time _updateBatteryCache() runs (every 30 s).
+     * Detection: battery voltage > 4.15 V (TP4054 holds VBAT at 4.20 V during charging).
+     * Updated every time BatteryMonitor::update() runs (every 30 s).
      */
-    bool isCharging() const { return mIsCharging; }
+    bool isCharging() const { return _battery.isCharging(); }
 
 private:
     static void startDrawing(void* pvParameters);
-    static void batteryTimerCallback(TimerHandle_t xTimer);
     static void clockTimerCallback(TimerHandle_t xTimer);
     void showNotification(notification_def const& notification);
 
-    /** Read ADC once and update mBatteryLevel + mBatteryVoltage. */
-    void _updateBatteryCache();
+    TaskHandle_t  mDrawTask = nullptr;
 
-    void blank();
-    void drawIcon(uint16_t x, uint16_t y, uint8_t const* xbm, uint16_t color = TFT::Color::WHITE);
-    void showBLEState(conn_state_def state);
-    void showBatteryLevel(uint8_t percent);
-    void standby();
+    Display        _display;
+    BatteryMonitor _battery;
 
-    TaskHandle_t mDrawTask = nullptr;
+    conn_state_def mBleState     = BLE_DISCONNECTED;
+    bool           mGpsFixed     = false;
+    bool           mLoraConnected = false;
 
-    TFT mDisplay;
-    conn_state_def mBleState = BLE_DISCONNECTED;
-    bool mCallState = false;
-    bool mGpsFixed  = false;
-    bool mLoraConnected = false;
-    uint8_t mBatteryLevel   = 0;
-    float   mBatteryVoltage = 0.0f;
-    bool    mIsCharging     = false;
     int32_t mUtcOffsetSeconds = INT32_MIN;  // INT32_MIN = not yet synced
-    // Fixed-size arrays instead of String to allow safe writes from non-draw tasks
-    // (BTC task writes mMessage; GPS task writes mTimestamp).  Both are protected
-    // by mHardwareLock when crossing task boundaries.
-    char mMessage[32]   = {};
-    char mTimestamp[8]  = {};
-    portMUX_TYPE  mHardwareLock; // initialized in Hardware() via portMUX_INITIALIZE
-    // ── ADC mutex ─────────────────────────────────────────────────────────
-    // _updateBatteryCache() holds GPIO2 (ADC_CTRL) HIGH for 100 ms while the
-    // voltage-divider rail settles, then reads ADC1_CH0.  If two tasks enter
-    // concurrently (draw task via DRAW_BATTERY and the NimBLE/diag timer task
-    // via getBatteryLevel()), one task can disable GPIO2 while the other is
-    // still settling, yielding a wrong reading.
-    //
-    // A portMUX_TYPE spinlock CANNOT be used here because it must never be
-    // held across a blocking call (vTaskDelay).  A proper FreeRTOS mutex
-    // (binary semaphore with priority inheritance) serialises callers and
-    // allows the blocked task to sleep rather than spin.
-    SemaphoreHandle_t mAdcMutex = nullptr;
-    TimerHandle_t mBatteryTimer = nullptr;
-    TimerHandle_t mClockTimer   = nullptr;
-    adc_oneshot_unit_handle_t mAdcHandle = nullptr;
+    char    mMessage[32]      = {};         // pairing passcode / hint (BTC task writer)
+    char    mTimestamp[8]     = {};         // "HH:MM\0" (clock timer writer)
+
+    portMUX_TYPE  mHardwareLock;  // initialised in Hardware() via portMUX_INITIALIZE
+    TimerHandle_t mClockTimer = nullptr;
 };
 
 extern Hardware Heltec;

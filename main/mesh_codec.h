@@ -245,7 +245,8 @@ size_t mc_encodeMapReport(uint8_t* buf, size_t cap,
                            uint32_t hwModel,
                            uint8_t  regionCode,         ///< RegionCode: US=1, EU_868=3
                            uint8_t  modemPreset,        ///< ModemPreset: LONG_FAST=0
-                           const char* firmwareVersion = nullptr); ///< 2.7.x field 4; nullptr = omit
+                           const char* firmwareVersion = nullptr, ///< 2.7.x field 4; nullptr = omit
+                           bool hasPosition = true);    ///< false = omit fields 8-11 (no GPS fix)
 
 // ── Meshtastic proto decoders ─────────────────────────────────────────────
 

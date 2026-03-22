@@ -37,3 +37,19 @@ CONFIG_ESP_TASK_WDT_TIMEOUT_S=15
 # A panic-reboot from a transient load spike is worse than the starvation itself.
 CONFIG_ESP_TASK_WDT_PANIC=n
 CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=n
+
+# ── Light sleep / tickless idle ──────────────────────────────────────────
+# Allow the CPU to enter light sleep automatically during genuine FreeRTOS
+# idle periods (between BLE events, LoRa DIO1 IRQs, and GPS UART events).
+# FreeRTOS tickless idle consolidates 1 kHz tick interrupts into a single
+# wakeup at the next scheduled task deadline, yielding measurable power
+# savings with zero application code changes.
+#
+# Notes:
+#  - CONFIG_PM_DFS_INIT_AUTO is left off (default) so the CPU stays at
+#    the configured maximum frequency (240 MHz) — avoids SPI timing changes
+#    during LoRa/TFT transactions.
+#  - The BLE stack (NimBLE) and UART driver both support light-sleep wakeup
+#    natively on the ESP32-S3.
+CONFIG_PM_ENABLE=y
+CONFIG_FREERTOS_USE_TICKLESS_IDLE=1

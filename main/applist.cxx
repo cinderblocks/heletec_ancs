@@ -16,25 +16,13 @@
  */
 
 #include "applist.h"
+#include "util.h"
 #include <nvs_flash.h>
 #include <nvs.h>
 #include <cstring>
 #include <esp_log.h>
 
 static const char* TAG = "applist";
-
-// ---------------------------------------------------------------------------
-// Scoped mutex guard — matches the pattern in notificationservice.cxx.
-// Null-safe: no-ops when the handle is nullptr (OOM at construction time).
-// ---------------------------------------------------------------------------
-struct ScopedLock {
-    explicit ScopedLock(SemaphoreHandle_t m) : _m(m) { if (_m) xSemaphoreTake(_m, portMAX_DELAY); }
-    ~ScopedLock() { if (_m) xSemaphoreGive(_m); }
-    ScopedLock(const ScopedLock&) = delete;
-    ScopedLock& operator=(const ScopedLock&) = delete;
-private:
-    SemaphoreHandle_t _m;
-};
 
 // NVS namespace and key names.
 static constexpr char NVS_NAMESPACE[] = "applist";

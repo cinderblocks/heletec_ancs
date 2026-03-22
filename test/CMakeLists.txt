@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 project(heltec_ancs_tests CXX C)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_C_STANDARD   11)
 
 # ── Fetch Unity test framework ────────────────────────────────────────────
@@ -158,4 +158,11 @@ add_firmware_test(test_applist
 # ── test_notification_def ─────────────────────────────────────────────────
 add_firmware_test(test_notification_def
     test_notification_def.cxx
+)
+
+# ── test_battery_monitor ──────────────────────────────────────────────────
+# Tests the piecewise-linear LiPo discharge curve (BatteryMonitor::_voltageToPct).
+# Platform-free: the curve logic is replicated inline, so no firmware stubs needed.
+add_firmware_test(test_battery_monitor
+    test_battery_monitor.cxx
 )

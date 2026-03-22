@@ -678,7 +678,8 @@ bool LoRa::sendTelemetry()
                                             int32_t lat_i, int32_t lon_i,
                                             int32_t alt_m,
                                             uint32_t numNeighbors,
-                                            const char* firmwareVersion)
+                                            const char* firmwareVersion,
+                                            bool hasPosition)
 {
 #if   defined(CONFIG_LORA_PRESET_LONG_SLOW)
     static constexpr uint8_t MODEM_PRESET = 1;
@@ -694,7 +695,8 @@ bool LoRa::sendTelemetry()
                                HW_MODEL,
                                static_cast<uint8_t>(CONFIG_LORA_REGION_CODE),
                                MODEM_PRESET,
-                               firmwareVersion);
+                               firmwareVersion,
+                               hasPosition);
 }
 
 // ── sendMapReport ─────────────────────────────────────────────────────────
@@ -707,22 +709,27 @@ bool LoRa::sendMapReport()
     return false; // disabled via Kconfig
 #endif
 
-    if (!gps.isFixed())
-    {
-        ESP_LOGD(TAG, "MAP_REPORT skipped — no GPS fix");
-        return false;
+    // When a GPS fix is available, include position fields (8–11) so the node
+    // appears on the public Meshtastic map.  When no fix is available, send a
+    // degraded report that still carries identity, firmware version, and region
+    // so the node stays visible in node lists even without coordinates.
+    const bool hasPos = gps.isFixed();
+    int32_t lat_i = 0, lon_i = 0, alt_m = 0;
+    if (hasPos) {
+        lat_i = static_cast<int32_t>(gps.lat() * 1e7);
+        lon_i = static_cast<int32_t>(gps.lng() * 1e7);
+        alt_m = static_cast<int32_t>(gps.altitude());
+    } else {
+        ESP_LOGD(TAG, "MAP_REPORT: no GPS fix — sending identity-only report");
     }
-
-    const int32_t lat_i = static_cast<int32_t>(gps.lat() * 1e7);
-    const int32_t lon_i = static_cast<int32_t>(gps.lng() * 1e7);
-    const int32_t alt_m = static_cast<int32_t>(gps.altitude());
 
     uint8_t mrBuf[192] = {};
     const size_t mrLen = _encodeMapReport(mrBuf, sizeof(mrBuf),
                                            Node.longName(), Node.shortName(),
                                            lat_i, lon_i, alt_m,
                                            neighborCount(),
-                                           CONFIG_MESH_FIRMWARE_VERSION);
+                                           CONFIG_MESH_FIRMWARE_VERSION,
+                                           hasPos);
     if (mrLen == 0) return false;
 
     uint8_t pkt[256] = {};
@@ -730,10 +737,14 @@ bool LoRa::sendMapReport()
     if (!_buildTxPacket(pkt, pktLen, PORT_MAP_REPORT, mrBuf, mrLen,
                         /*want_response=*/false)) return false;
 
-    ESP_LOGI(TAG, "TX MAP_REPORT lat=%.6f lon=%.6f alt=%dm neighbors=%u role=%u fw=%s",
-             (double)lat_i / 1e7, (double)lon_i / 1e7, (int)alt_m,
-             (unsigned)neighborCount(), (unsigned)CONFIG_MESH_NODE_ROLE,
-             CONFIG_MESH_FIRMWARE_VERSION);
+    if (hasPos) {
+        ESP_LOGI(TAG, "TX MAP_REPORT lat=%.6f lon=%.6f alt=%dm neighbors=%u fw=%s",
+                 (double)lat_i / 1e7, (double)lon_i / 1e7, (int)alt_m,
+                 (unsigned)neighborCount(), CONFIG_MESH_FIRMWARE_VERSION);
+    } else {
+        ESP_LOGI(TAG, "TX MAP_REPORT (no-pos) neighbors=%u fw=%s",
+                 (unsigned)neighborCount(), CONFIG_MESH_FIRMWARE_VERSION);
+    }
     return transmit(pkt, pktLen);
 }
 

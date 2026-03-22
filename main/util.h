@@ -18,7 +18,35 @@
 #ifndef HELTEC_ANCS_UTIL_H
 #define HELTEC_ANCS_UTIL_H
 
-// There was stuff here. There isn't anymore, but it's being retained as
-// a placeholder. (I would miss it if I deleted it.)
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+
+// ── BLE connection state ───────────────────────────────────────────────────
+// Defined here (not in hardware.h) so that Display and BleService can use
+// it without a circular dependency on Hardware.
+enum conn_state_def
+{
+    BLE_DISCONNECTED = 0,
+    BLE_PAIRING,
+    BLE_SERVER_CONNECTED,
+    BLE_CONNECTED
+};
+
+// ── ScopedLock ────────────────────────────────────────────────────────────
+// RAII wrapper for a FreeRTOS mutex semaphore.  Takes the mutex on
+// construction and releases it on destruction, ensuring it is always
+// released even on early return.
+//
+// Do NOT hold a ScopedLock across a task delay or any blocking call —
+// use a plain mutex (xSemaphoreTake/Give) in those cases.
+struct ScopedLock {
+    explicit ScopedLock(SemaphoreHandle_t m) : _m(m)
+    { if (_m) xSemaphoreTake(_m, portMAX_DELAY); }
+    ~ScopedLock() { if (_m) xSemaphoreGive(_m); }
+    ScopedLock(const ScopedLock&) = delete;
+    ScopedLock& operator=(const ScopedLock&) = delete;
+private:
+    SemaphoreHandle_t _m;
+};
 
 #endif // HELTEC_ANCS_UTIL_H

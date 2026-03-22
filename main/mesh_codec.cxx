@@ -23,6 +23,7 @@
  */
 
 #include "mesh_codec.h"
+#include <bit>        // std::bit_cast (C++20)
 #include <cinttypes>
 #include <cstdio>
 #include <algorithm>
@@ -233,8 +234,10 @@ size_t mc_encodeTelemetry(uint8_t* buf, size_t /*cap*/,
     dm[dmn++] = 0x08;                                  // DeviceMetrics Field 1: battery_level
     dmn += mc_pbVarint(dm + dmn, batteryLevel);
 
-    { uint32_t vbits; memcpy(&vbits, &batteryVoltage, 4);
-      dmn += writeFixed32(dm + dmn, 0x15, vbits); }    // DeviceMetrics Field 2: voltage (float)
+    // std::bit_cast<uint32_t> reinterprets the float bits without undefined
+    // behaviour — the C++20 replacement for the memcpy type-pun idiom.
+    dmn += writeFixed32(dm + dmn, 0x15,
+                        std::bit_cast<uint32_t>(batteryVoltage)); // Field 2: voltage
 
     // Field 3: channel_utilization (float, tag 0x1D = (3<<3)|5).
     // We have no airtime tracking infrastructure; emit 0.0f explicitly so the
@@ -262,7 +265,8 @@ size_t mc_encodeMapReport(uint8_t* buf, size_t /*cap*/,
                            uint32_t hwModel,
                            uint8_t  regionCode,
                            uint8_t  modemPreset,
-                           const char* firmwareVersion)
+                           const char* firmwareVersion,
+                           bool hasPosition)
 {
     size_t n = 0;
 
@@ -287,16 +291,21 @@ size_t mc_encodeMapReport(uint8_t* buf, size_t /*cap*/,
     buf[n++] = 0x28; n += mc_pbVarint(buf + n, regionCode); // Field 5: region
     buf[n++] = 0x30; n += mc_pbVarint(buf + n, modemPreset);// Field 6: modem_preset
     buf[n++] = 0x38; buf[n++] = 0x01;                 // Field 7: has_default_channel = true
-    writeFixed32(0x45, static_cast<uint32_t>(lat_i)); // Field 8: latitude_i
-    writeFixed32(0x4D, static_cast<uint32_t>(lon_i)); // Field 9: longitude_i
 
-    if (alt_m != 0)
-    {
-        buf[n++] = 0x50;
-        n += mc_pbVarint(buf + n, static_cast<uint64_t>(static_cast<int64_t>(alt_m))); // Field 10
+    // Fields 8–11: position data — omit when no GPS fix.
+    // Receivers still get identity/firmware/region info; position appears absent.
+    if (hasPosition) {
+        writeFixed32(0x45, static_cast<uint32_t>(lat_i)); // Field 8: latitude_i
+        writeFixed32(0x4D, static_cast<uint32_t>(lon_i)); // Field 9: longitude_i
+
+        if (alt_m != 0)
+        {
+            buf[n++] = 0x50;
+            n += mc_pbVarint(buf + n, static_cast<uint64_t>(static_cast<int64_t>(alt_m))); // Field 10
+        }
+
+        buf[n++] = 0x58; n += mc_pbVarint(buf + n, 32);   // Field 11: position_precision
     }
-
-    buf[n++] = 0x58; n += mc_pbVarint(buf + n, 32);   // Field 11: position_precision
 
     if (numNeighbors > 0)
     {

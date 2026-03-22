@@ -345,12 +345,15 @@ private:
     /// Encode a Meshtastic MapReport proto (MAP_REPORT_APP payload).
     /// Carries node identity, region, modem preset, firmware version, and GPS fix.
     /// Field 4 (firmware_version) is included for Meshtastic 2.7.x map-bridge compat.
+    /// @param hasPosition  true = include fields 8-11 (lat/lon/alt/precision).
+    ///                     false = omit them (identity-only report when no GPS fix).
     /// Returns bytes written.
     static size_t _encodeMapReport(uint8_t* buf, size_t cap,
                                    const char* longName, const char* shortName,
                                    int32_t lat_i, int32_t lon_i, int32_t alt_m,
                                    uint32_t numNeighbors,
-                                   const char* firmwareVersion = nullptr);
+                                   const char* firmwareVersion = nullptr,
+                                   bool hasPosition = true);
 
     /// Wrap an encoded payload in a Meshtastic Data proto. Returns bytes written.
     /// dest is fixed32 (field 4). requestId is fixed32 (field 6 = request_id).

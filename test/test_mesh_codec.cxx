@@ -2188,6 +2188,66 @@ void test_meshmessage_isalert_set(void)
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// 18. mc_encodeMapReport hasPosition=false — identity-only degraded report
+// ─────────────────────────────────────────────────────────────────────────
+
+void test_encodeMapReport_no_position_omits_latlon(void)
+{
+    uint8_t buf[200] = {};
+    size_t n = mc_encodeMapReport(buf, sizeof(buf),
+                                   "NoPos", "NP",
+                                   /*lat_i=*/123456789, /*lon_i=*/-987654321, /*alt_m=*/500,
+                                   /*numNeighbors=*/1,
+                                   /*hwModel=*/48,
+                                   /*regionCode=*/1,
+                                   /*modemPreset=*/0,
+                                   /*firmwareVersion=*/"2.7.15.0",
+                                   /*hasPosition=*/false);
+    TEST_ASSERT_GREATER_THAN(0u, n);
+
+    // Position fields must be absent.
+    TEST_ASSERT_EQUAL_MESSAGE(-1, findTag(buf, n, 0x45),
+        "field 8 (latitude_i) must be omitted when hasPosition=false");
+    TEST_ASSERT_EQUAL_MESSAGE(-1, findTag(buf, n, 0x4D),
+        "field 9 (longitude_i) must be omitted when hasPosition=false");
+    TEST_ASSERT_EQUAL_MESSAGE(-1, findTag(buf, n, 0x50),
+        "field 10 (altitude) must be omitted when hasPosition=false");
+    TEST_ASSERT_EQUAL_MESSAGE(-1, findTag(buf, n, 0x58),
+        "field 11 (position_precision) must be omitted when hasPosition=false");
+}
+
+void test_encodeMapReport_no_position_keeps_identity_fields(void)
+{
+    uint8_t buf[200] = {};
+    size_t n = mc_encodeMapReport(buf, sizeof(buf),
+                                   "NoPos", "NP",
+                                   0, 0, 0,
+                                   0,
+                                   /*hwModel=*/48,
+                                   /*regionCode=*/1,
+                                   /*modemPreset=*/0,
+                                   /*firmwareVersion=*/"2.7.15.0",
+                                   /*hasPosition=*/false);
+    TEST_ASSERT_GREATER_THAN(0u, n);
+
+    // Identity / meta fields must still be present.
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(-1, findTag(buf, n, 0x0A),
+        "field 1 (long_name) must be present even without position");
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(-1, findTag(buf, n, 0x12),
+        "field 2 (short_name) must be present even without position");
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(-1, findTag(buf, n, 0x18),
+        "field 3 (hw_model) must be present even without position");
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(-1, findTag(buf, n, 0x22),
+        "field 4 (firmware_version) must be present even without position");
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(-1, findTag(buf, n, 0x28),
+        "field 5 (region) must be present even without position");
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(-1, findTag(buf, n, 0x30),
+        "field 6 (modem_preset) must be present even without position");
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(-1, findTag2(buf, n, 0x38, 0x01),
+        "field 7 (has_default_channel) must be present even without position");
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // Main
 // ─────────────────────────────────────────────────────────────────────────
 int main(void)
@@ -2361,6 +2421,10 @@ int main(void)
     RUN_TEST(test_alert_portnum_value);
     RUN_TEST(test_meshmessage_isalert_default_false);
     RUN_TEST(test_meshmessage_isalert_set);
+
+    // 18. mc_encodeMapReport hasPosition=false — identity-only degraded report
+    RUN_TEST(test_encodeMapReport_no_position_omits_latlon);
+    RUN_TEST(test_encodeMapReport_no_position_keeps_identity_fields);
 
     return UNITY_END();
 }

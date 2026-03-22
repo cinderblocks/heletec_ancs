@@ -399,14 +399,29 @@ bool LoRa::_parseData(const uint8_t* data, size_t len,
 
 // ── _buildTxPacket ────────────────────────────────────────────────────────
 // Build a complete Meshtastic OTA packet ready for transmit().
-// Data proto is always AES-128-CTR encrypted with the channel PSK, even in
-// IsLicensed mode.  Stock Meshtastic nodes match chanHash=0x08 to their
-// encrypted LongFast channel and AES-CTR decrypt — sending plaintext with
-// that hash causes receivers to "decrypt" the raw bytes into garbage.
+//
+// Two modes controlled by CONFIG_LORA_IS_LICENSED:
+//
+// Encrypted mode (IS_LICENSED=n, default):
+//   chanHash = 0x08 (DEFAULT_CHAN_HASH — encrypted LongFast PSK)
+//   Payload  = AES-128-CTR(PSK, nonce, Data proto)
+//   Stock Meshtastic nodes match chanHash=0x08, AES-CTR decrypt, and parse.
+//
+// Licensed mode (IS_LICENSED=y):
+//   chanHash = 0x0A (UNENCRYPTED_CHAN_HASH — empty PSK LongFast)
+//   Payload  = plaintext Data proto (no encryption)
+//   Meshtastic protocol rule: is_licensed=true nodes MUST NOT encrypt their
+//   transmissions (FCC Part 97 — operator identity must not be concealed).
+//   Remote NodeDB::updateUser() validates that a packet carrying
+//   is_licensed=true arrived on a plaintext channel hash; if it arrives on
+//   chanHash=0x08 (encrypted) the firmware logs "is_licensed mismatch" and
+//   may suppress the node from the peer's list.
+//   Trade-off: only nodes also on the unencrypted channel (chanHash=0x0A)
+//   will receive these packets; default encrypted nodes will not.
 //
 // Layout of out[]:
 //   [0..15]  16-byte OTA header (plaintext)
-//   [16..]   AES-128-CTR encrypted Data proto
+//   [16..]   Data proto (encrypted in normal mode, plaintext in licensed mode)
 //
 // out must be at least 256 bytes.  Returns false only on encoding error.
 bool LoRa::_buildTxPacket(uint8_t* out, uint8_t& outLen,
@@ -445,7 +460,9 @@ bool LoRa::_buildTxPacket(uint8_t* out, uint8_t& outLen,
         ESP_LOGD(TAG, "TX Data proto (%u bytes): %s", (unsigned)dataLen, hex);
     }
 
-    // 2. Build 16-byte OTA header
+    // 2. Build 16-byte OTA header.
+    //    chanHash selects which channel receiving nodes will match this packet
+    //    against.  It must be consistent with whether the payload is encrypted.
     out[0] = static_cast<uint8_t>(to);
     out[1] = static_cast<uint8_t>(to >>  8);
     out[2] = static_cast<uint8_t>(to >> 16);
@@ -459,27 +476,31 @@ bool LoRa::_buildTxPacket(uint8_t* out, uint8_t& outLen,
     out[10] = static_cast<uint8_t>(packetId >> 16);
     out[11] = static_cast<uint8_t>(packetId >> 24);
     out[12] = unicast ? FLAGS_UNICAST : FLAGS_BROADCAST;
-    out[13] = DEFAULT_CHAN_HASH;
+#if CONFIG_LORA_IS_LICENSED
+    out[13] = UNENCRYPTED_CHAN_HASH;  // 0x0A — plaintext LongFast channel
+#else
+    out[13] = DEFAULT_CHAN_HASH;      // 0x08 — encrypted LongFast channel
+#endif
     out[14] = 0x00;
     out[15] = 0x00;
 
-    // 3. Always AES-128-CTR encrypt the Data proto payload.
-    //
-    // Even in IsLicensed mode we must encrypt with the channel PSK so that
-    // stock Meshtastic nodes (which match chanHash=0x08 to their encrypted
-    // LongFast channel) can AES-CTR decrypt and parse our packets.
-    // Sending plaintext with chanHash=0x08 causes receivers to "decrypt"
-    // the already-plain bytes into garbage and silently drop the packet.
-    //
-    // The is_licensed=true flag in User proto field 6 satisfies ham-radio
-    // identification requirements; encryption is at the transport layer
-    // and does not violate FCC Part 97 regulations as the PSK is publicly
-    // known (it's the factory default and published in the Meshtastic docs).
+    // 3. Payload: plaintext (licensed mode) or AES-128-CTR encrypted (normal).
+#if CONFIG_LORA_IS_LICENSED
+    // Licensed mode — copy plaintext Data proto directly.
+    // FCC Part 97 requires that licensed amateur operators not encrypt their
+    // transmissions.  Meshtastic enforces this at the protocol layer:
+    // NodeDB::updateUser() rejects NODEINFO packets where is_licensed=true
+    // arrived on an encrypted channel hash.
+    memcpy(out + MESH_HDR, dataBuf, dataLen);
+#else
+    // Encrypted mode — AES-128-CTR with the default PSK.
+    // CTR mode is symmetric so _decrypt() serves as encrypt here.
     if (!_decrypt(dataBuf, dataLen, packetId, fromNode, out + MESH_HDR))
     {
         ESP_LOGW(TAG, "_buildTxPacket: AES-CTR encrypt failed");
         return false;
     }
+#endif
     outLen = static_cast<uint8_t>(MESH_HDR + dataLen);
 
     ESP_LOGD(TAG,
@@ -1066,14 +1087,42 @@ void LoRa::_processPacket(const uint8_t* buf, uint8_t pktLen,
     }
     else
     {
-        // ── Channel AES-128-CTR ───────────────────────────────────────────
-        // CTR is a stream cipher — _decrypt() always "succeeds"; validate by
-        // parsing the output as a Data proto and fall back to raw plaintext if
-        // that fails (handles packets from other unencrypted nodes).
-        if (!_decrypt(ciphertext, cipherLen, pktId, from, plain))
+        // ── Channel payload — encrypted (0x08) or plaintext (0x0A) ──────
+        // chanHash=0x08: default encrypted LongFast PSK.
+        // chanHash=0x0A: unencrypted LongFast (licensed / empty-PSK nodes).
+        // Any other value: unknown channel — try AES-CTR, fall back to plain.
+        //
+        // Strategy: if the chanHash matches our own TX mode, take the fast
+        // path.  Otherwise try AES-CTR first and fall back to plaintext so
+        // we can hear both encrypted and unencrypted nodes regardless of our
+        // own mode.
+#if CONFIG_LORA_IS_LICENSED
+        if (chanHash == UNENCRYPTED_CHAN_HASH)
         {
-            return; // should never happen
+            // Packet arrived on the plaintext channel — use as-is.
+            memcpy(plain, ciphertext, cipherLen);
         }
+        else
+        {
+            // Encrypted packet received while in licensed mode.
+            // Try AES-CTR (handles default encrypted Meshtastic neighbours);
+            // fall back to raw plaintext if it doesn't parse.
+            if (!_decrypt(ciphertext, cipherLen, pktId, from, plain))
+                return; // should never happen
+
+            uint32_t       tmpPortnum    = 0;
+            const uint8_t* tmpPayload    = nullptr;
+            size_t         tmpPayloadLen = 0;
+            bool           tmpWantResp   = false;
+            if (!mc_parseData(plain, cipherLen, tmpPortnum, tmpPayload,
+                              tmpPayloadLen, tmpWantResp) || tmpPortnum == 0)
+                memcpy(plain, ciphertext, cipherLen);
+        }
+#else
+        // Normal encrypted mode: AES-CTR decrypt, fall back to plaintext
+        // for unencrypted neighbours (chanHash=0x0A licensed nodes).
+        if (!_decrypt(ciphertext, cipherLen, pktId, from, plain))
+            return; // should never happen
 
         {
             uint32_t       tmpPortnum    = 0;
@@ -1084,9 +1133,11 @@ void LoRa::_processPacket(const uint8_t* buf, uint8_t pktLen,
                               tmpPayloadLen, tmpWantResp) || tmpPortnum == 0)
             {
                 // AES-CTR output didn't parse — fall back to raw plaintext
+                // (handles licensed / unencrypted-channel neighbours).
                 memcpy(plain, ciphertext, cipherLen);
             }
         }
+#endif
 
         portENTER_CRITICAL(&_statsLock);
         _stats.decryptOk++;

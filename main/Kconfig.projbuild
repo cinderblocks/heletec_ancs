@@ -55,24 +55,39 @@ menuconfig LORA_ENABLED
         RST=12, BUSY=13, DIO1=14) — Heltec Wireless Tracker 1.1 schematic.
 
 config LORA_IS_LICENSED
-    bool "Licensed (ham radio) mode — disable PKC, advertise is_licensed"
+    bool "Licensed (ham radio) mode — plaintext TX, advertise is_licensed"
     default n
     depends on LORA_ENABLED
     help
         When ENABLED, the device operates in licensed (ham radio) mode:
-        - TX packets are still AES-128-CTR encrypted with the default PSK
-          for full interoperability with stock encrypted Meshtastic nodes
-          (the PSK is publicly known / factory default)
-        - PKC (public-key encrypted direct messages) is disabled
-        - Public key is all-zeros in NODEINFO_APP broadcasts
-        - is_licensed=true is advertised in User proto field 6
-        - RX: AES-CTR decrypt is tried first; if protobuf parse fails,
-          raw payload is used as plaintext (handles other unencrypted nodes)
 
-        When DISABLED (default), the device operates in normal encrypted
-        mode matching stock Meshtastic behaviour:
-        - AES-128-CTR channel encryption with the default PSK
-        - X25519 keypair generated and persisted in NVS
+        TX behaviour:
+          - Data proto payload is sent as PLAINTEXT (no AES-CTR encryption).
+          - OTA header chanHash is set to 0x0A (UNENCRYPTED_CHAN_HASH —
+            the empty-PSK LongFast channel hash).
+          - is_licensed=true is emitted in User proto field 6.
+          - PKC (X25519 direct messages) is disabled; public_key field
+            is omitted from NODEINFO_APP broadcasts.
+
+        RX behaviour:
+          - Plaintext packets (chanHash=0x0A) from other licensed nodes are
+            accepted directly.
+          - Encrypted packets (chanHash=0x08) from standard Meshtastic nodes
+            are still received and decoded via AES-CTR fallback — the node
+            can hear the whole mesh even in licensed mode.
+
+        This satisfies Meshtastic's is_licensed protocol contract:
+        NodeDB::updateUser() validates that packets claiming is_licensed=true
+        arrived on a plaintext channel hash (0x0A).  Claiming is_licensed=true
+        while transmitting on chanHash=0x08 (encrypted) causes remote nodes
+        to log "Invalid node detected is_licensed mismatch" and may suppress
+        the NODEINFO.
+
+        Note: transmitting on chanHash=0x0A means default encrypted Meshtastic
+        nodes (chanHash=0x08) will not receive your outbound packets.  They
+        can still send to you (received via the AES-CTR fallback above).
+
+        Only enable this if the operator holds a valid amateur radio licence.
         - Public key broadcast in NODEINFO_APP (User proto field 8)
         - PKC-encrypted direct messages (chanHash=0x00) can be decrypted
           using ECDH shared secrets with AES-256-CCM

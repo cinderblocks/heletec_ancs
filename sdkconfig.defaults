@@ -7,22 +7,10 @@ CONFIG_NIMBLE_LOG_LEVEL_WARN=y
 CONFIG_DIAG_NOTIFY_INTERVAL_SEC=30
 CONFIG_BUZZER_ENABLED=y
 CONFIG_LORA_ENABLED=y
-CONFIG_LORA_IS_LICENSED=y
-# Licensed (ham radio) mode.
-#
-# TX: Data proto payload is sent as plaintext (no AES-CTR); chanHash=0x0A
-#     (UNENCRYPTED_CHAN_HASH — empty-PSK LongFast) is placed in the OTA header
-#     byte [13].  This satisfies Meshtastic's protocol rule: NodeDB::updateUser()
-#     validates that is_licensed=true packets arrived on a plaintext channel;
-#     packets claiming is_licensed=true on chanHash=0x08 (encrypted) trigger the
-#     "Invalid node detected is_licensed mismatch" error and may be dropped.
-#
-# RX: Plaintext packets (chanHash=0x0A) are used directly.  Encrypted packets
-#     (chanHash=0x08, from default Meshtastic nodes) are still received and
-#     decoded via AES-CTR so the node can hear the whole mesh.
-#
-# PKC direct messages (chanHash=0x00) are disabled in licensed mode — no X25519
-# keypair is generated, and field 8 (public_key) is omitted from NODEINFO.
+# CONFIG_LORA_IS_LICENSED is not set.
+# Using standard encrypted mode (chanHash=0x08, AES-128-CTR) for full
+# interoperability with the default Meshtastic mesh.  PKC (X25519) is
+# enabled — field 8 (public_key) is emitted in NODEINFO broadcasts.
 CONFIG_LORA_CHANNEL_NUM=0
 # US LongFast slot 20: 902125000 + 20*250000 = 907125000 Hz
 CONFIG_LORA_FREQUENCY_HZ=907125000

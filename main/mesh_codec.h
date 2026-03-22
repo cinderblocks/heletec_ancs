@@ -104,18 +104,22 @@ size_t   mc_pbString(uint8_t* buf, uint8_t tag, const char* s);
 /**
  * Encode a Meshtastic Position proto into buf.
  *
- * Field layout (verified against live OTA hex dumps, Meshtastic firmware 2.5+):
+ * Field layout (verified against Meshtastic 2.7.x mesh.proto + live OTA captures):
  *   Field  1 (latitude_i,    sfixed32): degrees × 1e7
  *   Field  2 (longitude_i,   sfixed32): degrees × 1e7
- *   Field  3 (altitude,      int32):    metres above MSL (varint)
- *   Field  4 (time,          sfixed32): UTC Unix seconds  ← NOT field 9 (pos_flags)
+ *   Field  3 (altitude,      int32):    metres above MSL (varint); omit when 0
+ *   Field  4 (time,          fixed32):  GPS fix epoch (UTC seconds); omit when 0
  *   Field  5 (location_source,varint):  PositionSource::GPS = 2
- *   Field 10 (ground_speed,   varint):  cm/s
- *   Field 11 (ground_track,   varint):  heading × 100 (0.01°)
- *   Field 14 (sats_in_view,   varint):  satellite count  ← NOT field 7 (google_plus_code)
- *   Field 18 (precision_bits, varint):  32 = full GPS precision
+ *   Field  7 (timestamp,     fixed32):  Device wall-clock time (UTC seconds) — NEW in 2.7.x.
+ *                                       MQTT bridges use this for "last seen" display.
+ *                                       Emitted alongside field 4 when unixTime != 0.
+ *                                       Omit when 0.
+ *   Field 10 (ground_speed,   varint):  cm/s; omit when 0
+ *   Field 11 (ground_track,   varint):  heading × 100 (0.01°); omit when 0
+ *   Field 14 (sats_in_view,   varint):  satellite count; omit when 0
+ *   Field 18 (precision_bits, varint):  32 = full GPS precision (always emitted)
  *
- * buf must be at least 80 bytes.  Returns bytes written.
+ * buf must be at least 90 bytes.  Returns bytes written.
  */
 size_t mc_encodePosition(uint8_t* buf, size_t cap,
                           int32_t lat_i, int32_t lon_i, int32_t alt_m,
@@ -176,12 +180,16 @@ size_t mc_encodeData(uint8_t* buf, size_t cap,
  *
  *   Field 1 (time,           fixed32):  UTC Unix seconds
  *   Field 2 (device_metrics, message):
- *       Inner DeviceMetrics:
- *         Field 1 (battery_level,  uint32): 0-100 %
- *         Field 2 (voltage,        float):  volts
- *         Field 5 (uptime_seconds, uint32): varint
+ *       Inner DeviceMetrics (Meshtastic 2.7.x):
+ *         Field 1 (battery_level,       uint32): 0-100 %
+ *         Field 2 (voltage,             float):  volts
+ *         Field 3 (channel_utilization, float):  0.0 — no airtime tracking
+ *         Field 4 (air_util_tx,         float):  0.0 — no airtime tracking
+ *         Field 5 (uptime_seconds,      uint32): seconds
+ *       Fields 3 and 4 are always emitted as 0.0f; real Meshtastic firmware
+ *       always sends them so the app shows "0%" rather than "N/A".
  *
- * buf must be at least 32 bytes.  Returns bytes written.
+ * buf must be at least 48 bytes.  Returns bytes written.
  */
 size_t mc_encodeTelemetry(uint8_t* buf, size_t cap,
                            uint32_t unixTime, uint32_t uptimeSec,
@@ -233,14 +241,17 @@ bool mc_parseData(const uint8_t* data, size_t len,
  *
  * Returns true when at least lat_i/lon_i were found.
  *
- * Decoded fields:
+ * Decoded fields (Meshtastic 2.7.x mesh.proto):
  *   lat_i       ← field 1  (sfixed32)
  *   lon_i       ← field 2  (sfixed32)
  *   alt_m       ← field 3  (int32 varint)
- *   unixTime    ← field 4  (fixed32)   ← NOT field 9 (pos_flags varint)
+ *   unixTime    ← field 4  (fixed32) GPS fix time — highest priority
+ *               ← field 7  (fixed32) device timestamp — fallback when field 4 absent
+ *                 (field 7 = "timestamp", new in 2.7.x; pre-2.7.x had google_plus_code
+ *                  string here which is safely ignored as a different wire type)
  *   speed_cm_s  ← field 10 (uint32 varint, ground_speed in cm/s)
  *   track_x100  ← field 11 (uint32 varint, ground_track heading × 100)
- *   sats        ← field 14 (uint32 varint) ← NOT field 7 (google_plus_code string)
+ *   sats        ← field 14 (uint32 varint) ← NOT field 7 (google_plus_code in pre-2.7.x)
  */
 bool mc_parsePosition(const uint8_t* data, size_t len, MeshPosition& pos);
 

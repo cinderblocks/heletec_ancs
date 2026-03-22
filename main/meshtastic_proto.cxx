@@ -554,10 +554,17 @@ bool LoRa::sendNodeInfo(uint32_t to, bool wantResponse, uint32_t requestId)
     if (!_buildTxPacket(pkt, pktLen, PORT_NODEINFO, userBuf, userLen,
                         wantResponse, to, requestId)) return false;
 
-    ESP_LOGI(TAG, "TX NODEINFO id=%s long=\"%s\" short=\"%s\" hw=%u to=0x%08" PRIx32
-             " req_id=0x%08" PRIx32,
-             Node.nodeIdStr(), Node.longName(), Node.shortName(),
-             (unsigned)HW_MODEL, to, requestId);
+    ESP_LOGI(TAG,
+        "TX NODEINFO id=%s long=\"%s\" short=\"%s\""
+        " hw=%u role=%u licensed=%d pkc=%s unmsg=%d"
+        " to=0x%08" PRIx32 " want_resp=%d req_id=0x%08" PRIx32 " pktlen=%u",
+        Node.nodeIdStr(), Node.longName(), Node.shortName(),
+        (unsigned)HW_MODEL,
+        (unsigned)CONFIG_MESH_NODE_ROLE,
+        (int)CONFIG_LORA_IS_LICENSED,
+        Node.hasPkcKeys() ? "yes" : "no",
+        0,   // is_unmessageable is always false for this firmware (has display + ANCS)
+        to, (int)wantResponse, requestId, (unsigned)pktLen);
 
     return transmit(pkt, pktLen);
 }

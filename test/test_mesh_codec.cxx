@@ -397,7 +397,9 @@ static const uint8_t kPosCorrectFields[] = {
     0x15, 0x02, 0x00, 0x00, 0x00,         // field 2: lon_i = 2
     0x18, 0x64,                            // field 3: alt_m = 100
     0x25, 0x78, 0x56, 0x34, 0x12,         // field 4: time = 0x12345678
-    0x3A, 0x05, 'h','e','l','l','o',      // field 7: google_plus_code (string) — skip
+    0x3A, 0x05, 'h','e','l','l','o',      // pre-2.7.x field 7: google_plus_code (string) — skip
+                                           // (2.7.x uses field 7 as fixed32 timestamp; wire type
+                                           //  difference means old string packets are safely skipped)
     0x48, 0x05,                            // field 9: pos_flags = 5 — NOT time
     0x70, 0x08,                            // field 14: sats_in_view = 8
 };
@@ -1213,8 +1215,7 @@ void test_telemetry_roundtrip_full_decode(void)
     uint64_t dmLen = readVarint(buf, n, pos);
     TEST_ASSERT_GREATER_THAN(0u, dmLen);
 
-    // Inner DeviceMetrics start
-    size_t dmEnd   = pos + (size_t)dmLen;
+    size_t dmEnd = pos + (size_t)dmLen;
 
     // Inner field 1: battery_level (tag 0x08, varint)
     TEST_ASSERT_EQUAL_HEX8(0x08, buf[pos]); pos++;
@@ -1227,6 +1228,22 @@ void test_telemetry_roundtrip_full_decode(void)
     float vDecoded;
     memcpy(&vDecoded, &vBits, 4);
     TEST_ASSERT_FLOAT_WITHIN(0.001f, 4.05f, vDecoded);
+
+    // Inner field 3: channel_utilization (tag 0x1D, fixed32 = float 0.0)
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x1D, buf[pos],
+        "DeviceMetrics field 3 (channel_utilization, tag 0x1D) must be present");
+    pos++;
+    uint32_t chUtilBits = readLE32(buf + pos); pos += 4;
+    float chUtil; memcpy(&chUtil, &chUtilBits, 4);
+    TEST_ASSERT_FLOAT_WITHIN(0.0001f, 0.0f, chUtil);
+
+    // Inner field 4: air_util_tx (tag 0x25, fixed32 = float 0.0)
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x25, buf[pos],
+        "DeviceMetrics field 4 (air_util_tx, tag 0x25) must be present");
+    pos++;
+    uint32_t airUtilBits = readLE32(buf + pos); pos += 4;
+    float airUtil; memcpy(&airUtil, &airUtilBits, 4);
+    TEST_ASSERT_FLOAT_WITHIN(0.0001f, 0.0f, airUtil);
 
     // Inner field 5: uptime_seconds (tag 0x28, varint)
     TEST_ASSERT_EQUAL_HEX8(0x28, buf[pos]); pos++;
@@ -1409,7 +1426,10 @@ void test_ref_encodePosition_known_bytes(void)
     // 20000000  = 0x01312D00 → LE: 00 2D 31 01
     // 100       = varint 0x64
     // 1700000000= 0x6553F100 → LE: 00 F1 53 65
-    uint8_t buf[80] = {};
+    //
+    // Field 7 (timestamp, fixed32, tag 0x3D) = same value as field 4.
+    // Tag 0x3D = (7<<3)|5 = 0x3D.
+    uint8_t buf[90] = {};
     size_t n = mc_encodePosition(buf, sizeof(buf),
                                   10000000, 20000000, 100,
                                   7, 1700000000u, 0, 0);
@@ -1419,6 +1439,7 @@ void test_ref_encodePosition_known_bytes(void)
         0x18, 0x64,                       // F3 alt_m=100
         0x25, 0x00, 0xF1, 0x53, 0x65,    // F4 time=1700000000
         0x28, 0x02,                       // F5 location_source=GPS
+        0x3D, 0x00, 0xF1, 0x53, 0x65,    // F7 timestamp=1700000000 (device wall-clock)
         0x70, 0x07,                       // F14 sats=7
         0x90, 0x01, 0x20,                 // F18 precision_bits=32
     };
@@ -1508,26 +1529,33 @@ void test_ref_encodeTelemetry_known_bytes(void)
     uint8_t buf[64] = {};
     size_t n = mc_encodeTelemetry(buf, sizeof(buf), 100, 7200, 50, v);
 
-    // Build expected inner DeviceMetrics:
-    //   F1 varint 50:      08 32
-    //   F2 fixed32 (3.7f): 15 <vBits LE>
-    //   F5 varint 7200:    28 A0 38
+    // Build expected inner DeviceMetrics (all 5 fields per 2.7.x):
+    //   F1 varint 50:                  08 32
+    //   F2 fixed32 (3.7f):             15 <vBits LE>
+    //   F3 fixed32 0.0f (ch_util):     1D 00 00 00 00
+    //   F4 fixed32 0.0f (air_util_tx): 25 00 00 00 00
+    //   F5 varint 7200 (0xA0 0x38):    28 A0 38
     // Outer:
-    //   F1 fixed32 100:    0D 64 00 00 00
-    //   F2 LEN <dmLen> <dm>:  12 <len> <dm bytes>
-    uint8_t expectedDm[20] = {};
+    //   F1 fixed32 100: 0D 64 00 00 00
+    //   F2 LEN <dmLen> <dm bytes>: 12 <len> ...
+    uint8_t expectedDm[32] = {};
     size_t edm = 0;
-    expectedDm[edm++] = 0x08; expectedDm[edm++] = 50;
-    expectedDm[edm++] = 0x15;
+    expectedDm[edm++] = 0x08; expectedDm[edm++] = 50;  // F1
+    expectedDm[edm++] = 0x15;                           // F2 tag
     expectedDm[edm++] = (uint8_t)(vBits);
     expectedDm[edm++] = (uint8_t)(vBits >> 8);
     expectedDm[edm++] = (uint8_t)(vBits >> 16);
-    expectedDm[edm++] = (uint8_t)(vBits >> 24);
-    expectedDm[edm++] = 0x28;
-    // 7200 = 0x1C20. Varint: 0xA0 0x38
-    expectedDm[edm++] = 0xA0; expectedDm[edm++] = 0x38;
+    expectedDm[edm++] = (uint8_t)(vBits >> 24);         // F2 value
+    expectedDm[edm++] = 0x1D;                           // F3 tag (channel_utilization)
+    expectedDm[edm++] = 0x00; expectedDm[edm++] = 0x00;
+    expectedDm[edm++] = 0x00; expectedDm[edm++] = 0x00; // F3 value = 0.0f
+    expectedDm[edm++] = 0x25;                           // F4 tag (air_util_tx)
+    expectedDm[edm++] = 0x00; expectedDm[edm++] = 0x00;
+    expectedDm[edm++] = 0x00; expectedDm[edm++] = 0x00; // F4 value = 0.0f
+    expectedDm[edm++] = 0x28;                           // F5 tag
+    expectedDm[edm++] = 0xA0; expectedDm[edm++] = 0x38; // F5 value = 7200
 
-    uint8_t expected[40] = {};
+    uint8_t expected[48] = {};
     size_t en = 0;
     // outer field 1: time
     expected[en++] = 0x0D;
@@ -1548,12 +1576,13 @@ void test_ref_encodeTelemetry_known_bytes(void)
 
 void test_wire_tags_position_proto(void)
 {
-    // Verify tag bytes for all Position fields we encode:
+    // Verify tag bytes for all Position fields we encode (Meshtastic 2.7.x):
     //   F1  sfixed32 → (1<<3)|5 = 0x0D
     //   F2  sfixed32 → (2<<3)|5 = 0x15
     //   F3  int32    → (3<<3)|0 = 0x18
-    //   F4  fixed32  → (4<<3)|5 = 0x25  (NOT field 9!)
+    //   F4  fixed32  → (4<<3)|5 = 0x25  (GPS fix time)
     //   F5  enum     → (5<<3)|0 = 0x28
+    //   F7  fixed32  → (7<<3)|5 = 0x3D  (device timestamp — NEW in 2.7.x)
     //   F10 uint32   → (10<<3)|0= 0x50
     //   F11 uint32   → (11<<3)|0= 0x58
     //   F14 uint32   → (14<<3)|0= 0x70
@@ -1563,6 +1592,7 @@ void test_wire_tags_position_proto(void)
     TEST_ASSERT_EQUAL_HEX8(0x18, (3  << 3) | 0);
     TEST_ASSERT_EQUAL_HEX8(0x25, (4  << 3) | 5);
     TEST_ASSERT_EQUAL_HEX8(0x28, (5  << 3) | 0);
+    TEST_ASSERT_EQUAL_HEX8(0x3D, (7  << 3) | 5); // timestamp — 2.7.x field 7
     TEST_ASSERT_EQUAL_HEX8(0x50, (10 << 3) | 0);
     TEST_ASSERT_EQUAL_HEX8(0x58, (11 << 3) | 0);
     TEST_ASSERT_EQUAL_HEX8(0x70, (14 << 3) | 0);
@@ -1686,9 +1716,10 @@ void test_encode_position_zero_alt_omitted(void)
 
 void test_encode_position_zero_time_omitted(void)
 {
-    uint8_t buf[80] = {};
+    uint8_t buf[90] = {};
     size_t n = mc_encodePosition(buf, sizeof(buf), 1, 2, 100, 5, 0);
-    TEST_ASSERT_EQUAL(-1, findTag(buf, n, 0x25)); // field 4 time tag
+    TEST_ASSERT_EQUAL(-1, findTag(buf, n, 0x25)); // field 4 (time) absent
+    TEST_ASSERT_EQUAL(-1, findTag(buf, n, 0x3D)); // field 7 (timestamp) also absent
 }
 
 void test_encode_position_zero_sats_omitted(void)
@@ -1712,9 +1743,115 @@ void test_encode_position_max_sats(void)
 void test_encode_position_location_source_always_gps(void)
 {
     // Field 5 (location_source = 2 = GPS) must always appear
-    uint8_t buf[80] = {};
+    uint8_t buf[90] = {};
     size_t n = mc_encodePosition(buf, sizeof(buf), 0, 0, 0, 0, 0);
     TEST_ASSERT_NOT_EQUAL(-1, findTag2(buf, n, 0x28, 0x02));
+}
+
+void test_encode_position_field7_timestamp_emitted(void)
+{
+    // Field 7 (timestamp, tag 0x3D = (7<<3)|5, fixed32) must appear when
+    // unixTime != 0, carrying the same value as field 4 (time).
+    const uint32_t ts = 1741046400u;
+    uint8_t buf[90] = {};
+    size_t n = mc_encodePosition(buf, sizeof(buf), 100, 200, 0, 0, ts);
+    TEST_ASSERT_GREATER_THAN(0u, n);
+
+    int idx = findTag(buf, n, 0x3D);
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(-1, idx,
+        "field 7 (timestamp, tag 0x3D) must be emitted when unixTime != 0");
+    // Verify value matches
+    TEST_ASSERT_EQUAL_HEX32(ts, readLE32(buf + idx + 1));
+}
+
+void test_encode_position_field7_omitted_when_zero(void)
+{
+    // Field 7 (timestamp, tag 0x3D) must NOT appear when unixTime == 0.
+    uint8_t buf[90] = {};
+    size_t n = mc_encodePosition(buf, sizeof(buf), 100, 200, 0, 0, 0);
+    TEST_ASSERT_EQUAL_MESSAGE(-1, findTag(buf, n, 0x3D),
+        "field 7 (timestamp) must be omitted when unixTime == 0");
+}
+
+void test_parse_position_field7_as_unixtime_fallback(void)
+{
+    // When field 4 (time) is ABSENT but field 7 (timestamp, fixed32) is present,
+    // the parser should use field 7 as unixTime (device wall-clock fallback).
+    // This handles 2.7.x nodes that only set the device clock without a GPS fix.
+    //
+    // Tag 0x3D = (7<<3)|5 = field 7, wire type 5 (fixed32).
+    const uint32_t deviceTime = 1741046400u;
+    uint8_t data[20] = {};
+    size_t n = 0;
+    // field 1: lat_i = 1 (sfixed32)
+    data[n++] = 0x0D; data[n++] = 0x01; data[n++] = 0x00; data[n++] = 0x00; data[n++] = 0x00;
+    // field 2: lon_i = 2 (sfixed32)
+    data[n++] = 0x15; data[n++] = 0x02; data[n++] = 0x00; data[n++] = 0x00; data[n++] = 0x00;
+    // field 7: timestamp (fixed32) = deviceTime  (NO field 4)
+    data[n++] = 0x3D;
+    data[n++] = (uint8_t)(deviceTime);
+    data[n++] = (uint8_t)(deviceTime >> 8);
+    data[n++] = (uint8_t)(deviceTime >> 16);
+    data[n++] = (uint8_t)(deviceTime >> 24);
+
+    MeshPosition pos = {};
+    TEST_ASSERT_TRUE(mc_parsePosition(data, n, pos));
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(deviceTime, pos.unixTime,
+        "field 7 (timestamp) must be used as unixTime when field 4 is absent");
+}
+
+void test_parse_position_field7_does_not_override_field4(void)
+{
+    // When BOTH field 4 (time) and field 7 (timestamp) are present,
+    // field 4 must win (GPS time has higher priority than device clock).
+    const uint32_t gpsTime    = 1741046400u;
+    const uint32_t deviceTime = 1741046999u; // later
+    uint8_t data[25] = {};
+    size_t n = 0;
+    data[n++] = 0x0D; data[n++] = 0x01; data[n++] = 0x00; data[n++] = 0x00; data[n++] = 0x00; // F1
+    data[n++] = 0x15; data[n++] = 0x02; data[n++] = 0x00; data[n++] = 0x00; data[n++] = 0x00; // F2
+    // field 4: time = gpsTime
+    data[n++] = 0x25;
+    data[n++] = (uint8_t)(gpsTime);      data[n++] = (uint8_t)(gpsTime >> 8);
+    data[n++] = (uint8_t)(gpsTime >> 16); data[n++] = (uint8_t)(gpsTime >> 24);
+    // field 7: timestamp = deviceTime
+    data[n++] = 0x3D;
+    data[n++] = (uint8_t)(deviceTime);      data[n++] = (uint8_t)(deviceTime >> 8);
+    data[n++] = (uint8_t)(deviceTime >> 16); data[n++] = (uint8_t)(deviceTime >> 24);
+
+    MeshPosition pos = {};
+    TEST_ASSERT_TRUE(mc_parsePosition(data, n, pos));
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(gpsTime, pos.unixTime,
+        "field 4 (GPS time) must take priority over field 7 (device timestamp)");
+}
+
+void test_telemetry_channel_util_and_air_util_emitted(void)
+{
+    // DeviceMetrics fields 3 and 4 must always be emitted as 0.0f (2.7.x compliance).
+    // Field 3 (channel_utilization): tag 0x1D = (3<<3)|5
+    // Field 4 (air_util_tx):         tag 0x25 = (4<<3)|5
+    uint8_t buf[64] = {};
+    size_t n = mc_encodeTelemetry(buf, sizeof(buf), 100, 3600, 50, 3.7f);
+    TEST_ASSERT_GREATER_THAN(0u, n);
+
+    // The inner submessage starts after outer F1 (5 bytes) + outer F2 tag+len (2 bytes)
+    // Scan the whole buffer for the tags (they're inside the submessage).
+    int idx3 = -1, idx4 = -1;
+    for (size_t i = 0; i + 4 < n; i++)
+    {
+        if (buf[i] == 0x1D && idx3 == -1) idx3 = (int)i;
+        if (buf[i] == 0x25 && idx4 == -1) idx4 = (int)i;
+    }
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(-1, idx3,
+        "DeviceMetrics field 3 (channel_utilization, tag 0x1D) must be present");
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(-1, idx4,
+        "DeviceMetrics field 4 (air_util_tx, tag 0x25) must be present");
+
+    // Both values must be 0.0f = 0x00000000
+    float ch; memcpy(&ch, buf + idx3 + 1, 4);
+    TEST_ASSERT_FLOAT_WITHIN(0.0001f, 0.0f, ch);
+    float au; memcpy(&au, buf + idx4 + 1, 4);
+    TEST_ASSERT_FLOAT_WITHIN(0.0001f, 0.0f, au);
 }
 
 void test_encodeUser_id_format(void)
@@ -1854,6 +1991,8 @@ int main(void)
     RUN_TEST(test_telemetry_roundtrip_full_decode);
     RUN_TEST(test_telemetry_zero_battery);
     RUN_TEST(test_telemetry_large_uptime);
+    // 2.7.x: DeviceMetrics fields 3 and 4 (channel_utilization, air_util_tx)
+    RUN_TEST(test_telemetry_channel_util_and_air_util_emitted);
 
     // 11. mc_encodeMapReport — field presence, firmware_version (2.7.x field 4)
     RUN_TEST(test_encodeMapReport_all_fields_present);
@@ -1884,6 +2023,11 @@ int main(void)
     RUN_TEST(test_encode_position_zero_sats_omitted);
     RUN_TEST(test_encode_position_max_sats);
     RUN_TEST(test_encode_position_location_source_always_gps);
+    // 2.7.x: Position field 7 (timestamp) tests
+    RUN_TEST(test_encode_position_field7_timestamp_emitted);
+    RUN_TEST(test_encode_position_field7_omitted_when_zero);
+    RUN_TEST(test_parse_position_field7_as_unixtime_fallback);
+    RUN_TEST(test_parse_position_field7_does_not_override_field4);
     RUN_TEST(test_encodeUser_id_format);
     RUN_TEST(test_encodeUser_zero_node_id);
 

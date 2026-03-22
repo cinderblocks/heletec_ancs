@@ -93,9 +93,17 @@ size_t mc_encodePosition(uint8_t* buf, size_t /*cap*/,
         writeVarint(0x18, static_cast<uint64_t>(static_cast<int64_t>(alt_m))); // Field 3: altitude
 
     if (unixTime != 0)
-        writeFixed32(0x25, unixTime);                   // Field 4: time (sfixed32) ← NOT field 9
+        writeFixed32(0x25, unixTime);                   // Field 4: time — GPS fix timestamp
 
     writeVarint(0x28, 2);                               // Field 5: location_source = GPS
+
+    // Field 7: timestamp — device wall-clock time when position was last determined.
+    // Distinct from field 4 (GPS fix epoch): this is always the current device time.
+    // Meshtastic 2.7.x firmware always emits field 7; MQTT bridges and the public
+    // map rely on it for the "last seen" display even when field 4 is absent.
+    // Tag = (7<<3)|5 = 0x3D (fixed32, wire type 5).
+    if (unixTime != 0)
+        writeFixed32(0x3D, unixTime);                   // Field 7: timestamp (device time)
 
     if (speed_cm_s != 0) writeVarint(0x50, speed_cm_s); // Field 10: ground_speed
     if (track_x100 != 0) writeVarint(0x58, track_x100); // Field 11: ground_track
@@ -215,7 +223,11 @@ size_t mc_encodeTelemetry(uint8_t* buf, size_t /*cap*/,
         return 5;
     };
 
-    uint8_t dm[20] = {};
+    // Inner DeviceMetrics submessage.
+    // All five defined fields are emitted — Meshtastic firmware always sends
+    // channel_utilization and air_util_tx even when their value is 0.0, and
+    // the app displays "0%" rather than "N/A" when explicit zeros are present.
+    uint8_t dm[32] = {};
     size_t  dmn    = 0;
 
     dm[dmn++] = 0x08;                                  // DeviceMetrics Field 1: battery_level
@@ -223,6 +235,14 @@ size_t mc_encodeTelemetry(uint8_t* buf, size_t /*cap*/,
 
     { uint32_t vbits; memcpy(&vbits, &batteryVoltage, 4);
       dmn += writeFixed32(dm + dmn, 0x15, vbits); }    // DeviceMetrics Field 2: voltage (float)
+
+    // Field 3: channel_utilization (float, tag 0x1D = (3<<3)|5).
+    // We have no airtime tracking infrastructure; emit 0.0f explicitly so the
+    // Meshtastic app shows "0%" instead of "N/A".
+    dmn += writeFixed32(dm + dmn, 0x1D, 0x00000000u);  // DeviceMetrics Field 3: channel_utilization = 0.0f
+
+    // Field 4: air_util_tx (float, tag 0x25 = (4<<3)|5).
+    dmn += writeFixed32(dm + dmn, 0x25, 0x00000000u);  // DeviceMetrics Field 4: air_util_tx = 0.0f
 
     dm[dmn++] = 0x28;                                  // DeviceMetrics Field 5: uptime_seconds
     dmn += mc_pbVarint(dm + dmn, uptimeSec);
@@ -409,7 +429,12 @@ bool mc_parsePosition(const uint8_t* data, size_t len, MeshPosition& pos)
             switch (field) {
                 case 1: pos.lat_i    = static_cast<int32_t>(val); gotLatLon = true; break;
                 case 2: pos.lon_i    = static_cast<int32_t>(val); break;
-                case 4: pos.unixTime = val; break;  // time at field 4 — NOT field 9
+                case 4: pos.unixTime = val; break;  // GPS fix time — highest priority
+                // Field 7: timestamp (device wall-clock time).  Use as fallback when
+                // field 4 (GPS time) was not present — e.g. packets from non-GPS nodes
+                // that only carry the device clock.  If field 4 already set unixTime,
+                // don't overwrite it.
+                case 7: if (pos.unixTime == 0) pos.unixTime = val; break;
                 default: break;
             }
         }

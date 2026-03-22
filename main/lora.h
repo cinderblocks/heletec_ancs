@@ -210,13 +210,15 @@ private:
     // Over-the-air header: [to(4), from(4), id(4), flags(1), chan(1), pad(2)]
     static constexpr size_t MESH_HDR = 16;
 
-    // PortNum values used by this firmware
-    static constexpr uint32_t PORT_TEXT        = 1;  ///< TEXT_MESSAGE_APP
-    static constexpr uint32_t PORT_POSITION    = 3;  ///< POSITION_APP
-    static constexpr uint32_t PORT_NODEINFO    = 4;  ///< NODEINFO_APP
-    static constexpr uint32_t PORT_TELEMETRY   = 67; ///< TELEMETRY_APP
-    static constexpr uint32_t PORT_TRACEROUTE  = 70; ///< TRACEROUTE_APP — route discovery
-    static constexpr uint32_t PORT_MAP_REPORT  = 73; ///< MAP_REPORT_APP — public mesh map visibility
+    // PortNum values (Meshtastic 2.7.x portnums.proto)
+    static constexpr uint32_t PORT_TEXT          = 1;  ///< TEXT_MESSAGE_APP
+    static constexpr uint32_t PORT_POSITION      = 3;  ///< POSITION_APP
+    static constexpr uint32_t PORT_NODEINFO      = 4;  ///< NODEINFO_APP
+    static constexpr uint32_t PORT_ROUTING       = 5;  ///< ROUTING_APP — ACK/NACK (received, not dispatched)
+    static constexpr uint32_t PORT_TELEMETRY     = 67; ///< TELEMETRY_APP
+    static constexpr uint32_t PORT_TRACEROUTE    = 70; ///< TRACEROUTE_APP — route discovery
+    static constexpr uint32_t PORT_NEIGHBORINFO  = 72; ///< NEIGHBORINFO_APP — mesh neighbour tables (received, not dispatched)
+    static constexpr uint32_t PORT_MAP_REPORT    = 73; ///< MAP_REPORT_APP — public mesh map visibility
 
     // Meshtastic default channel AES-128 PSK (factory LongFast).
     // Used for both RX decryption and TX encryption.

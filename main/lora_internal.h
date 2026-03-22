@@ -66,9 +66,12 @@
 #ifndef CONFIG_LORA_REGION_CODE
 #  define CONFIG_LORA_REGION_CODE 1 // US
 #endif
+#ifndef CONFIG_MESH_FIRMWARE_VERSION
+#  define CONFIG_MESH_FIRMWARE_VERSION "2.7.15.0"
+#endif
 
 // ── Meshtastic frequency computation ──────────────────────────────────────
-// Matches RadioInterface.cpp getFreq() in Meshtastic firmware 2.5+.
+// Matches RadioInterface.cpp getFreq() in Meshtastic firmware 2.7.x.
 //
 // US_915 region: freqStart=902.0 MHz, freqEnd=928.0 MHz
 // LongFast BW = 250 kHz → numChannels = (928.0-902.0)/0.250 = 104
@@ -77,7 +80,8 @@
 //           = 902125000 + slot * 250000
 //
 // Meshtastic default LongFast slot (US): slot = 20 (factory default as of
-// Meshtastic firmware 2.5 — older versions used slot 103 derived from hash).
+// Meshtastic firmware 2.5+; older versions used slot 103 derived from hash).
+// With slot 20: 902125000 + 20*250000 = 907125000 Hz (907.125 MHz).
 // Set CONFIG_LORA_FREQUENCY_HZ to a non-zero value to override completely.
 static inline uint32_t computeLoraFrequency()
 {

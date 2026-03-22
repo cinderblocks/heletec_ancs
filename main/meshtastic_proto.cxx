@@ -16,7 +16,9 @@
  */
 
 /**
- * meshtastic_proto.cxx — Meshtastic protocol implementation.
+ * meshtastic_proto.cxx — Meshtastic 2.7.x protocol implementation.
+ *
+ * Protocol target: Meshtastic firmware 2.7.x (mesh.proto / telemetry.proto 2.7.15).
  *
  * Covers:
  *   - AES-128-CTR channel decryption and encryption (_decrypt)
@@ -331,21 +333,26 @@ bool LoRa::_parseData(const uint8_t* data, size_t len,
 // ── _encodeUser ───────────────────────────────────────────────────────────
 // Encode a Meshtastic User proto (NODEINFO_APP payload).
 //
-// meshtastic/mesh.proto User message fields sent:
+// meshtastic/mesh.proto User message fields (Meshtastic 2.7.x):
 //   Field 1 (id,               string):  "!xxxxxxxx"
 //   Field 2 (long_name,        string):  up to 32 chars
 //   Field 3 (short_name,       string):  up to 4 chars
 //   Field 4 (macaddr,          bytes):   6-byte BT MAC
 //   Field 5 (hw_model,         enum):    HardwareModel varint (tag 0x28)
 //   Field 6 (is_licensed,      bool):    true in ham-radio (licensed) mode
-//   Field 7 (role,             enum):    DeviceRole varint (tag 0x38)
+//   Field 7 (role,             enum):    DeviceRole varint (tag 0x38);
+//                                        2.7.x values: 0=CLIENT, 1=CLIENT_MUTE,
+//                                        2=ROUTER, 3=ROUTER_CLIENT, 4=REPEATER,
+//                                        5=TRACKER, 6=SENSOR, 7=TAK,
+//                                        8=CLIENT_HIDDEN, 9=LOST_AND_FOUND,
+//                                        10=TAK_TRACKER
 //   Field 8 (public_key,       bytes):   32-byte X25519 public key (tag 0x42);
 //                                        omitted in licensed mode or when unavailable
 //   Field 9 (is_unmessageable, bool):    false — this device has a display and CAN
 //                                        receive and show direct messages
 //
-// Note: isUnmessageable stays false even for TRACKER role because this firmware
-// has a TFT display and ANCS notification forwarding — messages ARE processed.
+// Note: isUnmessageable stays false even for TRACKER/SENSOR roles because this
+// firmware has a TFT display and ANCS notification forwarding — messages ARE processed.
 //
 // buf must be at least 120 bytes.  Returns bytes written.
 /* static */ size_t LoRa::_encodeUser(uint8_t* buf, size_t cap,
@@ -608,26 +615,28 @@ bool LoRa::sendTelemetry()
 //
 // MapReport announces this node to MQTT bridges so it appears on the public
 // Meshtastic map (meshtastic.network/map).  Fields verified against
-// Meshtastic firmware mesh.proto 2.5+:
-//   Field  1 (long_name,          string):  tag 0x0A
-//   Field  2 (short_name,         string):  tag 0x12
-//   Field  3 (hw_model,           varint):  tag 0x18
-//   Field  5 (region,             varint):  tag 0x28  RegionCode enum
-//   Field  6 (modem_preset,       varint):  tag 0x30  ModemPreset enum
-//   Field  7 (has_default_channel,bool):    tag 0x38  true when using factory PSK
-//   Field  8 (latitude_i,         fixed32): tag 0x45
-//   Field  9 (longitude_i,        fixed32): tag 0x4D
-//   Field 10 (altitude,           varint):  tag 0x50
-//   Field 11 (position_precision, varint):  tag 0x58  32 = full GPS precision
+// Meshtastic firmware mesh.proto 2.7.x:
+//   Field  1 (long_name,           string):  tag 0x0A
+//   Field  2 (short_name,          string):  tag 0x12
+//   Field  3 (hw_model,            varint):  tag 0x18
+//   Field  4 (firmware_version,    string):  tag 0x22  NEW in 2.7.x
+//   Field  5 (region,              varint):  tag 0x28  RegionCode enum
+//   Field  6 (modem_preset,        varint):  tag 0x30  ModemPreset enum
+//   Field  7 (has_default_channel, bool):    tag 0x38  true when using factory PSK
+//   Field  8 (latitude_i,          fixed32): tag 0x45
+//   Field  9 (longitude_i,         fixed32): tag 0x4D
+//   Field 10 (altitude,            varint):  tag 0x50
+//   Field 11 (position_precision,  varint):  tag 0x58  32 = full GPS precision
 //   Field 12 (num_online_local_nodes,varint):tag 0x60 neighbour count
 //
-// buf must be at least 120 bytes.  Returns bytes written.
+// buf must be at least 192 bytes.  Returns bytes written.
 /* static */ size_t LoRa::_encodeMapReport(uint8_t* buf, size_t cap,
                                             const char* longName,
                                             const char* shortName,
                                             int32_t lat_i, int32_t lon_i,
                                             int32_t alt_m,
-                                            uint32_t numNeighbors)
+                                            uint32_t numNeighbors,
+                                            const char* firmwareVersion)
 {
 #if   defined(CONFIG_LORA_PRESET_LONG_SLOW)
     static constexpr uint8_t MODEM_PRESET = 1;
@@ -642,7 +651,8 @@ bool LoRa::sendTelemetry()
                                lat_i, lon_i, alt_m, numNeighbors,
                                HW_MODEL,
                                static_cast<uint8_t>(CONFIG_LORA_REGION_CODE),
-                               MODEM_PRESET);
+                               MODEM_PRESET,
+                               firmwareVersion);
 }
 
 // ── sendMapReport ─────────────────────────────────────────────────────────
@@ -665,11 +675,12 @@ bool LoRa::sendMapReport()
     const int32_t lon_i = static_cast<int32_t>(gps.lng() * 1e7);
     const int32_t alt_m = static_cast<int32_t>(gps.altitude());
 
-    uint8_t mrBuf[160] = {};
+    uint8_t mrBuf[192] = {};
     const size_t mrLen = _encodeMapReport(mrBuf, sizeof(mrBuf),
                                            Node.longName(), Node.shortName(),
                                            lat_i, lon_i, alt_m,
-                                           neighborCount());
+                                           neighborCount(),
+                                           CONFIG_MESH_FIRMWARE_VERSION);
     if (mrLen == 0) return false;
 
     uint8_t pkt[256] = {};
@@ -677,9 +688,10 @@ bool LoRa::sendMapReport()
     if (!_buildTxPacket(pkt, pktLen, PORT_MAP_REPORT, mrBuf, mrLen,
                         /*want_response=*/false)) return false;
 
-    ESP_LOGI(TAG, "TX MAP_REPORT lat=%.6f lon=%.6f alt=%dm neighbors=%u role=%u",
+    ESP_LOGI(TAG, "TX MAP_REPORT lat=%.6f lon=%.6f alt=%dm neighbors=%u role=%u fw=%s",
              (double)lat_i / 1e7, (double)lon_i / 1e7, (int)alt_m,
-             (unsigned)neighborCount(), (unsigned)CONFIG_MESH_NODE_ROLE);
+             (unsigned)neighborCount(), (unsigned)CONFIG_MESH_NODE_ROLE,
+             CONFIG_MESH_FIRMWARE_VERSION);
     return transmit(pkt, pktLen);
 }
 
@@ -911,8 +923,7 @@ void LoRa::_processPacket(const uint8_t* buf, uint8_t pktLen,
             }
             if (doReq)
             {
-                // Store in rate-limiter ring
-                static size_t _pkcReqCursor = 0;
+                // Advance the rate-limiter ring cursor (class member, not static local)
                 _pkcKeyReqs[_pkcReqCursor].nodeId = from;
                 _pkcKeyReqs[_pkcReqCursor].tick   = now;
                 _pkcReqCursor = (_pkcReqCursor + 1) % PKC_REQ_RING_MAX;

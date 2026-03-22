@@ -3,7 +3,7 @@
  *
  * Run with: cmake -B build && cmake --build build && ctest --test-dir build -V
  *
- * Conformance target: Meshtastic firmware v2.7.15 (latest release)
+ * Conformance target: Meshtastic firmware v2.7.x (mesh.proto 2.7.15)
  * Proto definitions:  meshtastic/mesh.proto, meshtastic/telemetry.proto
  *
  * Test groups
@@ -18,8 +18,8 @@
  *   8. mc_encodeData          — request_id field-6 regression, dest, ok_to_mqtt
  *   9. mc_encodeUser          — is_licensed, role, field ordering, macaddr
  *  10. mc_encodeTelemetry     — full decode round-trip
- *  11. mc_encodeMapReport     — field presence and omission
- *  12. Reference byte-vector conformance (v2.7.15 nanopb-equivalent output)
+ *  11. mc_encodeMapReport     — field presence, firmware_version (2.7.x field 4)
+ *  12. Reference byte-vector conformance (v2.7.x nanopb-equivalent output)
  *  13. Wire tag conformance   — tag bytes match .proto field definitions
  *  14. Edge cases and boundaries
  */
@@ -1073,6 +1073,30 @@ void test_encodeUser_tracker_role_emits_field7(void)
         "field 7 (role=TRACKER=5) must emit 0x38 0x05");
 }
 
+void test_encodeUser_all_27x_roles_roundtrip(void)
+{
+    // All 2.7.x DeviceRole values (0–10) must survive encode → parse.
+    // Role 0 (CLIENT): field 7 is omitted, so parsed value stays default 0.
+    const uint8_t roles[]   = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
+    const char*   names[]   = { "CLI","CMU","RTR","RCL","RPT",
+                                 "TRK","SNS","TAK","CHD","LAF","TTK" };
+    const uint8_t mac[6] = {};
+
+    for (size_t i = 0; i < sizeof(roles); i++)
+    {
+        uint8_t buf[120] = {};
+        size_t n = mc_encodeUser(buf, sizeof(buf),
+                                  0x11000000u + i, "Node", names[i],
+                                  mac, 48, roles[i], nullptr, false);
+        TEST_ASSERT_GREATER_THAN(0u, n);
+
+        MeshUser user = {};
+        TEST_ASSERT_TRUE(mc_parseUser(buf, n, user));
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE(roles[i], user.role,
+            "role value must survive encode/parse round-trip");
+    }
+}
+
 void test_encodeUser_field_order_ascending(void)
 {
     // Verify all tags appear in ascending field-number order (nanopb conformance).
@@ -1250,20 +1274,23 @@ void test_telemetry_large_uptime(void)
 
 void test_encodeMapReport_all_fields_present(void)
 {
-    uint8_t buf[160] = {};
+    uint8_t buf[200] = {};
     size_t n = mc_encodeMapReport(buf, sizeof(buf),
                                    "MapNode", "MAP",
                                    296813520, -952347811, 427,
                                    /*numNeighbors=*/3,
                                    /*hwModel=*/48,
-                                   /*regionCode=*/1,  // US
-                                   /*modemPreset=*/0); // LONG_FAST
+                                   /*regionCode=*/1,   // US
+                                   /*modemPreset=*/0,  // LONG_FAST
+                                   /*firmwareVersion=*/"2.7.15.0");
     TEST_ASSERT_GREATER_THAN(0u, n);
 
-    // Verify expected tag bytes are present:
+    // Verify all expected tag bytes are present:
     TEST_ASSERT_NOT_EQUAL(-1, findTag(buf, n, 0x0A)); // field 1: long_name
     TEST_ASSERT_NOT_EQUAL(-1, findTag(buf, n, 0x12)); // field 2: short_name
     TEST_ASSERT_NOT_EQUAL(-1, findTag(buf, n, 0x18)); // field 3: hw_model
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(-1, findTag(buf, n, 0x22),
+        "field 4 (firmware_version, 2.7.x) must be present when provided");
     TEST_ASSERT_NOT_EQUAL(-1, findTag(buf, n, 0x28)); // field 5: region
     TEST_ASSERT_NOT_EQUAL(-1, findTag(buf, n, 0x30)); // field 6: modem_preset
     TEST_ASSERT_NOT_EQUAL(-1, findTag2(buf, n, 0x38, 0x01)); // field 7: has_default_channel
@@ -1273,15 +1300,48 @@ void test_encodeMapReport_all_fields_present(void)
     TEST_ASSERT_NOT_EQUAL(-1, findTag(buf, n, 0x58)); // field 11: position_precision
     TEST_ASSERT_NOT_EQUAL(-1, findTag(buf, n, 0x60)); // field 12: num_online_local_nodes
 
-    // Verify lat/lon values
-    // Note: can't use findTag for 0x4D because 'M' (0x4D) appears in "MapNode"
-    // string data. Instead, lon tag follows lat tag directly (sfixed32 = 5 bytes).
+    // Verify lat/lon values (sfixed32).
     int latIdx = findTag(buf, n, 0x45);
     TEST_ASSERT_NOT_EQUAL(-1, latIdx);
     TEST_ASSERT_EQUAL_HEX32((uint32_t)296813520, readLE32(buf + latIdx + 1));
-    int lonIdx = latIdx + 5; // lat sfixed32 is tag(1) + data(4)
-    TEST_ASSERT_EQUAL_HEX8(0x4D, buf[lonIdx]); // verify we found the right tag
+    int lonIdx = latIdx + 5; // lat sfixed32 = tag(1) + data(4)
+    TEST_ASSERT_EQUAL_HEX8(0x4D, buf[lonIdx]);
     TEST_ASSERT_EQUAL_HEX32((uint32_t)(int32_t)-952347811, readLE32(buf + lonIdx + 1));
+}
+
+void test_encodeMapReport_firmware_version_emitted(void)
+{
+    // Field 4 (0x22) must be emitted when firmwareVersion is a non-empty string.
+    // The encoded bytes: tag=0x22, len=8, "2.7.15.0"
+    uint8_t buf[160] = {};
+    size_t n = mc_encodeMapReport(buf, sizeof(buf),
+                                   "FW", "FW",
+                                   1, 2, 0, 0, 48, 1, 0,
+                                   /*firmwareVersion=*/"2.7.15.0");
+    TEST_ASSERT_GREATER_THAN(0u, n);
+
+    // Find tag 0x22
+    int idx = findTag(buf, n, 0x22);
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(-1, idx,
+        "field 4 (firmware_version) tag 0x22 must be emitted");
+
+    // Verify length byte and string content
+    TEST_ASSERT_EQUAL_UINT8(8, buf[idx + 1]); // strlen("2.7.15.0") == 8
+    TEST_ASSERT_EQUAL_MEMORY("2.7.15.0", buf + idx + 2, 8);
+}
+
+void test_encodeMapReport_firmware_version_omitted_when_null(void)
+{
+    // Field 4 (0x22) must NOT be emitted when firmwareVersion is nullptr.
+    uint8_t buf[160] = {};
+    size_t n = mc_encodeMapReport(buf, sizeof(buf),
+                                   "NoFW", "NFW",
+                                   1, 2, 0, 0, 48, 1, 0,
+                                   /*firmwareVersion=*/nullptr);
+    TEST_ASSERT_GREATER_THAN(0u, n);
+    // Tag 0x22 must not appear
+    TEST_ASSERT_EQUAL_MESSAGE(-1, findTag(buf, n, 0x22),
+        "field 4 (firmware_version) tag 0x22 must not appear when firmwareVersion=nullptr");
 }
 
 void test_encodeMapReport_zero_altitude_omitted(void)
@@ -1309,10 +1369,10 @@ void test_encodeMapReport_zero_neighbors_omitted(void)
 
 void test_encodeMapReport_field_order_ascending(void)
 {
-    uint8_t buf[160] = {};
+    uint8_t buf[200] = {};
     size_t n = mc_encodeMapReport(buf, sizeof(buf),
                                    "Node", "ND", 100, 200, 50,
-                                   2, 48, 1, 0);
+                                   2, 48, 1, 0, "2.7.15.0");
     uint32_t lastField = 0;
     size_t pos = 0;
     while (pos < n) {
@@ -1560,18 +1620,20 @@ void test_wire_tags_user_proto(void)
 
 void test_wire_tags_mapreport_proto(void)
 {
-    // MapReport proto tags:
-    //   F1  long_name       → 0x0A
-    //   F2  short_name      → 0x12
-    //   F3  hw_model        → 0x18
-    //   F5  region          → 0x28
-    //   F6  modem_preset    → 0x30
-    //   F7  has_default_ch  → 0x38
-    //   F8  latitude_i      → (8<<3)|5 = 0x45
-    //   F9  longitude_i     → (9<<3)|5 = 0x4D
-    //   F10 altitude        → (10<<3)|0= 0x50
-    //   F11 position_prec   → (11<<3)|0= 0x58
-    //   F12 num_online      → (12<<3)|0= 0x60
+    // MapReport proto tags (verified against Meshtastic 2.7.x mesh.proto):
+    //   F1  long_name        → (1<<3)|2 = 0x0A
+    //   F2  short_name       → (2<<3)|2 = 0x12
+    //   F3  hw_model         → (3<<3)|0 = 0x18
+    //   F4  firmware_version → (4<<3)|2 = 0x22  NEW in 2.7.x
+    //   F5  region           → (5<<3)|0 = 0x28
+    //   F6  modem_preset     → (6<<3)|0 = 0x30
+    //   F7  has_default_ch   → (7<<3)|0 = 0x38
+    //   F8  latitude_i       → (8<<3)|5 = 0x45
+    //   F9  longitude_i      → (9<<3)|5 = 0x4D
+    //   F10 altitude         → (10<<3)|0= 0x50
+    //   F11 position_prec    → (11<<3)|0= 0x58
+    //   F12 num_online       → (12<<3)|0= 0x60
+    TEST_ASSERT_EQUAL_HEX8(0x22, (4  << 3) | 2); // firmware_version (string)
     TEST_ASSERT_EQUAL_HEX8(0x45, (8  << 3) | 5);
     TEST_ASSERT_EQUAL_HEX8(0x4D, (9  << 3) | 5);
     TEST_ASSERT_EQUAL_HEX8(0x50, (10 << 3) | 0);
@@ -1781,6 +1843,7 @@ int main(void)
     RUN_TEST(test_encodeUser_is_licensed_emits_field6_no_pubkey);
     RUN_TEST(test_encodeUser_client_role_omits_field7);
     RUN_TEST(test_encodeUser_tracker_role_emits_field7);
+    RUN_TEST(test_encodeUser_all_27x_roles_roundtrip);
     RUN_TEST(test_encodeUser_field_order_ascending);
     RUN_TEST(test_encodeUser_licensed_with_role_field_order);
     RUN_TEST(test_encodeUser_no_macaddr);
@@ -1792,13 +1855,15 @@ int main(void)
     RUN_TEST(test_telemetry_zero_battery);
     RUN_TEST(test_telemetry_large_uptime);
 
-    // 11. mc_encodeMapReport — field presence and omission
+    // 11. mc_encodeMapReport — field presence, firmware_version (2.7.x field 4)
     RUN_TEST(test_encodeMapReport_all_fields_present);
+    RUN_TEST(test_encodeMapReport_firmware_version_emitted);
+    RUN_TEST(test_encodeMapReport_firmware_version_omitted_when_null);
     RUN_TEST(test_encodeMapReport_zero_altitude_omitted);
     RUN_TEST(test_encodeMapReport_zero_neighbors_omitted);
     RUN_TEST(test_encodeMapReport_field_order_ascending);
 
-    // 12. Reference byte-vector conformance (v2.7.15)
+    // 12. Reference byte-vector conformance (v2.7.x)
     RUN_TEST(test_ref_encodePosition_known_bytes);
     RUN_TEST(test_ref_encodeData_known_bytes);
     RUN_TEST(test_ref_encodeData_with_dest_and_request_id);

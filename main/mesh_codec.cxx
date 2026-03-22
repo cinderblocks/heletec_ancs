@@ -241,7 +241,8 @@ size_t mc_encodeMapReport(uint8_t* buf, size_t /*cap*/,
                            uint32_t numNeighbors,
                            uint32_t hwModel,
                            uint8_t  regionCode,
-                           uint8_t  modemPreset)
+                           uint8_t  modemPreset,
+                           const char* firmwareVersion)
 {
     size_t n = 0;
 
@@ -256,6 +257,13 @@ size_t mc_encodeMapReport(uint8_t* buf, size_t /*cap*/,
     n += mc_pbString(buf + n, 0x0A, longName);         // Field 1: long_name
     n += mc_pbString(buf + n, 0x12, shortName);        // Field 2: short_name
     buf[n++] = 0x18; n += mc_pbVarint(buf + n, hwModel);    // Field 3: hw_model
+
+    // Field 4: firmware_version (string) — new in Meshtastic 2.7.x.
+    // Identifies this node's firmware to MQTT bridges and the public map.
+    // Omit when nullptr or empty (backward compatible with 2.5/2.6 receivers).
+    if (firmwareVersion && firmwareVersion[0] != '\0')
+        n += mc_pbString(buf + n, 0x22, firmwareVersion); // Field 4: firmware_version
+
     buf[n++] = 0x28; n += mc_pbVarint(buf + n, regionCode); // Field 5: region
     buf[n++] = 0x30; n += mc_pbVarint(buf + n, modemPreset);// Field 6: modem_preset
     buf[n++] = 0x38; buf[n++] = 0x01;                 // Field 7: has_default_channel = true

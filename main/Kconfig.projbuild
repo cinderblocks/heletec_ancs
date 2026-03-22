@@ -104,7 +104,7 @@ config LORA_FREQUENCY_HZ
         Expert override: set a specific centre frequency in Hz.
         When non-zero, this overrides the channel_num-based calculation.
         Leave at 0 for normal operation (auto-computed from channel_num).
-          Example: 906875000 for slot 20 of US LongFast.
+          Example: 907125000 for slot 20 of US LongFast (default).
 
 choice LORA_MODEM_PRESET
     prompt "Meshtastic modem preset"
@@ -203,6 +203,17 @@ config MESH_NODE_LONG_NAME
         Up to 32 UTF-8 characters.
         Can be overridden at runtime via NVS (persisted across reboots).
 
+config MESH_FIRMWARE_VERSION
+    string "Firmware version string broadcast in MAP_REPORT_APP (2.7.x field 4)"
+    default "2.7.15.0"
+    depends on LORA_ENABLED
+    help
+        Version string sent in MAP_REPORT_APP (MapReport field 4, new in
+        Meshtastic 2.7.x).  MQTT bridges and the public Meshtastic map
+        (meshtastic.network/map) use this to display the firmware version
+        of the node.  Defaults to "2.7.15.0" to indicate 2.7.x wire
+        protocol compatibility.
+
 choice MESH_NODE_ROLE_SEL
     prompt "Meshtastic node role"
     depends on LORA_ENABLED
@@ -212,22 +223,67 @@ choice MESH_NODE_ROLE_SEL
         Meshtastic uses this to assign icons and tune Smart Position
         behaviour in the app.
 
-        CLIENT  — standard node (no icon, default position interval).
-        TRACKER — GPS tracker icon, Smart Position enabled.  Best choice
-                  for this hardware since it has an onboard GPS module.
+        Meshtastic 2.7.x DeviceRole enum values:
+          CLIENT         (0) — standard node, default
+          CLIENT_MUTE    (1) — client that does not relay packets
+          ROUTER         (2) — dedicated packet relay node
+          ROUTER_CLIENT  (3) — relay + client hybrid
+          REPEATER       (4) — RF repeater (no display expected)
+          TRACKER        (5) — GPS tracker icon, Smart Position enabled
+          SENSOR         (6) — IoT sensor node (headless)
+          TAK            (7) — ATAK/WinTAK-compatible node
+          CLIENT_HIDDEN  (8) — client not shown in app node list
+          LOST_AND_FOUND (9) — asset tracking beacon
+          TAK_TRACKER   (10) — ATAK + GPS tracker hybrid
 
     config MESH_ROLE_CLIENT
         bool "CLIENT (0) — standard Meshtastic node"
 
+    config MESH_ROLE_CLIENT_MUTE
+        bool "CLIENT_MUTE (1) — client, does not relay"
+
+    config MESH_ROLE_ROUTER
+        bool "ROUTER (2) — dedicated packet relay"
+
+    config MESH_ROLE_ROUTER_CLIENT
+        bool "ROUTER_CLIENT (3) — relay + client hybrid"
+
+    config MESH_ROLE_REPEATER
+        bool "REPEATER (4) — RF repeater"
+
     config MESH_ROLE_TRACKER
         bool "TRACKER (5) — GPS tracker (tracker icon, Smart Position)"
+
+    config MESH_ROLE_SENSOR
+        bool "SENSOR (6) — IoT sensor node"
+
+    config MESH_ROLE_TAK
+        bool "TAK (7) — ATAK/WinTAK node"
+
+    config MESH_ROLE_CLIENT_HIDDEN
+        bool "CLIENT_HIDDEN (8) — hidden from node list"
+
+    config MESH_ROLE_LOST_AND_FOUND
+        bool "LOST_AND_FOUND (9) — asset tracking beacon"
+
+    config MESH_ROLE_TAK_TRACKER
+        bool "TAK_TRACKER (10) — ATAK + GPS tracker"
 
 endchoice
 
 config MESH_NODE_ROLE
     int
-    default 0 if MESH_ROLE_CLIENT
-    default 5 if MESH_ROLE_TRACKER
+    default 0  if MESH_ROLE_CLIENT
+    default 1  if MESH_ROLE_CLIENT_MUTE
+    default 2  if MESH_ROLE_ROUTER
+    default 3  if MESH_ROLE_ROUTER_CLIENT
+    default 4  if MESH_ROLE_REPEATER
+    default 5  if MESH_ROLE_TRACKER
+    default 6  if MESH_ROLE_SENSOR
+    default 7  if MESH_ROLE_TAK
+    default 8  if MESH_ROLE_CLIENT_HIDDEN
+    default 9  if MESH_ROLE_LOST_AND_FOUND
+    default 10 if MESH_ROLE_TAK_TRACKER
 
 choice LORA_REGION
     prompt "LoRa region"

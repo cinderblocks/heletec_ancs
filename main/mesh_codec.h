@@ -16,7 +16,9 @@
  */
 
 /**
- * mesh_codec.h — Meshtastic over-the-air protobuf codec, zero platform deps.
+ * mesh_codec.h — Meshtastic 2.7.x over-the-air protobuf codec, zero platform deps.
+ *
+ * Protocol target: Meshtastic firmware 2.7.x (mesh.proto / telemetry.proto 2.7.15).
  *
  * Contains:
  *  - Plain-old-data structs (MeshMessage, MeshPosition, MeshUser) — no FreeRTOS types.
@@ -145,10 +147,10 @@ size_t mc_encodeUser(uint8_t* buf, size_t cap,
                      const char* longName, const char* shortName,
                      const uint8_t macaddr[6],
                      uint32_t hwModel,
-                     uint8_t  deviceRole,         ///< 0 = CLIENT (field 7 omitted), 5 = TRACKER
+                     uint8_t  deviceRole,         ///< DeviceRole varint (2.7.x: 0=CLIENT … 10=TAK_TRACKER); field 7 omitted when 0
                      const uint8_t* publicKey,    ///< nullptr to omit field 8
-                     bool isLicensed        = false, ///< true → emit is_licensed=true, skip pubkey
-                     bool isUnmessageable   = false); ///< true → emit is_unmessageable=true
+                     bool isLicensed        = false, ///< true → emit is_licensed=true (field 6), skip pubkey
+                     bool isUnmessageable   = false); ///< true → emit is_unmessageable=true (field 9)
 
 /**
  * Wrap an encoded payload in a Meshtastic Data proto.
@@ -188,15 +190,30 @@ size_t mc_encodeTelemetry(uint8_t* buf, size_t cap,
 /**
  * Encode a Meshtastic MapReport proto (MAP_REPORT_APP payload, port 73).
  *
- * buf must be at least 120 bytes.  Returns bytes written.
+ * Field layout (verified against Meshtastic firmware 2.7.x mesh.proto):
+ *   Field  1 (long_name,           string):  tag 0x0A
+ *   Field  2 (short_name,          string):  tag 0x12
+ *   Field  3 (hw_model,            varint):  tag 0x18  HardwareModel enum
+ *   Field  4 (firmware_version,    string):  tag 0x22  NEW in 2.7.x; omit when nullptr
+ *   Field  5 (region,              varint):  tag 0x28  RegionCode enum
+ *   Field  6 (modem_preset,        varint):  tag 0x30  ModemPreset enum
+ *   Field  7 (has_default_channel, bool):    tag 0x38  true = factory default PSK
+ *   Field  8 (latitude_i,          sfixed32):tag 0x45
+ *   Field  9 (longitude_i,         sfixed32):tag 0x4D
+ *   Field 10 (altitude,            varint):  tag 0x50  omit when 0
+ *   Field 11 (position_precision,  varint):  tag 0x58  32 = full GPS precision
+ *   Field 12 (num_online_local_nodes,varint):tag 0x60  omit when 0
+ *
+ * buf must be at least 160 bytes.  Returns bytes written.
  */
 size_t mc_encodeMapReport(uint8_t* buf, size_t cap,
                            const char* longName, const char* shortName,
                            int32_t lat_i, int32_t lon_i, int32_t alt_m,
                            uint32_t numNeighbors,
                            uint32_t hwModel,
-                           uint8_t  regionCode,   ///< RegionCode enum: US=1, EU_868=3
-                           uint8_t  modemPreset);  ///< ModemPreset: LONG_FAST=0, LONG_SLOW=1
+                           uint8_t  regionCode,         ///< RegionCode: US=1, EU_868=3
+                           uint8_t  modemPreset,        ///< ModemPreset: LONG_FAST=0
+                           const char* firmwareVersion = nullptr); ///< 2.7.x field 4; nullptr = omit
 
 // ── Meshtastic proto decoders ─────────────────────────────────────────────
 
@@ -231,14 +248,18 @@ bool mc_parsePosition(const uint8_t* data, size_t len, MeshPosition& pos);
  * Decode a Meshtastic User (NodeInfo) proto.
  * Returns true when the id field (field 1) was found.
  *
- * Decoded fields:
+ * Decoded fields (Meshtastic 2.7.x mesh.proto):
  *   id              ← field 1  (string)
  *   longName        ← field 2  (string)
  *   shortName       ← field 3  (string)
  *   macaddr         ← field 4  (bytes, 6)  — sets hasMacaddr when length==6
- *   hwModel         ← field 5  (varint)
+ *   hwModel         ← field 5  (varint)    HardwareModel enum
  *   isLicensed      ← field 6  (bool varint)
- *   role            ← field 7  (varint, DeviceRole enum)
+ *   role            ← field 7  (varint)    DeviceRole enum (2.7.x values 0–10):
+ *                                          0=CLIENT 1=CLIENT_MUTE 2=ROUTER
+ *                                          3=ROUTER_CLIENT 4=REPEATER 5=TRACKER
+ *                                          6=SENSOR 7=TAK 8=CLIENT_HIDDEN
+ *                                          9=LOST_AND_FOUND 10=TAK_TRACKER
  *   publicKey       ← field 8  (bytes, 32) — sets hasPublicKey when length==32
  *   isUnmessageable ← field 9  (bool varint)
  */

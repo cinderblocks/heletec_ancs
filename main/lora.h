@@ -59,10 +59,12 @@ struct LoRaStats {
 };
 
 /**
- * LoRa — SX1262 driver + Meshtastic receive task.
+ * LoRa — SX1262 driver + Meshtastic 2.7.x receive/transmit task.
  *
  * Continuously listens on the configured Meshtastic channel (default:
- * US LongFast @ 906.875 MHz, SF11/BW250/CR4-5, private sync word 0x2B).
+ * US LongFast @ 907.125 MHz, SF11/BW250/CR4-5, private sync word 0x2B).
+ *
+ * Protocol target: Meshtastic firmware 2.7.x (mesh.proto 2.7.15).
  *
  * Uses standard AES-128-CTR channel encryption for full interoperability
  * with the existing Meshtastic mesh.  TX is always encrypted with the
@@ -84,8 +86,12 @@ struct LoRaStats {
  *   - RX: AES-CTR decrypt is tried first; if protobuf parse fails, the raw
  *     payload is used as plaintext (handles other unencrypted nodes).
  *
- * Received packets containing TEXT_MESSAGE_APP Data protos have their
- * text stored and the draw task is notified via Hardware::notifyDraw(DRAW_LORA).
+ * TX packets include:
+ *   - POSITION_APP      — GPS fix with speed/heading (periodic + adaptive)
+ *   - NODEINFO_APP      — node identity, role, PKC public key
+ *   - TELEMETRY_APP     — device metrics (battery, uptime)
+ *   - MAP_REPORT_APP    — node identity + firmware_version for MQTT bridges (2.7.x)
+ *   - TRACEROUTE_APP    — route-discovery replies
  *
  * Runs as a FreeRTOS task on core 1 (BLE / draw tasks run on core 0).
  */
@@ -293,12 +299,14 @@ private:
                                    uint8_t batteryLevel, float batteryVoltage);
 
     /// Encode a Meshtastic MapReport proto (MAP_REPORT_APP payload).
-    /// Carries node identity, region, modem preset, and GPS fix for the public map.
+    /// Carries node identity, region, modem preset, firmware version, and GPS fix.
+    /// Field 4 (firmware_version) is included for Meshtastic 2.7.x map-bridge compat.
     /// Returns bytes written.
     static size_t _encodeMapReport(uint8_t* buf, size_t cap,
                                    const char* longName, const char* shortName,
                                    int32_t lat_i, int32_t lon_i, int32_t alt_m,
-                                   uint32_t numNeighbors);
+                                   uint32_t numNeighbors,
+                                   const char* firmwareVersion = nullptr);
 
     /// Wrap an encoded payload in a Meshtastic Data proto. Returns bytes written.
     /// dest is fixed32 (field 4). requestId is fixed32 (field 6 = request_id).
@@ -380,6 +388,7 @@ private:
         TickType_t tick   = 0;
     };
     PkcKeyReq _pkcKeyReqs[PKC_REQ_RING_MAX] = {};
+    size_t    _pkcReqCursor = 0; ///< ring-buffer write cursor for _pkcKeyReqs
 
     // ── Pending PKC packet buffer ─────────────────────────────────────────
     // Stores raw undecryptable PKC packets (missing sender public key) so

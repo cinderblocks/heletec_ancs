@@ -35,6 +35,7 @@ enum application_def
     APP_SIGNAL,
     APP_HONK,
     APP_GHRN,
+    APP_SWOOP,
     APP_TOWBOOK,
 };
 
@@ -116,6 +117,7 @@ private:
         {"org.whispersystems.signal",     APP_SIGNAL},
         {"com.honkforhelp.driver",        APP_HONK},
         {"com.arity.rescuer",             APP_GHRN},
+        {"com.swoop.mobile",              APP_SWOOP},
         {"com.towbook.mobile",            APP_TOWBOOK},
     };
 
@@ -130,6 +132,7 @@ private:
         {APP_SIGNAL,    "Signal"},
         {APP_HONK,      "Honk"},
         {APP_GHRN,      "GHRN"},
+        {APP_SWOOP,     "Swoop"},
         {APP_TOWBOOK,   "Towbook"},
     };
 

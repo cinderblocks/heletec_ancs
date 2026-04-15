@@ -110,6 +110,13 @@ void NotificationService::setNotificationAttribute(uint32_t uuid, uint8_t attrib
 
         if (notification != nullptr) {
             switch (attributeId) {
+                case ANCS::NotificationAttributeIDAppIdentifier:
+                    // Repopulate bundleId after a reset()-triggered re-fetch.
+                    // reset() clears bundleId; without this the display name would
+                    // be blank for custom (APP_UNKNOWN) apps after a modification.
+                    strncpy(notification->bundleId, value, sizeof(notification->bundleId) - 1);
+                    notification->bundleId[sizeof(notification->bundleId) - 1] = '\0';
+                    break;
                 case ANCS::NotificationAttributeIDTitle:
                     strncpy(notification->title, value, sizeof(notification->title) - 1);
                     notification->title[sizeof(notification->title) - 1] = '\0';
@@ -175,8 +182,33 @@ bool NotificationService::resetForUpdate(uint32_t uuid)
     }
     if (notification != nullptr && notification->isComplete) {
         bool wasCall = notification->isCall();
+
+        // Re-validate non-call notifications against the current whitelist before
+        // re-queuing.  The user may have removed the app from the custom list since
+        // the notification was first accepted; don't let a Modified event sneak it
+        // through by bypassing the exists()-gated whitelist check in
+        // handleDataSourceEvent.
+        // Calls are always re-validated via APP_PHONE / APP_FACETIME (built-ins),
+        // so skip the check for them to avoid a redundant strcmp loop.
+        if (!wasCall && !AppList.isAllowedApplication(notification->bundleId)) {
+            // App is no longer whitelisted — discard the notification entirely.
+            notification->reset();
+            notification->key = 0;
+            if (notificationCount > 0) { notificationCount--; }
+            return false;
+        }
+
+        // For calls: iOS sends Modified every second for the call timer.
+        // Re-fetching would waste BLE bandwidth and — because showed is set to true
+        // below — the updated data would be discarded by takeCallingNotification
+        // anyway.  Simply leave the existing (already-shown) call notification in
+        // place; the call-state icon in the header stays accurate via
+        // isCallingNotification().
+        if (wasCall) {
+            return false;
+        }
+
         notification->reset();
-        if (wasCall) { notification->showed = true; }
         shouldRequeue = true;
     }
     return shouldRequeue;

@@ -184,14 +184,18 @@ bool NotificationService::resetForUpdate(uint32_t uuid)
         bool wasCall = notification->isCall();
 
         // Re-validate non-call notifications against the current whitelist before
-        // re-queuing.  The user may have removed the app from the custom list since
-        // the notification was first accepted; don't let a Modified event sneak it
-        // through by bypassing the exists()-gated whitelist check in
-        // handleDataSourceEvent.
-        // Calls are always re-validated via APP_PHONE / APP_FACETIME (built-ins),
-        // so skip the check for them to avoid a redundant strcmp loop.
-        if (!wasCall && !AppList.isAllowedApplication(notification->bundleId)) {
-            // App is no longer whitelisted — discard the notification entirely.
+        // re-queuing.  Only custom (user-added) entries can be removed at runtime,
+        // so built-in (hardcoded) entries must ALWAYS be allowed through — never
+        // discard them, even if bundleId is transiently stale or empty.
+        // Guard against an empty bundleId too: if it's blank for any reason, give
+        // the re-fetch a chance to repopulate it rather than wrongly suppressing
+        // a notification we already accepted once.
+        if (!wasCall &&
+            notification->bundleId[0] != '\0' &&
+            !AppList.isBuiltIn(notification->bundleId) &&
+            !AppList.isAllowedApplication(notification->bundleId))
+        {
+            // Custom app is no longer whitelisted — discard the notification entirely.
             notification->reset();
             notification->key = 0;
             if (notificationCount > 0) { notificationCount--; }

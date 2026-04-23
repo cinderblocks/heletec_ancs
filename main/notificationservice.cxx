@@ -244,7 +244,15 @@ bool NotificationService::resetForUpdate(uint32_t uuid)
             return false;
         }
 
+        // Preserve the showed flag across reset so that already-displayed
+        // notifications (e.g. old missed calls) are re-fetched to keep their
+        // in-memory content current, but are NOT re-shown to the user when
+        // a call ends or DRAW_NOTIFY fires.  Without this, a Modified event
+        // from iOS on any previously-shown notification would clear showed=false,
+        // causing it to appear again after the next call ends.
+        bool wasShowed = notification->showed;
         notification->reset();
+        notification->showed = wasShowed;
         shouldRequeue = true;
     }
     return shouldRequeue;

@@ -155,18 +155,23 @@ void Hardware::startDrawing(void* pvParameters)
                 h->glow(false);
             }
 
+            // Drain all pending regular notifications.  Run in a loop so that
+            // any notifications that completed DURING the display delays above
+            // are picked up in the same DRAW_NOTIFY handling pass rather than
+            // waiting for the next (potentially never-arriving) DRAW_NOTIFY event.
             static constexpr size_t MAX_BATCH = 8;
             notification_def pending[MAX_BATCH];
-            const size_t pendingCount =
-                Notifications.takeAllPendingNotifications(pending, MAX_BATCH);
-
-            for (size_t i = 0; i < pendingCount; i++) {
-                h->showNotification(pending[i]);
-                h->glow(true);
-                vTaskDelay(pdMS_TO_TICKS(15000));
-                h->glow(false);
-                vTaskDelay(pdMS_TO_TICKS(10));
-            }
+            size_t pendingCount = 0;
+            do {
+                pendingCount = Notifications.takeAllPendingNotifications(pending, MAX_BATCH);
+                for (size_t i = 0; i < pendingCount; i++) {
+                    h->showNotification(pending[i]);
+                    h->glow(true);
+                    vTaskDelay(pdMS_TO_TICKS(15000));
+                    h->glow(false);
+                    vTaskDelay(pdMS_TO_TICKS(10));
+                }
+            } while (pendingCount > 0);
 
             char localMsg[sizeof(h->mMessage)];
             portENTER_CRITICAL(&h->mHardwareLock);

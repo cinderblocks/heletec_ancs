@@ -56,6 +56,7 @@ struct notification_def
     /// CategoryIDMissedCall=2).  Used to distinguish a ringing incoming call from a
     /// "missed call" entry — both share the com.apple.mobilephone bundle ID.
     uint8_t categoryId = 0;
+    bool preExisting = false; ///< true when iOS flagged EventFlagPreExisting — populate list silently
     bool showed = false;
     bool isComplete = false;
     uint8_t receivedAttributes = 0;
@@ -82,6 +83,7 @@ struct notification_def
         bundleId[0] = '\0';
         time = 0;
         categoryId = 0;
+        preExisting = false;
         showed = false;
         isComplete = false;
         receivedAttributes = 0;
@@ -101,7 +103,10 @@ public:
     /// @param categoryId  ANCS CategoryID from the NotificationSource packet.
     ///                    Stored in EVT_PENDING_UUID data[4] so it survives until
     ///                    handleDataSourceEvent() creates the notification_def.
-    void addPendingNotification(uint32_t uuid, uint8_t categoryId = 0);
+    /// @param eventFlags  ANCS EventFlags byte from the NotificationSource packet.
+    ///                    Stored in EVT_PENDING_UUID data[5]; used to detect
+    ///                    EventFlagPreExisting so reconnect floods are silent.
+    void addPendingNotification(uint32_t uuid, uint8_t categoryId = 0, uint8_t eventFlags = 0);
     void clearPendingNotifications();
     void addNotification(notification_def const& notification, bool isCalling);
     void setNotificationAttribute(uint32_t uuid, uint8_t attributeId, const char* value);
@@ -112,7 +117,9 @@ public:
     void addCancelledUUID(uint32_t uuid);
     bool consumeCancelledUUID(uint32_t uuid);
     void markFetchStart(uint32_t uuid);
-    void resetIfStale(uint32_t uuid, TickType_t timeoutTicks);
+    /// Resets a stale (timed-out) in-flight fetch.  Returns true if the
+    /// notification was reset and the UUID should be re-queued for a retry.
+    bool resetIfStale(uint32_t uuid, TickType_t timeoutTicks);
     bool exists(uint32_t uuid) const;
     [[nodiscard]] bool isCallingNotification() const;
     bool takeCallingNotification(notification_def& out);
@@ -155,15 +162,16 @@ private:
     // Maps a notification UUID to its ANCS CategoryID so that handleDataSourceEvent()
     // can correctly classify incoming calls vs. missed calls vs. other notifications
     // even though CategoryID is only available in the NotificationSource packet.
-    struct PendingCategoryEntry { uint32_t uuid; uint8_t categoryId; };
+    struct PendingCategoryEntry { uint32_t uuid; uint8_t categoryId; uint8_t eventFlags; };
     static constexpr size_t pendingCategoryMapSize = 32;
     PendingCategoryEntry pendingCategoryMap[pendingCategoryMapSize];
     size_t pendingCategoryCount = 0;
 
-    /// Store (uuid → categoryId) before the GATT fetch begins.
-    void storePendingCategory(uint32_t uuid, uint8_t categoryId);
-    /// Remove and return the stored categoryId for uuid (returns 0 if not found).
-    uint8_t consumePendingCategory(uint32_t uuid);
+    /// Store (uuid → categoryId, eventFlags) before the GATT fetch begins.
+    void storePendingCategory(uint32_t uuid, uint8_t categoryId, uint8_t eventFlags);
+    /// Remove and return the stored categoryId and eventFlags for uuid
+    /// (returns categoryId=0, eventFlags=0 if not found).
+    void consumePendingCategory(uint32_t uuid, uint8_t& outCategoryId, uint8_t& outEventFlags);
 
     int  findNotificationIndex(uint32_t uuid) const;
     void handleDataSourceEvent(const uint8_t* data, uint8_t length);

@@ -148,7 +148,17 @@ void NotificationService::setNotificationAttribute(uint32_t uuid, uint8_t attrib
                 (notification->receivedAttributes & notification_def::ATTR_ALL) == notification_def::ATTR_ALL)
             {
                 notification->isComplete = true;
-                shouldNotify = true;
+                // Pre-existing notifications (present on iOS before this BLE connection)
+                // must not be displayed or buzzed — they are not new to the user.
+                // Mark showed=true here so takeAllPendingNotifications skips them, and
+                // suppress DRAW_NOTIFY entirely to avoid standby-screen flicker during
+                // the reconnect burst of potentially dozens of pre-existing fetches.
+                if (notification->preExisting) {
+                    notification->showed = true;
+                    // shouldNotify intentionally left false
+                } else {
+                    shouldNotify = true;
+                }
             }
         }
     } // lock released here
@@ -258,17 +268,18 @@ bool NotificationService::resetForUpdate(uint32_t uuid)
     return shouldRequeue;
 }
 
-void NotificationService::addPendingNotification(uint32_t uuid, uint8_t categoryId)
+void NotificationService::addPendingNotification(uint32_t uuid, uint8_t categoryId, uint8_t eventFlags)
 {
     if (mEventQueue == nullptr) { return; }
     ancs_event_t event;
     event.type   = ancs_event_t::EVT_PENDING_UUID;
-    event.length = 5;
+    event.length = 6;
     event.data[0] = (uint8_t)(uuid);
     event.data[1] = (uint8_t)(uuid >> 8);
     event.data[2] = (uint8_t)(uuid >> 16);
     event.data[3] = (uint8_t)(uuid >> 24);
     event.data[4] = categoryId;   // ANCS CategoryID — preserved for handleDataSourceEvent
+    event.data[5] = eventFlags;   // ANCS EventFlags — e.g. EventFlagPreExisting
     xQueueSend(mEventQueue, &event, 0);
 }
 
@@ -278,46 +289,51 @@ void NotificationService::clearPendingNotifications()
     {
         xQueueReset(mEventQueue);
     }
-    // Also clear the category map — stale entries from the old connection must
-    // not pollute a fresh reconnect.
+    // Also clear the category map and cancelled-UUID set — stale entries from the
+    // old connection must not pollute a fresh reconnect.  The cancelled set in
+    // particular could suppress real notifications if iOS reuses a UUID.
     ScopedLock lock(mMutex);
     pendingCategoryCount = 0;
+    cancelledCount = 0;
 }
 
-void NotificationService::storePendingCategory(uint32_t uuid, uint8_t categoryId)
+void NotificationService::storePendingCategory(uint32_t uuid, uint8_t categoryId, uint8_t eventFlags)
 {
     ScopedLock lock(mMutex);
     // Update existing entry if present (e.g. Modified re-queues the same UUID).
     for (size_t i = 0; i < pendingCategoryCount; i++) {
         if (pendingCategoryMap[i].uuid == uuid) {
             pendingCategoryMap[i].categoryId = categoryId;
+            pendingCategoryMap[i].eventFlags = eventFlags;
             return;
         }
     }
     if (pendingCategoryCount < pendingCategoryMapSize) {
-        pendingCategoryMap[pendingCategoryCount++] = { uuid, categoryId };
+        pendingCategoryMap[pendingCategoryCount++] = { uuid, categoryId, eventFlags };
     } else {
         // Map full: evict the oldest entry (index 0) and append the new one.
         memmove(&pendingCategoryMap[0], &pendingCategoryMap[1],
                 (pendingCategoryMapSize - 1) * sizeof(PendingCategoryEntry));
-        pendingCategoryMap[pendingCategoryMapSize - 1] = { uuid, categoryId };
+        pendingCategoryMap[pendingCategoryMapSize - 1] = { uuid, categoryId, eventFlags };
         ESP_LOGW(TAG, "pendingCategoryMap full — oldest entry evicted");
     }
 }
 
-uint8_t NotificationService::consumePendingCategory(uint32_t uuid)
+void NotificationService::consumePendingCategory(uint32_t uuid, uint8_t& outCategoryId, uint8_t& outEventFlags)
 {
     ScopedLock lock(mMutex);
     for (size_t i = 0; i < pendingCategoryCount; i++) {
         if (pendingCategoryMap[i].uuid == uuid) {
-            uint8_t cat = pendingCategoryMap[i].categoryId;
+            outCategoryId  = pendingCategoryMap[i].categoryId;
+            outEventFlags  = pendingCategoryMap[i].eventFlags;
             memmove(&pendingCategoryMap[i], &pendingCategoryMap[i + 1],
                     (pendingCategoryCount - i - 1) * sizeof(PendingCategoryEntry));
             pendingCategoryCount--;
-            return cat;
+            return;
         }
     }
-    return 0; // not found — treat as CategoryIDOther
+    outCategoryId = 0; // not found — treat as CategoryIDOther
+    outEventFlags = 0;
 }
 
 void NotificationService::addNotification(notification_def const& notification, bool isCalling)
@@ -523,7 +539,7 @@ void NotificationService::markFetchStart(uint32_t uuid)
     }
 }
 
-void NotificationService::resetIfStale(uint32_t uuid, TickType_t timeoutTicks)
+bool NotificationService::resetIfStale(uint32_t uuid, TickType_t timeoutTicks)
 {
     ScopedLock lock(mMutex);
     notification_def *notification = nullptr;
@@ -537,9 +553,14 @@ void NotificationService::resetIfStale(uint32_t uuid, TickType_t timeoutTicks)
         notification->fetchStartTime != 0 &&
         (xTaskGetTickCount() - notification->fetchStartTime) > timeoutTicks)
     {
-        ESP_LOGW(TAG, "Fetch for UUID %08lx timed out — resetting for re-fetch", uuid);
+        ESP_LOGW(TAG, "Fetch for UUID %08lx timed out — resetting for re-fetch",
+                 static_cast<unsigned long>(uuid));
+        bool wasShowed = notification->showed;
         notification->reset();
+        notification->showed = wasShowed; // preserve showed so re-fetch won't re-display
+        return true;
     }
+    return false;
 }
 
 
@@ -584,26 +605,31 @@ void NotificationService::handleDataSourceEvent(const uint8_t* pData, uint8_t le
             notification_def notification;
             notification.type = applicationType;
             notification.key  = messageId;
-            // Retrieve the CategoryID stored when the NotificationSource event was
-            // processed.  This is the ONLY place where we know whether a phone
-            // notification is an active incoming call (CategoryIDIncomingCall = 1)
-            // vs. a missed call or other informational entry (CategoryIDMissedCall = 2,
-            // etc.).  isCall() requires CategoryIDIncomingCall, so missed-call
-            // notifications from com.apple.mobilephone are treated as regular
-            // notifications rather than triggering the call screen.
-            notification.categoryId = consumePendingCategory(messageId);
+            // Retrieve the CategoryID and EventFlags stored when the NotificationSource
+            // event was processed.  CategoryID distinguishes an active incoming call
+            // (CategoryIDIncomingCall=1) from a missed call or informational entry.
+            // EventFlagPreExisting marks notifications that already existed on iOS before
+            // this BLE connection — they must be fetched to populate the list accurately,
+            // but must NOT be displayed or buzzed (they are not new to the user).
+            uint8_t pendingCategoryId = 0;
+            uint8_t pendingEventFlags = 0;
+            consumePendingCategory(messageId, pendingCategoryId, pendingEventFlags);
+            notification.categoryId  = pendingCategoryId;
+            notification.preExisting = (pendingEventFlags & ANCS::EventFlagPreExisting) != 0;
             strncpy(notification.bundleId, message, sizeof(notification.bundleId) - 1);
             addNotification(notification, notification.isCall());
-            ESP_LOGI(TAG, "Message from %s added (category=%u, isCall=%d)",
+            ESP_LOGI(TAG, "Message from %s added (category=%u, isCall=%d, preExisting=%d)",
                      message,
                      static_cast<unsigned>(notification.categoryId),
-                     static_cast<int>(notification.isCall()));
+                     static_cast<int>(notification.isCall()),
+                     static_cast<int>(notification.preExisting));
         }
         else
         {
             // App not whitelisted — consume the pending category entry so it doesn't
             // accumulate in the map for a notification that will never be created.
-            consumePendingCategory(messageId);
+            uint8_t dummy1, dummy2;
+            consumePendingCategory(messageId, dummy1, dummy2);
             ESP_LOGI(TAG, "Message from %s suppressed", message);
         }
     }
@@ -619,6 +645,7 @@ void NotificationService::handleNotificationSourceEvent(const uint8_t* pData, ui
                        | ((uint32_t)pData[7] << 24);
 
     // pData[1] = EventFlags, pData[2] = CategoryID, pData[3] = CategoryCount
+    const uint8_t eventFlags = pData[1];
     const uint8_t categoryId = pData[2];
 
     if (pData[0] == ANCS::EventIDNotificationRemoved)
@@ -638,12 +665,23 @@ void NotificationService::handleNotificationSourceEvent(const uint8_t* pData, ui
         // Modified every second for active calls, call timers, etc.).
         if (resetForUpdate(messageId))
         {
-            addPendingNotification(messageId, categoryId);
+            addPendingNotification(messageId, categoryId, eventFlags);
         }
     }
     else if (pData[0] == ANCS::EventIDNotificationAdded)
     {
-        addPendingNotification(messageId, categoryId);
+        // Guard against duplicate Added events for UUIDs already tracked (can
+        // occur with some iOS versions or rapid reconnects).  Re-fetching a
+        // notification that already exists wastes BLE bandwidth and could
+        // transiently reset an otherwise-complete entry.
+        if (!exists(messageId))
+        {
+            addPendingNotification(messageId, categoryId, eventFlags);
+        }
+        else
+        {
+            ESP_LOGD(TAG, "Duplicate Added for %08" PRIx32 " — ignored", messageId);
+        }
     }
 }
 
@@ -668,6 +706,7 @@ void NotificationService::processNextEvent()
                           | ((uint32_t)event.data[2] << 16)
                           | ((uint32_t)event.data[3] << 24);
             uint8_t categoryId = event.data[4]; // stored by addPendingNotification
+            uint8_t eventFlags = (event.length >= 6) ? event.data[5] : 0;
 
             if (consumeCancelledUUID(uuid))
             {
@@ -676,10 +715,19 @@ void NotificationService::processNextEvent()
             }
             if (Ble.isConnected() && uuid != 0)
             {
-                // Record the CategoryID so handleDataSourceEvent() can correctly
-                // classify incoming calls vs. missed calls using the same bundle ID.
-                storePendingCategory(uuid, categoryId);
-                resetIfStale(uuid, FETCH_TIMEOUT);
+                // Record the CategoryID and EventFlags so handleDataSourceEvent() can
+                // correctly classify incoming calls vs. missed calls, and detect
+                // pre-existing notifications that should be silently populated.
+                storePendingCategory(uuid, categoryId, eventFlags);
+
+                // If a previous fetch for this UUID timed out, reset it and re-queue
+                // a fresh attempt rather than leaving the slot stuck incomplete.
+                if (resetIfStale(uuid, FETCH_TIMEOUT))
+                {
+                    addPendingNotification(uuid, categoryId, eventFlags);
+                    break;
+                }
+
                 markFetchStart(uuid);
                 Ble.retrieveNotificationData(uuid);
             }

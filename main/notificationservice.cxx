@@ -41,7 +41,7 @@ NotificationService::NotificationService()
     }
     for (size_t i = 0; i < pendingCategoryMapSize; i++)
     {
-        pendingCategoryMap[i] = {0, 0};
+        pendingCategoryMap[i] = {0, 0, 0, 0};
     }
 
     // One queue for all ANCS events: pending UUID fetches, DataSource packets, and
@@ -85,7 +85,14 @@ void NotificationService::DataSourceNotifyCallback(NimBLERemoteCharacteristic *p
     event.type   = ancs_event_t::EVT_DATA_SOURCE;
     event.length = (length < sizeof(event.data)) ? (uint8_t)length : (uint8_t)sizeof(event.data);
     memcpy(event.data, pData, event.length);
-    xQueueSend(Notifications.mEventQueue, &event, 0); // non-blocking; drop if full
+    // If the queue is full we MUST drop the event (we're on the BTC task and cannot
+    // block).  Log so the dropped DataSource — which would otherwise leave the
+    // notification stuck "incomplete" forever — is at least visible.  The 30s
+    // fetch-timeout in resetIfStale() will eventually re-queue the UUID.
+    if (xQueueSend(Notifications.mEventQueue, &event, 0) != pdPASS) {
+        ESP_EARLY_LOGE(TAG, "Event queue full — DataSource dropped (len=%u)",
+                       (unsigned)event.length);
+    }
 }
 
 /* static */
@@ -97,7 +104,13 @@ void NotificationService::NotificationSourceNotifyCallback(NimBLERemoteCharacter
     event.type   = ancs_event_t::EVT_NOTIFY_SOURCE;
     event.length = (length < sizeof(event.data)) ? (uint8_t)length : (uint8_t)sizeof(event.data);
     memcpy(event.data, pData, event.length);
-    xQueueSend(Notifications.mEventQueue, &event, 0); // non-blocking; drop if full
+    // Dropping a NotificationSource event is more serious — we could miss an Added
+    // (notification never appears) or a Removed (cancelled notification still shown).
+    // Log loudly so we can detect under-sized queues in the field.
+    if (xQueueSend(Notifications.mEventQueue, &event, 0) != pdPASS) {
+        ESP_EARLY_LOGE(TAG, "Event queue full — NotificationSource DROPPED (eventID=%u uuid=%02x%02x%02x%02x)",
+                       (unsigned)event.data[0], event.data[7], event.data[6], event.data[5], event.data[4]);
+    }
 }
 
 void NotificationService::setNotificationAttribute(uint32_t uuid, uint8_t attributeId, const char* value)
@@ -184,8 +197,31 @@ bool NotificationService::removeIfCall(uint32_t uuid)
             // the list shows it without call-screen treatment).
             if (callingNotification.isComplete && !callingNotification.showed) {
                 int targetIndex = -1;
+                // Prefer an empty slot.
                 for (size_t i = 0; i < notificationListSize; i++) {
                     if (notificationList[i].key == 0) { targetIndex = static_cast<int>(i); break; }
+                }
+                // If full, evict the oldest already-shown entry (same policy as
+                // addNotification()) so the demoted call is never silently lost.
+                if (targetIndex == -1) {
+                    TickType_t oldestShown = 0;
+                    int oldestShownIdx = -1;
+                    const TickType_t now = xTaskGetTickCount();
+                    for (size_t i = 0; i < notificationListSize; i++) {
+                        if (notificationList[i].showed) {
+                            const TickType_t age = now - notificationList[i].fetchStartTime;
+                            if (oldestShownIdx == -1 || age > oldestShown) {
+                                oldestShown = age;
+                                oldestShownIdx = static_cast<int>(i);
+                            }
+                        }
+                    }
+                    if (oldestShownIdx != -1) {
+                        targetIndex = oldestShownIdx;
+                        ESP_LOGW(TAG, "Demoting call %08" PRIx32 " — evicting shown slot %d",
+                                 uuid, targetIndex);
+                        // Replacing a slot whose key was nonzero — count unchanged.
+                    }
                 }
                 if (targetIndex != -1) {
                     notificationList[targetIndex] = callingNotification;
@@ -193,15 +229,32 @@ bool NotificationService::removeIfCall(uint32_t uuid)
                     // treated as a regular notification and doesn't re-enter
                     // the call-screen path.
                     notificationList[targetIndex].categoryId = 0;
-                    notificationCount++;
-                    ESP_LOGI(TAG, "Demoted unshown call %08lx to regular notification list",
-                             static_cast<unsigned long>(uuid));
+                    notificationList[targetIndex].showed = false;          // defensive
+                    notificationList[targetIndex].fetchStartTime = xTaskGetTickCount();
+                    // Only bump count when we filled a previously-empty (key==0) slot.
+                    // The eviction path replaces an existing key — count unchanged.
+                    // We can tell which it was by checking whether the slot we used
+                    // came from the empty-slot scan: if oldestShownIdx was used,
+                    // ``notificationList[targetIndex].key`` was non-zero pre-assign.
+                    // Re-derive from the original snapshot:
+                    // (Simpler: count empty slots after the assignment.)
+                    // — but easier: track via a flag.
+                    // We'll just recompute count from the table to keep it correct.
+                    size_t recount = 0;
+                    for (size_t i = 0; i < notificationListSize; i++) {
+                        if (notificationList[i].key != 0) ++recount;
+                    }
+                    notificationCount = recount;
+                    ESP_LOGI(TAG, "Demoted unshown call %08lx to regular notification list (slot=%d)",
+                             static_cast<unsigned long>(uuid), targetIndex);
                 } else {
-                    ESP_LOGW(TAG, "No free slot to demote call %08lx — notification lost",
+                    ESP_LOGE(TAG, "No slot to demote call %08lx — notification LOST",
                              static_cast<unsigned long>(uuid));
                 }
             }
             callingNotification.key = 0;
+            callingNotification.showed = false;     // reset for next call
+            callingNotification.isComplete = false; // reset for next call
             wasCall = true;
         }
     }
@@ -280,7 +333,12 @@ void NotificationService::addPendingNotification(uint32_t uuid, uint8_t category
     event.data[3] = (uint8_t)(uuid >> 24);
     event.data[4] = categoryId;   // ANCS CategoryID — preserved for handleDataSourceEvent
     event.data[5] = eventFlags;   // ANCS EventFlags — e.g. EventFlagPreExisting
-    xQueueSend(mEventQueue, &event, 0);
+    // Surface dropped pending-fetch enqueues — silently dropping here means the
+    // notification will never be fetched and will appear "missed" to the user.
+    if (xQueueSend(mEventQueue, &event, 0) != pdPASS) {
+        ESP_LOGE(TAG, "Event queue full — pending UUID %08" PRIx32 " dropped (category=%u)",
+                 uuid, (unsigned)categoryId);
+    }
 }
 
 void NotificationService::clearPendingNotifications()
@@ -300,21 +358,40 @@ void NotificationService::clearPendingNotifications()
 void NotificationService::storePendingCategory(uint32_t uuid, uint8_t categoryId, uint8_t eventFlags)
 {
     ScopedLock lock(mMutex);
+    // Self-heal: drop entries older than 60 s.  If their DataSource never arrived
+    // (caller hung up before iOS responded, BLE link glitch, etc.) they would
+    // otherwise occupy the map until pendingCategoryMapSize is exhausted, at which
+    // point fresh calls get evicted and lose their CategoryID classification.
+    const TickType_t now = xTaskGetTickCount();
+    static constexpr TickType_t PENDING_CATEGORY_TTL = pdMS_TO_TICKS(60000);
+    for (size_t i = 0; i < pendingCategoryCount; ) {
+        if ((now - pendingCategoryMap[i].storedAt) > PENDING_CATEGORY_TTL) {
+            ESP_LOGW(TAG, "Pruning stale pendingCategory %08" PRIx32 " (category=%u)",
+                     pendingCategoryMap[i].uuid,
+                     (unsigned)pendingCategoryMap[i].categoryId);
+            memmove(&pendingCategoryMap[i], &pendingCategoryMap[i + 1],
+                    (pendingCategoryCount - i - 1) * sizeof(PendingCategoryEntry));
+            pendingCategoryCount--;
+        } else {
+            ++i;
+        }
+    }
     // Update existing entry if present (e.g. Modified re-queues the same UUID).
     for (size_t i = 0; i < pendingCategoryCount; i++) {
         if (pendingCategoryMap[i].uuid == uuid) {
             pendingCategoryMap[i].categoryId = categoryId;
             pendingCategoryMap[i].eventFlags = eventFlags;
+            pendingCategoryMap[i].storedAt   = now;
             return;
         }
     }
     if (pendingCategoryCount < pendingCategoryMapSize) {
-        pendingCategoryMap[pendingCategoryCount++] = { uuid, categoryId, eventFlags };
+        pendingCategoryMap[pendingCategoryCount++] = { uuid, categoryId, eventFlags, now };
     } else {
         // Map full: evict the oldest entry (index 0) and append the new one.
         memmove(&pendingCategoryMap[0], &pendingCategoryMap[1],
                 (pendingCategoryMapSize - 1) * sizeof(PendingCategoryEntry));
-        pendingCategoryMap[pendingCategoryMapSize - 1] = { uuid, categoryId, eventFlags };
+        pendingCategoryMap[pendingCategoryMapSize - 1] = { uuid, categoryId, eventFlags, now };
         ESP_LOGW(TAG, "pendingCategoryMap full — oldest entry evicted");
     }
 }
@@ -336,6 +413,34 @@ void NotificationService::consumePendingCategory(uint32_t uuid, uint8_t& outCate
     outEventFlags = 0;
 }
 
+void NotificationService::discardPendingCategory(uint32_t uuid)
+{
+    ScopedLock lock(mMutex);
+    for (size_t i = 0; i < pendingCategoryCount; i++) {
+        if (pendingCategoryMap[i].uuid == uuid) {
+            memmove(&pendingCategoryMap[i], &pendingCategoryMap[i + 1],
+                    (pendingCategoryCount - i - 1) * sizeof(PendingCategoryEntry));
+            pendingCategoryCount--;
+            return;
+        }
+    }
+}
+
+void NotificationService::pruneStalePendingCategories(TickType_t ttlTicks)
+{
+    ScopedLock lock(mMutex);
+    const TickType_t now = xTaskGetTickCount();
+    for (size_t i = 0; i < pendingCategoryCount; ) {
+        if ((now - pendingCategoryMap[i].storedAt) > ttlTicks) {
+            memmove(&pendingCategoryMap[i], &pendingCategoryMap[i + 1],
+                    (pendingCategoryCount - i - 1) * sizeof(PendingCategoryEntry));
+            pendingCategoryCount--;
+        } else {
+            ++i;
+        }
+    }
+}
+
 void NotificationService::addNotification(notification_def const& notification, bool isCalling)
 {
     ScopedLock lock(mMutex);
@@ -347,6 +452,7 @@ void NotificationService::addNotification(notification_def const& notification, 
     else
     {
         int targetIndex = -1;
+        // Pass 1: prefer a truly empty slot.
         for (size_t i = 0; i < notificationListSize; i++)
         {
             if (notificationList[i].key == 0) { targetIndex = static_cast<int>(i); break; }
@@ -354,11 +460,41 @@ void NotificationService::addNotification(notification_def const& notification, 
         if (targetIndex != -1) {
             notificationCount++;
         } else {
-            for (size_t i = 0; i < notificationListSize; i++)
-            {
-                if (notificationList[i].showed) { targetIndex = static_cast<int>(i); break; }
+            // Pass 2: prefer evicting an already-SHOWN entry (the user has seen it,
+            // safe to discard).  Among shown entries pick the oldest by fetchStartTime
+            // so the freshest history is preserved.
+            TickType_t oldestShown = 0;
+            int oldestShownIdx = -1;
+            TickType_t oldestAny = 0;
+            int oldestAnyIdx = 0;
+            const TickType_t now = xTaskGetTickCount();
+            for (size_t i = 0; i < notificationListSize; i++) {
+                const TickType_t age = now - notificationList[i].fetchStartTime;
+                if (notificationList[i].showed) {
+                    if (oldestShownIdx == -1 || age > oldestShown) {
+                        oldestShown = age;
+                        oldestShownIdx = static_cast<int>(i);
+                    }
+                }
+                if (age > oldestAny) {
+                    oldestAny = age;
+                    oldestAnyIdx = static_cast<int>(i);
+                }
             }
-            if (targetIndex == -1) { targetIndex = 0; }
+            if (oldestShownIdx != -1) {
+                targetIndex = oldestShownIdx;
+                ESP_LOGW(TAG, "notificationList full — evicting shown slot %d (key=%08" PRIx32 ")",
+                         targetIndex,
+                         notificationList[targetIndex].key);
+            } else {
+                // Pass 3: all slots hold UNSHOWN notifications.  Evict the oldest
+                // (most likely already-stale) so the freshest, most-recent event
+                // wins — better than silently dropping the new one.  Log loudly:
+                // this is the user-visible "missed notification" condition.
+                targetIndex = oldestAnyIdx;
+                ESP_LOGE(TAG, "notificationList FULL of unshown entries — overwriting key=%08" PRIx32 " (likely missed by user)",
+                         notificationList[targetIndex].key);
+            }
         }
         notificationList[targetIndex] = notification;
         notificationList[targetIndex].fetchStartTime = xTaskGetTickCount();
@@ -455,7 +591,12 @@ notification_def* NotificationService::getNotification(uint32_t uuid)
 void NotificationService::removeCallNotification()
 {
     ScopedLock lock(mMutex);
+    // Fully reset rather than just clearing the key — leaving showed/isComplete
+    // set could trip up later isCall() / takeCallingNotification() checks if the
+    // slot is reused for a fresh incoming call.
+    callingNotification.reset();
     callingNotification.key = 0;
+    callingNotification.type = APP_UNKNOWN;
 }
 
 bool NotificationService::isCallingNotification() const
@@ -599,6 +740,24 @@ void NotificationService::handleDataSourceEvent(const uint8_t* pData, uint8_t le
     }
     else if (pData[5] == ANCS::NotificationAttributeIDAppIdentifier)
     {
+        // Critical race guard: iOS may have sent EventIDNotificationRemoved for this
+        // UUID *before* its DataSource AppIdentifier response was processed by us.
+        // In that case removeIfCall()/removeNotification() found nothing to remove
+        // and called addCancelledUUID() — we MUST honour that here, otherwise the
+        // cancelled (and especially: cancelled INCOMING-CALL) notification gets
+        // resurrected as a ghost.  A ghost call entry occupies callingNotification
+        // with key!=0 and isComplete=false, which keeps the call-state icon lit and
+        // — depending on later traffic — can prevent the user from noticing a real
+        // notification that actually did arrive.
+        if (consumeCancelledUUID(messageId)) {
+            // Also drop the pending category we stashed when EVT_PENDING_UUID was
+            // first processed — otherwise it lingers until pruneStalePendingCategories().
+            discardPendingCategory(messageId);
+            ESP_LOGI(TAG, "DataSource for cancelled UUID %08" PRIx32 " — dropped (ghost prevented)",
+                     messageId);
+            return;
+        }
+
         if (AppList.isAllowedApplication(message))
         {
             const application_def applicationType = AppList.getApplicationId(message);
@@ -633,6 +792,19 @@ void NotificationService::handleDataSourceEvent(const uint8_t* pData, uint8_t le
             ESP_LOGI(TAG, "Message from %s suppressed", message);
         }
     }
+    else
+    {
+        // Title / Message / Date arrived for a UUID we don't track.  This happens
+        // when the AppIdentifier response was lost (BLE drop, queue overflow) or
+        // when iOS removed the notification between our 4 control-point writes.
+        // Without this branch the pending category map entry would leak until the
+        // 60 s TTL prune runs; also opportunistically clear the cancelled flag so
+        // a UUID reuse later doesn't get silently suppressed.
+        discardPendingCategory(messageId);
+        (void)consumeCancelledUUID(messageId);
+        ESP_LOGD(TAG, "Orphan DataSource for UUID %08" PRIx32 " attr=%u — discarded",
+                 messageId, (unsigned)pData[5]);
+    }
 }
 
 void NotificationService::handleNotificationSourceEvent(const uint8_t* pData, uint8_t length)
@@ -652,11 +824,15 @@ void NotificationService::handleNotificationSourceEvent(const uint8_t* pData, ui
     {
         // If the UUID is not in any list it's still in the event queue waiting to be
         // fetched.  Record it as cancelled so handleDataSourceEvent doesn't re-add it
-        // after the eventual fetch runs.
+        // after the eventual fetch runs.  Also discard any pending category entry —
+        // otherwise a later DataSource AppIdentifier for this UUID would still have
+        // stale category info (this is defensive; handleDataSourceEvent now also
+        // honours the cancelled set itself and discards the pending category there).
         if (!removeIfCall(messageId) && !removeNotification(messageId))
         {
             addCancelledUUID(messageId);
         }
+        discardPendingCategory(messageId);
     }
     else if (pData[0] == ANCS::EventIDNotificationModified)
     {

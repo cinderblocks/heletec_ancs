@@ -162,7 +162,9 @@ private:
     // Maps a notification UUID to its ANCS CategoryID so that handleDataSourceEvent()
     // can correctly classify incoming calls vs. missed calls vs. other notifications
     // even though CategoryID is only available in the NotificationSource packet.
-    struct PendingCategoryEntry { uint32_t uuid; uint8_t categoryId; uint8_t eventFlags; };
+    // ``storedAt`` is used by pruneStalePendingCategories() to evict entries whose
+    // GATT fetch never delivered a DataSource response (e.g. call cancelled mid-fetch).
+    struct PendingCategoryEntry { uint32_t uuid; uint8_t categoryId; uint8_t eventFlags; TickType_t storedAt; };
     static constexpr size_t pendingCategoryMapSize = 32;
     PendingCategoryEntry pendingCategoryMap[pendingCategoryMapSize];
     size_t pendingCategoryCount = 0;
@@ -172,6 +174,13 @@ private:
     /// Remove and return the stored categoryId and eventFlags for uuid
     /// (returns categoryId=0, eventFlags=0 if not found).
     void consumePendingCategory(uint32_t uuid, uint8_t& outCategoryId, uint8_t& outEventFlags);
+    /// Discard a pending-category entry without returning its data (used when a
+    /// UUID is removed by iOS before its DataSource response arrives).
+    void discardPendingCategory(uint32_t uuid);
+    /// Evict pendingCategoryMap entries older than the given TTL.  Called from
+    /// storePendingCategory() so the map self-heals when fetches are abandoned
+    /// (e.g. caller hangs up before the AppIdentifier response is delivered).
+    void pruneStalePendingCategories(TickType_t ttlTicks);
 
     int  findNotificationIndex(uint32_t uuid) const;
     void handleDataSourceEvent(const uint8_t* data, uint8_t length);
